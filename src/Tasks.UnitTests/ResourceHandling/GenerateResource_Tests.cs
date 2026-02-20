@@ -1665,6 +1665,51 @@ namespace Microsoft.Build.UnitTests.GenerateResource_Tests.InProc
         {
             Utilities.STRNamespaceTestHelper("VB", "MyResourcesNamespace", "MySTClassNamespace", _output);
         }
+
+        /// <summary>
+        /// Verify that '=' and '`' symbols are replaced with '_' when generating strongly-typed resource properties.
+        /// </summary>
+        /// <remarks>
+        /// Regression test for https://github.com/dotnet/msbuild/issues/13061
+        /// </remarks>
+        [Theory]
+        [InlineData('=')]
+        [InlineData('`')]
+        public void StronglyTypedResourcesReplacesEqualsAndBacktickWithUnderscore(char specialChar)
+        {
+            string resourceName = $"Test{specialChar}Name";
+
+            string extraToken =
+                $"  <data name=\"{resourceName}\">\xd\xa" +
+                $"    <value>TestValue</value>\xd\xa" +
+                $"  </data>\xd\xa";
+
+            string resxFile = Utilities.WriteTestResX(false, null, extraToken);
+            GenerateResource t = Utilities.CreateTask(_output);
+            try
+            {
+                t.Sources = [new TaskItem(resxFile)];
+                t.StronglyTypedLanguage = "CSharp";
+                t.StateFile = new TaskItem(Utilities.GetTempFileName(".cache"));
+
+                Utilities.ExecuteTask(t);
+
+                t.StronglyTypedFileName.ShouldNotBeNull();
+                File.Exists(t.StronglyTypedFileName).ShouldBeTrue();
+
+                string generatedSource = File.ReadAllText(t.StronglyTypedFileName);
+                generatedSource.ShouldContain("Test_Name", customMessage: $"Expected special character '{specialChar}' (U+{(int)specialChar:X4}) to be replaced with '_' in the generated property name.");
+            }
+            finally
+            {
+                FileUtilities.DeleteNoThrow(resxFile);
+                FileUtilities.DeleteNoThrow(t.StronglyTypedFileName);
+                foreach (ITaskItem item in t.FilesWritten)
+                {
+                    FileUtilities.DeleteNoThrow(item.ItemSpec);
+                }
+            }
+        }
     }
 
     public sealed class TransformationErrors

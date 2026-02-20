@@ -74,7 +74,7 @@ namespace Microsoft.Build.Tasks
         private static readonly char[] s_charsToReplace = [' ',
         '\u00A0' /* non-breaking space */, '.', ',', ';', '|', '~', '@',
         '#', '%', '^', '&', '*', '+', '-', '/', '\\', '<', '>', '?', '[',
-        ']', '(', ')', '{', '}', '\"', '\'', ':', '!'];
+        ']', '(', ')', '{', '}', '\"', '\'', ':', '!', '=', '`'];
         private const char ReplacementChar = '_';
 
         private const String DocCommentSummaryStart = "<summary>";
