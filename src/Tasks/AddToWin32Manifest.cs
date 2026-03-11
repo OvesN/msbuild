@@ -17,8 +17,14 @@ namespace Microsoft.Build.Tasks
     /// <summary>
     /// Generates an application manifest or adds an entry to the existing one when PreferNativeArm64 property is true.
     /// </summary>
-    public sealed class AddToWin32Manifest : TaskExtension
+    [MSBuildMultiThreadableTask]
+    public sealed class AddToWin32Manifest : TaskExtension, IMultiThreadableTask
     {
+        /// <summary>
+        /// Gets or sets the task execution environment for thread-safe path resolution.
+        /// </summary>
+        public TaskEnvironment TaskEnvironment { get; set; }
+
         private const string supportedArchitectures = "supportedArchitectures";
         private const string windowsSettings = "windowsSettings";
         private const string application = "application";
@@ -88,15 +94,23 @@ namespace Microsoft.Build.Tasks
 
         private string? GetManifestPath()
         {
-            if (ApplicationManifest != null)
+            if (ApplicationManifest is { } applicationManifest)
             {
-                if (string.IsNullOrEmpty(ApplicationManifest.ItemSpec) || !FileSystems.Default.FileExists(ApplicationManifest?.ItemSpec))
+                string manifestPath = applicationManifest.ItemSpec;
+                if (string.IsNullOrEmpty(manifestPath))
                 {
-                    Log.LogErrorWithCodeFromResources(null, ApplicationManifest?.ItemSpec, 0, 0, 0, 0, "AddToWin32Manifest.SpecifiedApplicationManifestCanNotBeFound");
+                    Log.LogErrorWithCodeFromResources(null, manifestPath, 0, 0, 0, 0, "AddToWin32Manifest.SpecifiedApplicationManifestCanNotBeFound");
+                    return null;
+                }
+                
+                AbsolutePath manifestAbsolutePath = TaskEnvironment.GetAbsolutePath(manifestPath);
+                if (!FileSystems.Default.FileExists(manifestAbsolutePath))
+                {
+                    Log.LogErrorWithCodeFromResources(null, manifestPath, 0, 0, 0, 0, "AddToWin32Manifest.SpecifiedApplicationManifestCanNotBeFound");
                     return null;
                 }
 
-                return ApplicationManifest!.ItemSpec;
+                return manifestPath;
             }
 
             string? defaultManifestPath = ToolLocationHelper.GetPathToDotNetFrameworkFile(DefaultManifestName, TargetDotNetFrameworkVersion.Version46);
@@ -108,9 +122,13 @@ namespace Microsoft.Build.Tasks
         {
             // The logic for getting default manifest is similar to the one from Roslyn:
             // If Roslyn logic returns null, we fall back to reading embedded manifest.
-            return path is null
-                    ? typeof(AddToWin32Manifest).Assembly.GetManifestResourceStream($"Microsoft.Build.Tasks.Resources.{DefaultManifestName}")
-                    : File.OpenRead(path);
+            if (path is null)
+            {
+                return typeof(AddToWin32Manifest).Assembly.GetManifestResourceStream($"Microsoft.Build.Tasks.Resources.{DefaultManifestName}");
+            }
+
+            AbsolutePath manifestAbsolutePath = TaskEnvironment.GetAbsolutePath(path);
+            return File.OpenRead(manifestAbsolutePath);
         }
 
         public override bool Execute()
@@ -168,13 +186,15 @@ namespace Microsoft.Build.Tasks
 
         private void SaveManifest(XmlDocument document, string manifestName)
         {
-            ManifestPath = Path.Combine(OutputDirectory, manifestName);
-            using (var xmlWriter = new XmlTextWriter(ManifestPath, Encoding.UTF8))
-            {
-                xmlWriter.Formatting = Formatting.Indented;
-                xmlWriter.Indentation = 4;
-                document.Save(xmlWriter);
-            }
+            string manifestPath = Path.Combine(OutputDirectory, manifestName);
+            AbsolutePath manifestAbsolutePath = TaskEnvironment.GetAbsolutePath(manifestPath);
+
+            ManifestPath = manifestPath;
+            using var xmlWriter = new XmlTextWriter(manifestAbsolutePath, Encoding.UTF8);
+
+            xmlWriter.Formatting = Formatting.Indented;
+            xmlWriter.Indentation = 4;
+            document.Save(xmlWriter);
         }
 
         private ManifestValidationResult ValidateManifest(string? manifestPath, XmlDocument document, XmlNamespaceManager xmlNamespaceManager)
