@@ -354,14 +354,6 @@
     <comment>{StrBegin="MSB5029: "}UE: This is a generic message that is displayed when we find a project element that has a drive enumerating wildcard value for one of its
       attributes e.g. &lt;Compile Include="$(NotAlwaysDefined)\**\*.cs"&gt; -- if the property is undefined, the value of Include should not result in enumerating all files on drive.</comment>
   </data>
-  <data name="TaskHostBuildCallbackFailed" xml:space="preserve">
-    <value>MSB5030: TaskHost BuildProjectFile callback failed: {0}</value>
-    <comment>{StrBegin="MSB5030: "}"BuildProjectFile" and "TaskHost" are MSBuild terms and should not be localized.</comment>
-  </data>
-  <data name="TaskHostUnmatchedCallbackResponse" xml:space="preserve">
-    <value>TaskHost received callback response with no pending request. RequestId={0}, Type={1}</value>
-    <comment>"TaskHost" is an MSBuild term and should not be localized. {0} is the request ID, {1} is the packet type.</comment>
-  </data>
   <data name="LoggingBeforeTaskInitialization" xml:space="preserve">
     <value>MSB6005: Task attempted to log before it was initialized. Message was: {0}</value>
     <comment>{StrBegin="MSB6005: "}UE: This occurs if the task attempts to log something in its own constructor.</comment>

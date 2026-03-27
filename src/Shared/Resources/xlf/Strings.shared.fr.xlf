@@ -105,16 +105,6 @@
         <target state="translated">MSB5009: erreur durant l'analyse de la section de projet "{0}" ayant le GUID "{1}". Elle est située sous "{2}" mais ce projet est introuvable dans la solution.</target>
         <note>{StrBegin="MSB5009: "}UE: The solution filename is provided separately to loggers.</note>
       </trans-unit>
-      <trans-unit id="TaskHostBuildCallbackFailed">
-        <source>MSB5030: TaskHost BuildProjectFile callback failed: {0}</source>
-        <target state="new">MSB5030: TaskHost BuildProjectFile callback failed: {0}</target>
-        <note>{StrBegin="MSB5030: "}"BuildProjectFile" and "TaskHost" are MSBuild terms and should not be localized.</note>
-      </trans-unit>
-      <trans-unit id="TaskHostUnmatchedCallbackResponse">
-        <source>TaskHost received callback response with no pending request. RequestId={0}, Type={1}</source>
-        <target state="new">TaskHost received callback response with no pending request. RequestId={0}, Type={1}</target>
-        <note>"TaskHost" is an MSBuild term and should not be localized. {0} is the request ID, {1} is the packet type.</note>
-      </trans-unit>
       <trans-unit id="UnrecognizedToolsVersion">
         <source>MSB4132: The tools version "{0}" is unrecognized. Available tools versions are {1}.</source>
         <target state="translated">MSB4132: La version des outils "{0}" n'est pas reconnue. Les versions disponibles sont {1}.</target>

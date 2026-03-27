@@ -773,19 +773,10 @@ namespace Microsoft.Build.BackEnd
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                // Log with resource string so it appears in binlog and is localizable.
-                string message = ResourceUtilities.FormatResourceStringStripCodeAndKeyword("TaskHostBuildCallbackFailed", ex.Message);
-                this.BuildEngine?.LogWarningEvent(new BuildWarningEventArgs(
-                    subcategory: null,
-                    code: "MSB5030",
-                    file: null,
-                    lineNumber: 0,
-                    columnNumber: 0,
-                    endLineNumber: 0,
-                    endColumnNumber: 0,
-                    message: message,
-                    helpKeyword: null,
-                    senderName: "TaskHostTask"));
+                // Engine error state: the BuildProjectFilesInParallel call on the worker side threw.
+                // The task will see Success=false in the response and can react accordingly.
+                // Trace instead of warning to avoid surfacing engine internals to users.
+                CommunicationsUtilities.Trace("TaskHost BuildProjectFile callback failed: {0}", ex);
 
                 // Always send a response to prevent the OOP task from hanging.
                 response = new TaskHostBuildResponse(request.RequestId, false, null);
