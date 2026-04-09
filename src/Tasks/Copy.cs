@@ -280,6 +280,109 @@ namespace Microsoft.Build.Tasks
 
             if (!sourceFileState.FileExists)
             {
+                // Diagnostic: log everything we know about why FileExists returned false
+                string diagTimestamp = sourceFileState.StateCapturedAtUtc.ToString("O");
+                Exception stateEx = sourceFileState.FileStateException;
+                string filePath = sourceFileState.Path;
+                string originalPath = sourceFileState.Path.OriginalValue;
+
+                if (stateEx is not null)
+                {
+                    Log.LogMessage(MessageImportance.High,
+                        "MSB3030 diagnostic: FileExists=false for \"{0}\". StateCapturedAt={1}. Underlying exception: {2}",
+                        originalPath,
+                        diagTimestamp,
+                        stateEx.ToString());
+                }
+                else
+                {
+                    // No exception — OS genuinely reported file not found.
+                    // Double-check right now with a fresh File.Exists call.
+                    bool existsNow = File.Exists(filePath);
+                    string parentDir = System.IO.Path.GetDirectoryName(filePath);
+                    bool dirExists = Directory.Exists(parentDir);
+                    string filesInDir = "N/A";
+                    if (dirExists)
+                    {
+                        try
+                        {
+                            string[] files = Directory.GetFiles(parentDir);
+                            string targetName = System.IO.Path.GetFileName(filePath);
+                            var relevant = new System.Collections.Generic.List<string>();
+                            foreach (string f in files)
+                            {
+                                string name = System.IO.Path.GetFileName(f);
+                                if (name.Contains(System.IO.Path.GetFileNameWithoutExtension(targetName)))
+                                {
+                                    relevant.Add(name);
+                                }
+                            }
+                            filesInDir = relevant.Count > 0
+                                ? string.Join("; ", relevant)
+                                : $"(none matching, {files.Length} total files in dir)";
+                        }
+                        catch (Exception ex)
+                        {
+                            filesInDir = $"(error listing: {ex.Message})";
+                        }
+                    }
+
+                    Log.LogMessage(MessageImportance.High,
+                        "MSB3030 diagnostic: FileExists=false for \"{0}\". StateCapturedAt={1}. No exception. "
+                        + "Immediate re-check File.Exists={2}. ParentDirExists={3}. Related files in dir: [{4}]",
+                        originalPath,
+                        diagTimestamp,
+                        existsNow,
+                        dirExists,
+                        filesInDir);
+
+                    // If the immediate re-check also says false, poll a few times to see if the file reappears
+                    if (!existsNow)
+                    {
+                        for (int probe = 1; probe <= 5; probe++)
+                        {
+                            System.Threading.Thread.Sleep(200 * probe); // 200ms, 400ms, 600ms, 800ms, 1000ms
+                            bool existsAfterWait = File.Exists(filePath);
+                            Log.LogMessage(MessageImportance.High,
+                                "MSB3030 diagnostic probe {0}: after {1}ms, File.Exists={2} for \"{3}\"",
+                                probe,
+                                200 * probe,
+                                existsAfterWait,
+                                originalPath);
+                            if (existsAfterWait)
+                            {
+                                // File reappeared — log file size for extra evidence
+                                try
+                                {
+                                    var reappearedInfo = new FileInfo(filePath);
+                                    Log.LogMessage(MessageImportance.High,
+                                        "MSB3030 diagnostic: File REAPPEARED at probe {0}. Size={1} bytes, LastWriteUtc={2}",
+                                        probe,
+                                        reappearedInfo.Length,
+                                        reappearedInfo.LastWriteTimeUtc.ToString("O"));
+                                }
+                                catch (Exception ex)
+                                {
+                                    Log.LogMessage(MessageImportance.High,
+                                        "MSB3030 diagnostic: File REAPPEARED at probe {0} but could not read info: {1}",
+                                        probe,
+                                        ex.Message);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // File exists NOW but FileState said it didn't — log the time gap
+                        Log.LogMessage(MessageImportance.High,
+                            "MSB3030 diagnostic: FILE EXISTS NOW but FileState cached false! "
+                            + "Time between FileState capture and re-check: {0:F1}ms. "
+                            + "This means the file appeared between the cached check and the error.",
+                            (DateTime.UtcNow - sourceFileState.StateCapturedAtUtc).TotalMilliseconds);
+                    }
+                }
+
                 Log.LogErrorWithCodeFromResources("Copy.SourceFileNotFound", sourceFileState.Path.OriginalValue);
                 return false;
             }

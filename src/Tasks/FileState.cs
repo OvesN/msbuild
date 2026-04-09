@@ -73,6 +73,16 @@ namespace Microsoft.Build.Tasks
             private readonly Exception _exceptionThrown;
 
             /// <summary>
+            /// Exception that occurred during file state query, if any.
+            /// </summary>
+            public Exception ExceptionThrown => _exceptionThrown;
+
+            /// <summary>
+            /// The time at which this file state was captured.
+            /// </summary>
+            public readonly DateTime CapturedAtUtc;
+
+            /// <summary>
             /// Constructor gets the data for the filename.
             /// On Win32 it uses native means. Otherwise,
             /// uses standard .NET FileInfo/DirInfo
@@ -80,6 +90,7 @@ namespace Microsoft.Build.Tasks
             public FileDirInfo(string filename)
             {
                 Exists = false;
+                CapturedAtUtc = DateTime.UtcNow;
 
                 // If file/directory does not exist, return 12 midnight 1/1/1601.
                 LastWriteTimeUtc = new DateTime(1601, 1, 1);
@@ -256,6 +267,16 @@ namespace Microsoft.Build.Tasks
         /// Returns false instead of IO related exceptions.
         /// </summary>
         internal bool FileExists => !_data.Value.ThrowNonIoExceptionIfPending() && (_data.Value.Exists && !_data.Value.IsDirectory);
+
+        /// <summary>
+        /// Returns the exception that occurred when querying file state, if any.
+        /// </summary>
+        internal Exception FileStateException => _data.Value.ExceptionThrown;
+
+        /// <summary>
+        /// Returns the UTC time when the file state was captured from disk.
+        /// </summary>
+        internal DateTime StateCapturedAtUtc => _data.Value.CapturedAtUtc;
 
         /// <summary>
         /// Whether the directory exists.
