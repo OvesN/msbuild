@@ -351,35 +351,20 @@ namespace Microsoft.Build.Tasks
                                 originalPath);
                             if (existsAfterWait)
                             {
-                                // File reappeared — log file size for extra evidence
-                                try
-                                {
-                                    var reappearedInfo = new FileInfo(filePath);
-                                    Log.LogMessage(MessageImportance.High,
-                                        "MSB3030 diagnostic: File REAPPEARED at probe {0}. Size={1} bytes, LastWriteUtc={2}",
-                                        probe,
-                                        reappearedInfo.Length,
-                                        reappearedInfo.LastWriteTimeUtc.ToString("O"));
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log.LogMessage(MessageImportance.High,
-                                        "MSB3030 diagnostic: File REAPPEARED at probe {0} but could not read info: {1}",
-                                        probe,
-                                        ex.Message);
-                                }
+                                LogFileMetadata(filePath, $"REAPPEARED at probe {probe}");
                                 break;
                             }
                         }
                     }
                     else
                     {
-                        // File exists NOW but FileState said it didn't — log the time gap
+                        // File exists NOW but FileState said it didn't
+                        double gapMs = (DateTime.UtcNow - sourceFileState.StateCapturedAtUtc).TotalMilliseconds;
                         Log.LogMessage(MessageImportance.High,
                             "MSB3030 diagnostic: FILE EXISTS NOW but FileState cached false! "
-                            + "Time between FileState capture and re-check: {0:F1}ms. "
-                            + "This means the file appeared between the cached check and the error.",
-                            (DateTime.UtcNow - sourceFileState.StateCapturedAtUtc).TotalMilliseconds);
+                            + "Time between FileState capture and re-check: {0:F1}ms.",
+                            gapMs);
+                        LogFileMetadata(filePath, "exists NOW despite FileState=false");
                     }
                 }
 
@@ -482,6 +467,9 @@ namespace Microsoft.Build.Tasks
                 // Do not log a fake command line as well, as it's superfluous, and also potentially expensive
                 Log.LogMessage(MessageImportance.Normal, FileComment, sourceFileState.Path, destinationFileState.Path);
 
+                // Diagnostic: log source file metadata before copying
+                LogFileMetadata(sourceFileState.Path, "source before copy");
+
                 File.Copy(sourceFileState.Path, destinationFileState.Path, true);
             }
 
@@ -506,6 +494,42 @@ namespace Microsoft.Build.Tasks
             Log.LogMessage(MessageImportance.Normal, linkComment, sourceFileState.Path, destinationFileState.Path);
 
             linkCreated = createLink(sourceFileState.Path, destinationFileState.Path, errorMessage);
+        }
+
+        /// <summary>
+        /// Diagnostic helper: logs creation time, last write time, and size of a file.
+        /// </summary>
+        private void LogFileMetadata(string filePath, string context)
+        {
+            try
+            {
+                var info = new FileInfo(filePath);
+                if (info.Exists)
+                {
+                    Log.LogMessage(MessageImportance.High,
+                        "MSB3030 diagnostic [{0}]: \"{1}\" — CreationUtc={2}, LastWriteUtc={3}, Size={4} bytes",
+                        context,
+                        filePath,
+                        info.CreationTimeUtc.ToString("O"),
+                        info.LastWriteTimeUtc.ToString("O"),
+                        info.Length);
+                }
+                else
+                {
+                    Log.LogMessage(MessageImportance.High,
+                        "MSB3030 diagnostic [{0}]: \"{1}\" — file does NOT exist at time of metadata check",
+                        context,
+                        filePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.LogMessage(MessageImportance.High,
+                    "MSB3030 diagnostic [{0}]: \"{1}\" — error reading metadata: {2}",
+                    context,
+                    filePath,
+                    ex.Message);
+            }
         }
 
         /// <summary>
@@ -1226,6 +1250,7 @@ namespace Microsoft.Build.Tasks
         /// <returns></returns>
         public override bool Execute()
         {
+            Log.LogMessage(MessageImportance.High, "MSB3030 diagnostic: Using patched Copy task (diagnostic/copy-filestate-logging-v2, 2026-04-09)");
             return Execute(CopyFileWithLogging, s_copyInParallel);
         }
 
