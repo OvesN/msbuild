@@ -285,13 +285,15 @@ namespace Microsoft.Build.Tasks
                 Exception stateEx = sourceFileState.FileStateException;
                 string filePath = sourceFileState.Path;
                 string originalPath = sourceFileState.Path.OriginalValue;
+                string reason = sourceFileState.NonExistenceReason ?? "unknown (no reason set)";
 
                 if (stateEx is not null)
                 {
                     Log.LogMessage(MessageImportance.High,
-                        "MSB3030 diagnostic: FileExists=false for \"{0}\". StateCapturedAt={1}. Underlying exception: {2}",
+                        "MSB3030 diagnostic: FileExists=false for \"{0}\". StateCapturedAt={1}. Reason={2}. Underlying exception: {3}",
                         originalPath,
                         diagTimestamp,
+                        reason,
                         stateEx.ToString());
                 }
                 else
@@ -301,40 +303,15 @@ namespace Microsoft.Build.Tasks
                     bool existsNow = File.Exists(filePath);
                     string parentDir = System.IO.Path.GetDirectoryName(filePath);
                     bool dirExists = Directory.Exists(parentDir);
-                    string filesInDir = "N/A";
-                    if (dirExists)
-                    {
-                        try
-                        {
-                            string[] files = Directory.GetFiles(parentDir);
-                            string targetName = System.IO.Path.GetFileName(filePath);
-                            var relevant = new System.Collections.Generic.List<string>();
-                            foreach (string f in files)
-                            {
-                                string name = System.IO.Path.GetFileName(f);
-                                if (name.Contains(System.IO.Path.GetFileNameWithoutExtension(targetName)))
-                                {
-                                    relevant.Add(name);
-                                }
-                            }
-                            filesInDir = relevant.Count > 0
-                                ? string.Join("; ", relevant)
-                                : $"(none matching, {files.Length} total files in dir)";
-                        }
-                        catch (Exception ex)
-                        {
-                            filesInDir = $"(error listing: {ex.Message})";
-                        }
-                    }
 
                     Log.LogMessage(MessageImportance.High,
-                        "MSB3030 diagnostic: FileExists=false for \"{0}\". StateCapturedAt={1}. No exception. "
-                        + "Immediate re-check File.Exists={2}. ParentDirExists={3}. Related files in dir: [{4}]",
+                        "MSB3030 diagnostic: FileExists=false for \"{0}\". StateCapturedAt={1}. Reason={2}. No exception. "
+                        + "Immediate re-check File.Exists={3}. ParentDirExists={4}.",
                         originalPath,
                         diagTimestamp,
+                        reason,
                         existsNow,
-                        dirExists,
-                        filesInDir);
+                        dirExists);
 
                     // If the immediate re-check also says false, poll a few times to see if the file reappears
                     if (!existsNow)

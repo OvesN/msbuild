@@ -83,6 +83,11 @@ namespace Microsoft.Build.Tasks
             public readonly DateTime CapturedAtUtc;
 
             /// <summary>
+            /// Diagnostic: describes why Exists was set to false, if applicable.
+            /// </summary>
+            public readonly string NonExistenceReason;
+
+            /// <summary>
             /// Constructor gets the data for the filename.
             /// On Win32 it uses native means. Otherwise,
             /// uses standard .NET FileInfo/DirInfo
@@ -131,6 +136,7 @@ namespace Microsoft.Build.Tasks
                                 && _filename.Length <= NativeMethodsShared.MaxPath)
                             {
                                 Exists = false;
+                                NonExistenceReason = $"Win32 GetFileAttributesEx error={error} (2=FILE_NOT_FOUND, 3=PATH_NOT_FOUND)";
                                 return;
                             }
 
@@ -174,6 +180,12 @@ namespace Microsoft.Build.Tasks
                                 IsReadOnly = false;
                                 LastWriteTimeUtc = directoryInfo.LastWriteTimeUtc;
                             }
+                            else
+                            {
+                                NonExistenceReason = $"Linux: FileInfo.Exists=false, DirectoryInfo.Exists=false. "
+                                    + $"FileInfo.FullName={fileInfo.FullName}, "
+                                    + $"Directory.Exists({System.IO.Path.GetDirectoryName(_filename)})={Directory.Exists(System.IO.Path.GetDirectoryName(_filename))}";
+                            }
                         }
                     }
                 }
@@ -182,6 +194,7 @@ namespace Microsoft.Build.Tasks
                     // Save the exception thrown and assume the file does not exist
                     _exceptionThrown = ex;
                     Exists = false;
+                    NonExistenceReason = $"Exception caught: {ex.GetType().Name}: {ex.Message}";
                 }
                 finally
                 {
@@ -277,6 +290,11 @@ namespace Microsoft.Build.Tasks
         /// Returns the UTC time when the file state was captured from disk.
         /// </summary>
         internal DateTime StateCapturedAtUtc => _data.Value.CapturedAtUtc;
+
+        /// <summary>
+        /// Diagnostic: describes why the file was determined to not exist, if applicable.
+        /// </summary>
+        internal string NonExistenceReason => _data.Value.NonExistenceReason;
 
         /// <summary>
         /// Whether the directory exists.
