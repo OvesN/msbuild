@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using Microsoft.Build.Framework;
@@ -11,6 +10,10 @@ using Microsoft.Build.Shared;
 using Microsoft.Build.UnitTests;
 using Microsoft.Build.UnitTests.Shared;
 using Microsoft.Build.Utilities;
+using System.IO;
+#if NETFRAMEWORK
+using MicrosoftIO = Microsoft.IO;
+#endif
 using Shouldly;
 using VerifyTests;
 using VerifyXunit;
@@ -896,7 +899,7 @@ namespace InlineTask
             }
 
             RunnerUtilities.ApplyDotnetHostPathEnvironmentVariable(env);
-            var dotnetPath = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+            var dotnetPath = Environment.GetEnvironmentVariable(Constants.DotnetHostPathEnvVarName);
 
             var project = env.CreateTestProjectWithFiles("p1.proj", text);
             var logger = project.BuildProjectExpectSuccess();

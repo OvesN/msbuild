@@ -543,6 +543,39 @@ namespace Microsoft.Build.UnitTests
         }
 
         /// <summary>
+        /// Regression test for dotnet/dotnet#5433 — ClearCacheDirectory must not destroy the
+        /// ProjectImports archive before it is embedded in the binlog.
+        /// </summary>
+        [Fact]
+        public void BinlogEmbeddedImportsSurviveClearCacheDirectory()
+        {
+            string logFilePath = Path.Combine(_env.DefaultTestDirectory.Path, "test.binlog");
+
+            var collector = new ProjectImportsCollector(logFilePath, createFile: false, runOnBackground: false);
+            collector.AddFileFromMemory("testfile.proj", "<Project />");
+
+            // This is what XMake.cs does after EndBuild — wipes the cache directory.
+            FileUtilities.ClearCacheDirectory();
+
+            // ProcessResult must still read the archive after the cache dir is gone.
+            bool archiveRead = false;
+            collector.ProcessResult(
+                stream =>
+                {
+                    stream.Length.ShouldBeGreaterThan(0);
+                    archiveRead = true;
+                },
+                error => throw new InvalidOperationException(error));
+            archiveRead.ShouldBeTrue("Archive must be readable after ClearCacheDirectory");
+
+            // DeleteArchive must not throw (directory must still exist).
+            collector.DeleteArchive();
+
+            // Satisfy the fixture's expectation that _logFile exists.
+            File.WriteAllText(_logFile, string.Empty);
+        }
+
+        /// <summary>
         /// Regression test for https://github.com/dotnet/msbuild/issues/6323.
         /// </summary>
         /// <remarks>
@@ -611,7 +644,7 @@ namespace Microsoft.Build.UnitTests
                 TransientTestFile projectFile1 = env.CreateFile(testFolder, "testProject01.proj", contents);
                 string consoleOutput1 = RunnerUtilities.ExecMSBuild($"{projectFile1.Path} -bl:{_logFile} -verbosity:diag -nologo", out bool success1);
                 success1.ShouldBeTrue();
-                var expected1 = $"-nologo -bl:{_logFile} -verbosity:diag {projectFile1.Path}";
+                var expected1 = $"-bl:{_logFile} -nologo -verbosity:diag {projectFile1.Path}";
                 consoleOutput1.ShouldContain(expected1);
 
                 foreach (var verbosity in new string[] { "q", "m", "n", "d" })
@@ -619,7 +652,7 @@ namespace Microsoft.Build.UnitTests
                     TransientTestFile projectFile2 = env.CreateFile(testFolder, $"testProject_{verbosity}.proj", contents);
                     string consoleOutput2 = RunnerUtilities.ExecMSBuild($"{projectFile2.Path} -bl:{_logFile} -verbosity:{verbosity} -nologo", out bool success2);
                     success2.ShouldBeTrue();
-                    var expected2 = $"-nologo -bl:{_logFile} -verbosity:{verbosity} {projectFile2.Path}";
+                    var expected2 = $"-bl:{_logFile} -nologo -verbosity:{verbosity} {projectFile2.Path}";
                     consoleOutput2.ShouldNotContain(expected2);
                 }
             }
