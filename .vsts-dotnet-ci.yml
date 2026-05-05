@@ -20,8 +20,30 @@ variables:
   value: none
 
 jobs:
+# Fast-fail gate: every other job depends on this. A broken template reference
+# in any *.yml (e.g. caused by an arcade darc update removing eng/common/**)
+# fails the pipeline in seconds instead of after a 30+ minute build.
+- job: ValidateYamlTemplateReferences
+  displayName: "Validate YAML template references"
+  pool:
+    ${{ if eq(variables['System.TeamProject'], 'public') }}:
+      name: NetCore-Public
+      demands: ImageOverride -equals Build.Ubuntu.2204.Amd64.Open
+    ${{ if ne(variables['System.TeamProject'], 'public') }}:
+      vmImage: 'ubuntu-latest'
+  timeoutInMinutes: 5
+  steps:
+  - checkout: self
+    fetchDepth: 1
+  - task: PowerShell@2
+    displayName: "Run YAML template reference validator"
+    inputs:
+      filePath: $(Build.SourcesDirectory)/eng/Validate-YamlTemplateReferences.ps1
+      pwsh: true
+
 - job: CheckVersionBumpOnReleaseBranches
-  condition: startsWith(variables['System.PullRequest.TargetBranch'], 'vs')
+  dependsOn: ValidateYamlTemplateReferences
+  condition: and(succeeded(), startsWith(variables['System.PullRequest.TargetBranch'], 'vs'))
   displayName: "Check Version Bump On Release Branches"
   steps:
   - powershell: |
@@ -72,6 +94,7 @@ jobs:
     displayName: "Check if patch version is bumped up"
 
 - job: BootstrapMSBuildOnFullFrameworkWindows
+  dependsOn: ValidateYamlTemplateReferences
   variables:
     coverageArtifactsDir: $(Build.SourcesDirectory)/CoverageStaging
     coverageReportName: WindowsFullFrameworkCoverage
@@ -184,6 +207,7 @@ jobs:
       ArtifactName: 'Windows-on-full Verify $(System.JobAttempt)'
 
 - job: BootstrapMSBuildOnCoreWindows
+  dependsOn: ValidateYamlTemplateReferences
   displayName: "Windows Core"
   variables:
     coverageArtifactsDir: $(Build.SourcesDirectory)/CoverageStaging
@@ -268,6 +292,7 @@ jobs:
     condition: eq(variables.onlyDocChanged, 0)
 
 - job: BootstrapMSBuildWithMTMode
+  dependsOn: ValidateYamlTemplateReferences
   displayName: "Linux Core Multithreaded Mode"
   pool:
     vmImage: 'ubuntu-latest'
@@ -298,6 +323,7 @@ jobs:
     condition: always()
 
 - job: FullReleaseOnWindows
+  dependsOn: ValidateYamlTemplateReferences
   displayName: "Windows Full Release (no bootstrap)"
   variables:
     coverageArtifactsDir: $(Build.SourcesDirectory)/CoverageStaging
@@ -387,6 +413,7 @@ jobs:
     condition: eq(variables.onlyDocChanged, 0)
 
 - job: CoreBootstrappedOnLinux
+  dependsOn: ValidateYamlTemplateReferences
   displayName: "Linux Core"
   pool:
     ${{ if eq(variables['System.TeamProject'], 'public') }}:
@@ -481,6 +508,7 @@ jobs:
       ArtifactName: 'Linux Verify $(System.JobAttempt)'
 
 - job: CoreOnMac
+  dependsOn: ValidateYamlTemplateReferences
   displayName: "macOS Core"
   pool:
     vmImage: 'macOS-latest'
