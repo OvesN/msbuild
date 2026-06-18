@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Security;
 using System.Text;
 using System.Text.Json;
@@ -282,6 +283,37 @@ namespace Microsoft.Build.CommandLine
         [LoaderOptimization(LoaderOptimization.MultiDomain)]
 #endif
         public static int Main(string[] args)
+        {
+            // Thin entry point. It deliberately references no MSBuild assembly that could be present at a
+            // mismatched version (Microsoft.Build, Microsoft.Build.Framework, ...), so the JIT can always
+            // compile it even when an out-of-date sibling assembly is loaded into the process. The real startup
+            // logic lives in MainImplementation, whose JIT is deferred until it is invoked inside the try below.
+            // If a stale Microsoft.Build* assembly is loaded (for example an older Microsoft.Build.Framework on
+            // the probing path or in the GAC), the newer code reaches a member the older assembly does not
+            // contain and the runtime throws MissingMethodException/TypeLoadException while compiling startup.
+            // The exception filter catches exactly that case and prints an actionable "mismatched MSBuild
+            // binaries" message instead of letting it become an opaque crash/Watson report.
+            //
+            // Cost on the normal (success) path: one try frame and one non-inlined call. No reflection and no
+            // version probing happen unless a qualifying exception is actually thrown.
+            try
+            {
+                return MainImplementation(args);
+            }
+            catch (Exception ex) when (BinaryMismatchDetector.TryDescribeMismatch(ex, out string details))
+            {
+                return BinaryMismatchDetector.ReportAndGetExitCode(ex, details);
+            }
+        }
+
+        /// <summary>
+        /// The real application entry point, separated from <see cref="Main"/> so that its JIT compilation is
+        /// deferred into the binary-mismatch try/catch. Must stay <see cref="MethodImplOptions.NoInlining"/> so a
+        /// mismatched-assembly reference is never pulled into <see cref="Main"/>'s own JIT (which would fault
+        /// before the exception filter could run).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int MainImplementation(string[] args)
         {
             // When running on CoreCLR(.NET), insert the command executable path as the first element of the args array.
             // Use the native process path if available.
