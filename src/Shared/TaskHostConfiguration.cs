@@ -28,9 +28,31 @@ namespace Microsoft.Build.BackEnd
         private string _startupDirectory;
 
         /// <summary>
+        /// Environment transfer mode indicating that the full build process environment dictionary
+        /// is serialized on the wire (legacy behavior, used for the first config on a connection or
+        /// whenever the environment differs from the connection's last-known environment).
+        /// Only meaningful when the negotiated packet version is >= 5.
+        /// </summary>
+        internal const byte EnvironmentFull = 0;
+
+        /// <summary>
+        /// Environment transfer mode indicating that the build process environment is identical to the
+        /// connection's last-known environment, so no dictionary is serialized on the wire. The receiver
+        /// reconstructs it from the baseline it already holds for this connection.
+        /// Only meaningful when the negotiated packet version is >= 5.
+        /// </summary>
+        internal const byte EnvironmentIdentical = 1;
+
+        /// <summary>
         /// The process environment.
         /// </summary>
         private Dictionary<string, string> _buildProcessEnvironment;
+
+        /// <summary>
+        /// How <see cref="_buildProcessEnvironment"/> is represented on the wire. Defaults to
+        /// <see cref="EnvironmentFull"/> so older (legacy) code paths keep their existing behavior.
+        /// </summary>
+        private byte _environmentMode = EnvironmentFull;
 
         /// <summary>
         /// The culture
@@ -269,6 +291,28 @@ namespace Microsoft.Build.BackEnd
         }
 
         /// <summary>
+        /// How the build process environment is transferred on the wire. See <see cref="EnvironmentFull"/>
+        /// and <see cref="EnvironmentIdentical"/>. Set by the sender (per connection) when the negotiated
+        /// packet version supports environment delta transfer.
+        /// </summary>
+        internal byte EnvironmentMode
+        {
+            [DebuggerStepThrough]
+            get { return _environmentMode; }
+            [DebuggerStepThrough]
+            set { _environmentMode = value; }
+        }
+
+        /// <summary>
+        /// Fills in the build process environment after deserialization when it was sent as
+        /// <see cref="EnvironmentIdentical"/> (i.e. reconstructed from the connection's baseline).
+        /// </summary>
+        internal void SetResolvedBuildProcessEnvironment(Dictionary<string, string> environment)
+        {
+            _buildProcessEnvironment = environment;
+        }
+
+        /// <summary>
         /// The culture
         /// </summary>
         public CultureInfo Culture
@@ -466,7 +510,7 @@ namespace Microsoft.Build.BackEnd
         {
             translator.Translate(ref _nodeId);
             translator.Translate(ref _startupDirectory);
-            translator.TranslateDictionary(ref _buildProcessEnvironment, StringComparer.OrdinalIgnoreCase);
+            TranslateBuildProcessEnvironment(translator);
             translator.TranslateCulture(ref _culture);
             translator.TranslateCulture(ref _uiCulture);
 #if FEATURE_APPDOMAIN
@@ -523,6 +567,30 @@ namespace Microsoft.Build.BackEnd
             translator.Translate(collection: ref _warningsAsMessages,
                                  objectTranslator: (ITranslator t, ref string s) => t.Translate(ref s),
                                  collectionFactory: count => new HashSet<string>(count, StringComparer.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Translates the build process environment.
+        /// For negotiated packet version &gt;= 5 a one-byte <see cref="EnvironmentMode"/> precedes the
+        /// dictionary; when the mode is <see cref="EnvironmentIdentical"/> no dictionary is written and the
+        /// receiver reconstructs it from the connection's last-known environment via
+        /// <see cref="SetResolvedBuildProcessEnvironment"/>. Older versions keep the legacy full-dictionary format.
+        /// </summary>
+        private void TranslateBuildProcessEnvironment(ITranslator translator)
+        {
+            if (translator.NegotiatedPacketVersion >= 5)
+            {
+                translator.Translate(ref _environmentMode);
+
+                if (_environmentMode == EnvironmentFull)
+                {
+                    translator.TranslateDictionary(ref _buildProcessEnvironment, StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            else
+            {
+                translator.TranslateDictionary(ref _buildProcessEnvironment, StringComparer.OrdinalIgnoreCase);
+            }
         }
 
         /// <summary>

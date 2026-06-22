@@ -91,6 +91,14 @@ namespace Microsoft.Build.CommandLine
         private IDictionary<string, string> _savedEnvironment;
 
         /// <summary>
+        /// The build process environment most recently received in full from the parent on this connection.
+        /// When a <see cref="TaskHostConfiguration"/> arrives marked <see cref="TaskHostConfiguration.EnvironmentIdentical"/>
+        /// (the parent omitted the invariant environment to save IPC bytes) it is reconstructed from this baseline.
+        /// Only touched on the single packet-reading thread, so no synchronization is required.
+        /// </summary>
+        private Dictionary<string, string> _forwardEnvironmentBaseline;
+
+        /// <summary>
         /// The event which is set when we should shut down.
         /// </summary>
         private ManualResetEvent _shutdownEvent;
@@ -1174,6 +1182,12 @@ namespace Microsoft.Build.CommandLine
             }
 
             _currentConfiguration = taskHostConfiguration;
+
+            // The parent omits the (invariant) build process environment from the wire when it is unchanged
+            // from what this connection last received, to save IPC bytes. Reconstruct it from the baseline,
+            // or refresh the baseline when a full environment was sent.
+            ResolveIncomingEnvironment(taskHostConfiguration);
+
             // Create task execution context for this task
             var context = CreateTaskContext(taskHostConfiguration);
             context.State = TaskExecutionState.Executing;
@@ -1184,6 +1198,24 @@ namespace Microsoft.Build.CommandLine
             context.ExecutingThread = taskThread;
 
             taskThread.Start(context);
+        }
+
+        /// <summary>
+        /// Resolves the build process environment of an incoming configuration. When the parent marked it
+        /// <see cref="TaskHostConfiguration.EnvironmentIdentical"/> the environment was not serialized on the
+        /// wire, so it is reconstructed from this connection's baseline; otherwise the baseline is refreshed
+        /// with the full environment that was sent.
+        /// </summary>
+        private void ResolveIncomingEnvironment(TaskHostConfiguration configuration)
+        {
+            if (configuration.EnvironmentMode == TaskHostConfiguration.EnvironmentIdentical)
+            {
+                configuration.SetResolvedBuildProcessEnvironment(_forwardEnvironmentBaseline);
+            }
+            else
+            {
+                _forwardEnvironmentBaseline = configuration.BuildProcessEnvironment;
+            }
         }
 
         /// <summary>
@@ -1495,6 +1527,16 @@ namespace Microsoft.Build.CommandLine
                         _fileAccessData,
 #endif
                         currentEnvironment);
+
+                    // The build process environment is invariant for the vast majority of tasks (they don't
+                    // mutate it). When the parent supports the delta wire format and the environment is
+                    // unchanged from what we received, mark it unchanged so the (~6 KB) dictionary is not
+                    // echoed back over IPC; the parent reuses the environment it sent for this task.
+                    if (_parentPacketVersion >= 5
+                        && CommunicationsUtilities.AreEnvironmentsEquivalent(currentEnvironment, taskConfiguration.BuildProcessEnvironment))
+                    {
+                        _taskCompletePacket.EnvironmentMode = TaskHostTaskComplete.EnvironmentIdentical;
+                    }
 
 #if FEATURE_APPDOMAIN
                     foreach (TaskParameter param in taskParams.Values)

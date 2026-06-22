@@ -8,6 +8,7 @@ using Microsoft.Build.Experimental.FileAccess;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Utilities;
+using Shouldly;
 using Xunit;
 using TaskHostPacketHelpers = Microsoft.Build.UnitTests.BackEnd.TaskHostConfiguration_Tests.TaskHostPacketHelpers;
 
@@ -231,6 +232,89 @@ namespace Microsoft.Build.UnitTests.BackEnd
             ITaskItem[] deserializedItemArray = (ITaskItem[])deserializedComplete.TaskOutputParameters["TaskItemArrayValue"].WrappedParameter;
 
             TaskHostPacketHelpers.AreEqual(itemArray, deserializedItemArray);
+        }
+
+        /// <summary>
+        /// With the environment-delta wire format (packet version >= 5) and the default
+        /// <see cref="TaskHostTaskComplete.EnvironmentFull"/> mode, the build process environment
+        /// is serialized in full and round-trips correctly.
+        /// </summary>
+        [Fact]
+        public void TestTranslationEnvironmentFullRoundTripsAtVersion5()
+        {
+            Dictionary<string, string> environment = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["PATH"] = @"c:\windows;c:\windows\system32",
+                ["TEMP"] = @"c:\temp",
+            };
+
+            TaskHostTaskComplete complete = new(
+                new OutOfProcTaskHostTaskResult(TaskCompleteType.Success),
+#if FEATURE_REPORTFILEACCESSES
+                null,
+#endif
+                environment);
+            complete.EnvironmentMode.ShouldBe(TaskHostTaskComplete.EnvironmentFull);
+
+            ITranslator writeTranslator = TranslationHelpers.GetWriteTranslator();
+            writeTranslator.NegotiatedPacketVersion = 5;
+            ((ITranslatable)complete).Translate(writeTranslator);
+
+            ITranslator readTranslator = TranslationHelpers.GetReadTranslator();
+            readTranslator.NegotiatedPacketVersion = 5;
+            TaskHostTaskComplete deserializedComplete = (TaskHostTaskComplete)TaskHostTaskComplete.FactoryForDeserialization(readTranslator);
+
+            deserializedComplete.EnvironmentMode.ShouldBe(TaskHostTaskComplete.EnvironmentFull);
+            deserializedComplete.BuildProcessEnvironment.ShouldNotBeNull();
+            deserializedComplete.BuildProcessEnvironment.Count.ShouldBe(environment.Count);
+            deserializedComplete.BuildProcessEnvironment["PATH"].ShouldBe(environment["PATH"]);
+        }
+
+        /// <summary>
+        /// With the environment-delta wire format (packet version >= 5) and
+        /// <see cref="TaskHostTaskComplete.EnvironmentIdentical"/> mode, the build process environment
+        /// dictionary is omitted from the wire (saving the ~6 KB echo) and is null after deserialization;
+        /// the parent reconstructs it from the configuration it sent for the task.
+        /// </summary>
+        [Fact]
+        public void TestTranslationEnvironmentIdenticalOmitsDictionaryAtVersion5()
+        {
+            Dictionary<string, string> environment = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["PATH"] = @"c:\windows;c:\windows\system32",
+                ["TEMP"] = @"c:\temp",
+            };
+
+            TaskHostTaskComplete fullComplete = new(
+                new OutOfProcTaskHostTaskResult(TaskCompleteType.Success),
+#if FEATURE_REPORTFILEACCESSES
+                null,
+#endif
+                environment);
+            ITranslator fullWriter = TranslationHelpers.GetWriteTranslator();
+            fullWriter.NegotiatedPacketVersion = 5;
+            ((ITranslatable)fullComplete).Translate(fullWriter);
+            long fullLength = TranslationHelpers.GetWriteStreamLength();
+
+            TaskHostTaskComplete complete = new(
+                new OutOfProcTaskHostTaskResult(TaskCompleteType.Success),
+#if FEATURE_REPORTFILEACCESSES
+                null,
+#endif
+                environment);
+            complete.EnvironmentMode = TaskHostTaskComplete.EnvironmentIdentical;
+
+            ITranslator writeTranslator = TranslationHelpers.GetWriteTranslator();
+            writeTranslator.NegotiatedPacketVersion = 5;
+            ((ITranslatable)complete).Translate(writeTranslator);
+            TranslationHelpers.GetWriteStreamLength().ShouldBeLessThan(fullLength);
+
+            ITranslator readTranslator = TranslationHelpers.GetReadTranslator();
+            readTranslator.NegotiatedPacketVersion = 5;
+            TaskHostTaskComplete deserializedComplete = (TaskHostTaskComplete)TaskHostTaskComplete.FactoryForDeserialization(readTranslator);
+
+            deserializedComplete.EnvironmentMode.ShouldBe(TaskHostTaskComplete.EnvironmentIdentical);
+            deserializedComplete.BuildProcessEnvironment.ShouldBeNull();
         }
 
         /// <summary>

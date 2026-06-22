@@ -124,6 +124,13 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private byte _parentPacketVersion;
 
+        /// <summary>
+        /// The packet version negotiated for outgoing packets: the minimum of this node's supported
+        /// version and the parent's version. Stamped onto the write translator so version-gated packets
+        /// (e.g. <see cref="TaskHostTaskComplete"/>) serialize in a format the parent can read.
+        /// </summary>
+        private byte _negotiatedWriteVersion;
+
 #if NET
         /// <summary>
         /// The set of property names from handshake responsible for node version.
@@ -231,6 +238,7 @@ namespace Microsoft.Build.BackEnd
             _packetStream = new MemoryStream();
             _binaryWriter = new BinaryWriter(_packetStream);
             _parentPacketVersion = parentPacketVersion;
+            _negotiatedWriteVersion = parentPacketVersion < NodePacketTypeExtensions.PacketVersion ? parentPacketVersion : NodePacketTypeExtensions.PacketVersion;
 
             pipeName ??= NamedPipeUtil.GetPlatformSpecificPipeName();
 
@@ -768,6 +776,10 @@ namespace Microsoft.Build.BackEnd
                                 // Re-use writeTranslator; we clear _packetStream but never replace it.
                                 // If _packetStream is ever reassigned, set writeTranslator = null first.
                                 writeTranslator ??= BinaryTranslator.GetWriteTranslator(packetStream);
+
+                                // Stamp the negotiated version so version-gated packets (e.g. TaskHostTaskComplete)
+                                // are serialized in the format the parent expects. Only consumed by such packets.
+                                writeTranslator.NegotiatedPacketVersion = _negotiatedWriteVersion;
 
                                 packetStream.WriteByte((byte)packet.Type);
 

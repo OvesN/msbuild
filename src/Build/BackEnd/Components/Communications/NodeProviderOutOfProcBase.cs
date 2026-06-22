@@ -1016,6 +1016,15 @@ namespace Microsoft.Build.BackEnd
             /// </summary>
             private readonly byte _negotiatedPacketVersion;
 
+            /// <summary>
+            /// The build process environment most recently sent in full to this task-host connection.
+            /// Used to avoid re-transmitting the (invariant) environment in every <see cref="TaskHostConfiguration"/>:
+            /// when an outgoing configuration's environment matches this baseline it is sent as
+            /// <see cref="TaskHostConfiguration.EnvironmentIdentical"/> instead. Only ever touched by the
+            /// single packet-writing thread (<see cref="DrainPacketQueue"/>), so no synchronization is required.
+            /// </summary>
+            private Dictionary<string, string> _forwardEnvironmentBaseline;
+
 
 #if FEATURE_APM
             // used in BodyReadComplete callback to avoid allocations due to passing state through BeginRead
@@ -1172,6 +1181,29 @@ namespace Microsoft.Build.BackEnd
             }
 
             /// <summary>
+            /// Prepares the build process environment of an outgoing <see cref="TaskHostConfiguration"/> for
+            /// transmission. If it matches the environment last sent in full on this connection it is marked
+            /// <see cref="TaskHostConfiguration.EnvironmentIdentical"/> (no dictionary on the wire); otherwise
+            /// it is sent in full and becomes the new baseline. Runs only on the single packet-writing thread
+            /// (<see cref="DrainPacketQueue"/>), in the same order packets are written, so the parent and child
+            /// baselines stay in lock-step without additional synchronization.
+            /// </summary>
+            private void PrepareEnvironmentForSend(TaskHostConfiguration configuration)
+            {
+                Dictionary<string, string> environment = configuration.BuildProcessEnvironment;
+
+                if (_forwardEnvironmentBaseline != null && CommunicationsUtilities.AreEnvironmentsEquivalent(environment, _forwardEnvironmentBaseline))
+                {
+                    configuration.EnvironmentMode = TaskHostConfiguration.EnvironmentIdentical;
+                }
+                else
+                {
+                    configuration.EnvironmentMode = TaskHostConfiguration.EnvironmentFull;
+                    _forwardEnvironmentBaseline = environment;
+                }
+            }
+
+            /// <summary>
             /// We use a dedicated thread to avoid blocking a threadpool thread.
             /// </summary>
             /// <remarks>Usually there'll be a single packet in the queue, but sometimes
@@ -1214,6 +1246,13 @@ namespace Microsoft.Build.BackEnd
                                 // CLR4 task hosts: set version to 0 to enable version-dependent fields.
                                 // CLR2 task hosts: leave as null (default) to skip version-dependent fields.
                                 writeTranslator.NegotiatedPacketVersion = 0;
+                            }
+
+                            // When the negotiated wire format supports it, send the (invariant) build process
+                            // environment only when it changed; otherwise mark it as unchanged on the wire.
+                            if (packet is TaskHostConfiguration taskHostConfiguration && writeTranslator.NegotiatedPacketVersion >= 5)
+                            {
+                                context.PrepareEnvironmentForSend(taskHostConfiguration);
                             }
 
                             packet.Translate(writeTranslator);
@@ -1428,6 +1467,11 @@ namespace Microsoft.Build.BackEnd
                 try
                 {
                     _readBufferMemoryStream.Position = 0;
+
+                    // Stamp the negotiated version so version-gated packets (e.g. TaskHostTaskComplete,
+                    // whose return-path framing carries no extended header) deserialize in the format the
+                    // child used. Only consumed by such packets.
+                    _readTranslator.NegotiatedPacketVersion = _negotiatedPacketVersion;
                     _packetFactory.DeserializeAndRoutePacket(_nodeId, packetType, _readTranslator);
                 }
                 catch (IOException e)
