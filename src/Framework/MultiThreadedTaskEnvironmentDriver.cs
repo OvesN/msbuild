@@ -100,6 +100,15 @@ namespace Microsoft.Build.Framework
         /// <inheritdoc/>
         public void SetEnvironment(IDictionary<string, string> newEnvironment)
         {
+            // If the caller passed our own backing dictionary (e.g. the task-host environment-delta path
+            // restores the unchanged environment, which aliases this driver's dictionary in multithreaded
+            // mode), there is nothing to do. Clearing first would self-empty it, since we would then iterate
+            // the now-empty dictionary and copy nothing back.
+            if (ReferenceEquals(newEnvironment, _environmentVariables))
+            {
+                return;
+            }
+
             // Simply replace the entire environment dictionary
             _environmentVariables.Clear();
             foreach (KeyValuePair<string, string> entry in newEnvironment)
