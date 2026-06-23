@@ -1017,10 +1017,12 @@ namespace Microsoft.Build.BackEnd
             private readonly byte _negotiatedPacketVersion;
 
             /// <summary>
-            /// The build process environment most recently sent in full to this task-host connection.
+            /// A snapshot of the build process environment most recently sent in full to this task-host connection.
             /// Used to avoid re-transmitting the (invariant) environment in every <see cref="TaskHostConfiguration"/>:
             /// when an outgoing configuration's environment matches this baseline it is sent as
-            /// <see cref="TaskHostConfiguration.EnvironmentIdentical"/> instead. Only ever touched by the
+            /// <see cref="TaskHostConfiguration.EnvironmentIdentical"/> instead. This is a defensive copy rather than
+            /// an alias of the configuration's dictionary, because in multithreaded mode that dictionary is the task
+            /// environment driver's live backing store and is mutated in place between tasks. Only ever touched by the
             /// single packet-writing thread (<see cref="DrainPacketQueue"/>), so no synchronization is required.
             /// </summary>
             private Dictionary<string, string> _forwardEnvironmentBaseline;
@@ -1199,7 +1201,15 @@ namespace Microsoft.Build.BackEnd
                 else
                 {
                     configuration.EnvironmentMode = TaskHostConfiguration.EnvironmentFull;
-                    _forwardEnvironmentBaseline = environment;
+
+                    // Snapshot the environment rather than aliasing it. In multithreaded mode
+                    // configuration.BuildProcessEnvironment is the task environment driver's live backing
+                    // dictionary (returned by reference from GetEnvironmentVariables and mutated in place by
+                    // SetEnvironmentVariable). Aliasing it here would make the next configuration compare that
+                    // same instance against itself, so AreEnvironmentsEquivalent would report "identical" even
+                    // after the environment was mutated between tasks, silently sending the child a stale
+                    // environment. Copying breaks the aliasing; it only happens on the (rare) full send.
+                    _forwardEnvironmentBaseline = new Dictionary<string, string>(environment, CommunicationsUtilities.EnvironmentVariableComparer);
                 }
             }
 
