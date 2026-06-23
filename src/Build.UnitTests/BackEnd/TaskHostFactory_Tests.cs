@@ -47,8 +47,7 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
         // [InlineData(false, true)] - the process can not be spawned on CI sometimes. A new approach is needed.
         [InlineData(true, true)]
         public void TaskNodesDieAfterBuild(bool taskHostFactorySpecified, bool envVariableSpecified)
-        {
-            using (TestEnvironment env = TestEnvironment.Create())
+        {            using (TestEnvironment env = TestEnvironment.Create())
             {
                 string taskFactory = taskHostFactorySpecified ? "TaskHostFactory" : "AssemblyTaskFactory";
                 string pidTaskProject = $@"
@@ -254,6 +253,62 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
                     e.Message.ShouldNotBe($"Process with an Id of {pidSidecar} is not running");
                 }
             }
+        }
+
+        /// <summary>
+        /// Regression test for the out-of-proc task host environment-reuse optimization. When consecutive tasks
+        /// run in the same task host, the host may skip re-applying the (unchanged) build process environment
+        /// between them. This verifies that every task -- including ones whose environment apply was skipped --
+        /// still observes the build process environment, by reading a build-set environment variable from inside
+        /// the task host across several invocations and confirming they all ran in the same task host process.
+        /// </summary>
+        [Fact]
+        public void TaskHostObservesEnvironmentAcrossConsecutiveTasks()
+        {
+            using TestEnvironment env = TestEnvironment.Create(_output);
+
+            string variableName = "MSBUILD_ENV_REUSE_TEST_" + Guid.NewGuid().ToString("N");
+            const string variableValue = "reuse_value_123";
+            env.SetEnvironmentVariable(variableName, variableValue);
+            env.SetEnvironmentVariable("MSBUILDFORCEALLTASKSOUTOFPROC", "1");
+
+            string projectContents = $@"
+<Project>
+    <UsingTask TaskName=""{nameof(ReadEnvironmentVariableTask)}"" AssemblyFile=""{typeof(ReadEnvironmentVariableTask).Assembly.Location}"" TaskFactory=""TaskHostFactory"" />
+    <Target Name='Build'>
+        <{nameof(ReadEnvironmentVariableTask)} VariableName=""{variableName}"">
+            <Output PropertyName=""Value1"" TaskParameter=""Value"" />
+            <Output PropertyName=""Pid1"" TaskParameter=""Pid"" />
+        </{nameof(ReadEnvironmentVariableTask)}>
+        <{nameof(ReadEnvironmentVariableTask)} VariableName=""{variableName}"">
+            <Output PropertyName=""Value2"" TaskParameter=""Value"" />
+            <Output PropertyName=""Pid2"" TaskParameter=""Pid"" />
+        </{nameof(ReadEnvironmentVariableTask)}>
+        <{nameof(ReadEnvironmentVariableTask)} VariableName=""{variableName}"">
+            <Output PropertyName=""Value3"" TaskParameter=""Value"" />
+            <Output PropertyName=""Pid3"" TaskParameter=""Pid"" />
+        </{nameof(ReadEnvironmentVariableTask)}>
+    </Target>
+</Project>";
+
+            TransientTestFile project = env.CreateFile("envReuseProject.csproj", projectContents);
+            ProjectInstance projectInstance = new(project.Path);
+
+            projectInstance.Build().ShouldBeTrue();
+
+            // Every task invocation -- including ones whose environment apply was skipped because the environment
+            // was unchanged from the previous task -- must still observe the build-set variable.
+            projectInstance.GetPropertyValue("Value1").ShouldBe(variableValue);
+            projectInstance.GetPropertyValue("Value2").ShouldBe(variableValue);
+            projectInstance.GetPropertyValue("Value3").ShouldBe(variableValue);
+
+            // All three invocations should have run in the same task host process (so the reuse path was actually
+            // exercised) and not in the current build process.
+            string pid1 = projectInstance.GetPropertyValue("Pid1");
+            pid1.ShouldNotBeNullOrEmpty();
+            pid1.ShouldBe(projectInstance.GetPropertyValue("Pid2"));
+            pid1.ShouldBe(projectInstance.GetPropertyValue("Pid3"));
+            pid1.ShouldNotBe(Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture));
         }
 
         /// <summary>

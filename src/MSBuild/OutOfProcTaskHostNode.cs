@@ -99,6 +99,22 @@ namespace Microsoft.Build.CommandLine
         private Dictionary<string, string> _forwardEnvironmentBaseline;
 
         /// <summary>
+        /// The build process environment whose values are currently reflected in this task host process. Used to
+        /// skip the redundant per-task environment apply + restore when the next task's environment is identical
+        /// and the previous task did not mutate it. Set to <see langword="null"/> whenever a task blocks on a
+        /// callback (<see cref="SaveOperatingEnvironment"/>) or the node is reused for a new build, so nested
+        /// activity and build boundaries always force a fresh apply. Only touched on task threads while no nested
+        /// task is running (guarded by the active/blocked task counts), so no synchronization is required.
+        /// </summary>
+        private IDictionary<string, string> _lastAppliedConfigEnvironment;
+
+        /// <summary>
+        /// Whether the task host may skip re-applying/restoring an unchanged environment between tasks. Enabled by
+        /// default; opt out with MSBUILDDISABLETASKHOSTENVIRONMENTREUSE=1.
+        /// </summary>
+        private static readonly bool s_environmentReuseEnabled = !Traits.Instance.EscapeHatches.DisableTaskHostEnvironmentReuse;
+
+        /// <summary>
         /// The event which is set when we should shut down.
         /// </summary>
         private ManualResetEvent _shutdownEvent;
@@ -1131,6 +1147,11 @@ namespace Microsoft.Build.CommandLine
         {
             ArgumentNullException.ThrowIfNull(context);
 
+            // A task is about to block and let a nested task run, which may change the process environment.
+            // Invalidate the "currently applied" cache so the resuming task and the next task both perform a full
+            // apply/restore rather than trusting stale state.
+            _lastAppliedConfigEnvironment = null;
+
             context.SavedCurrentDirectory = NativeMethodsShared.GetCurrentDirectory();
             context.SavedEnvironment = new Dictionary<string, string>(
                 CommunicationsUtilities.GetEnvironmentVariables(),
@@ -1288,6 +1309,10 @@ namespace Microsoft.Build.CommandLine
         private void HandleNodeBuildComplete(NodeBuildComplete buildComplete)
         {
             Assumed.Zero(_activeTaskCount, "We should never have a task in the process of executing when we receive NodeBuildComplete.");
+
+            // When this node is reused for a later build, reset the environment-reuse cache so the first task of
+            // the next build performs a fresh apply rather than trusting state left over from this build.
+            _lastAppliedConfigEnvironment = null;
 
             // Sidecar TaskHost will persist after the build is done.
             if (_nodeReuse)
@@ -1453,14 +1478,34 @@ namespace Microsoft.Build.CommandLine
                 // Change to the startup directory
                 NativeMethodsShared.SetCurrentDirectory(taskConfiguration.StartupDirectory);
 
-                if (_updateEnvironment)
+                // Skip the (expensive) per-task environment apply when the process already reflects an identical
+                // environment from the previous task on this connection and no nested task is running (blocking
+                // clears the cache via SaveOperatingEnvironment). This avoids re-walking the whole environment for
+                // every task; the environment is invariant for the vast majority of task-host tasks.
+                bool canSkipEnvironmentApply = s_environmentReuseEnabled
+                    && _lastAppliedConfigEnvironment is not null
+                    && _blockedTaskCount == 0
+                    && _activeTaskCount == 1
+                    && CommunicationsUtilities.AreEnvironmentsEquivalent(taskConfiguration.BuildProcessEnvironment, _lastAppliedConfigEnvironment);
+
+                if (!canSkipEnvironmentApply)
                 {
-                    InitializeMismatchedEnvironmentTable(taskConfiguration.BuildProcessEnvironment);
+                    if (_updateEnvironment)
+                    {
+                        InitializeMismatchedEnvironmentTable(taskConfiguration.BuildProcessEnvironment);
+                    }
+
+                    // Now set the new environment
+                    SetTaskHostEnvironment(taskConfiguration.BuildProcessEnvironment);
+                    DotnetHostEnvironmentHelper.ClearBootstrapDotnetRootEnvironment(taskConfiguration.BuildProcessEnvironment);
                 }
 
-                // Now set the new environment
-                SetTaskHostEnvironment(taskConfiguration.BuildProcessEnvironment);
-                DotnetHostEnvironmentHelper.ClearBootstrapDotnetRootEnvironment(taskConfiguration.BuildProcessEnvironment);
+                // The process now reflects this task's environment (freshly applied or already present from the
+                // previous task). Tracked so the next identical task can skip the apply and the restore below.
+                if (s_environmentReuseEnabled)
+                {
+                    _lastAppliedConfigEnvironment = taskConfiguration.BuildProcessEnvironment;
+                }
 
                 // Set culture
                 Thread.CurrentThread.CurrentCulture = taskConfiguration.Culture;
@@ -1520,6 +1565,11 @@ namespace Microsoft.Build.CommandLine
                     IDictionary<string, string> currentEnvironment = CommunicationsUtilities.GetEnvironmentVariables();
                     currentEnvironment = UpdateEnvironmentForMainNode(currentEnvironment);
 
+                    // True when the task did not mutate the environment (in the parent's terms). Reused both for
+                    // the return-path delta and the restore-skip decision below.
+                    bool environmentUnchangedByTask =
+                        CommunicationsUtilities.AreEnvironmentsEquivalent(currentEnvironment, taskConfiguration.BuildProcessEnvironment);
+
                     taskResult ??= new OutOfProcTaskHostTaskResult(TaskCompleteType.Failure);
                     _taskCompletePacket = new TaskHostTaskComplete(
                         taskResult,
@@ -1532,8 +1582,7 @@ namespace Microsoft.Build.CommandLine
                     // mutate it). When the parent supports the delta wire format and the environment is
                     // unchanged from what we received, mark it unchanged so the (~6 KB) dictionary is not
                     // echoed back over IPC; the parent reuses the environment it sent for this task.
-                    if (_parentPacketVersion >= 5
-                        && CommunicationsUtilities.AreEnvironmentsEquivalent(currentEnvironment, taskConfiguration.BuildProcessEnvironment))
+                    if (_parentPacketVersion >= 5 && environmentUnchangedByTask)
                     {
                         _taskCompletePacket.EnvironmentMode = TaskHostTaskComplete.EnvironmentIdentical;
                     }
@@ -1546,8 +1595,22 @@ namespace Microsoft.Build.CommandLine
                     }
 #endif
 
-                    // Restore the original clean environment
-                    CommunicationsUtilities.SetEnvironment(_savedEnvironment);
+                    // Skip restoring the clean environment when the task did not mutate it and no nested task ran
+                    // (signalled by _lastAppliedConfigEnvironment still being this task's config -- it is nulled by
+                    // SaveOperatingEnvironment on blocking). The process is left holding this task's environment so
+                    // the next identical task can also skip the apply above. Otherwise restore and force a fresh
+                    // apply for the next task.
+                    bool canSkipEnvironmentRestore = s_environmentReuseEnabled
+                        && environmentUnchangedByTask
+                        && _blockedTaskCount == 0
+                        && ReferenceEquals(_lastAppliedConfigEnvironment, taskConfiguration.BuildProcessEnvironment);
+
+                    if (!canSkipEnvironmentRestore)
+                    {
+                        // Restore the original clean environment
+                        CommunicationsUtilities.SetEnvironment(_savedEnvironment);
+                        _lastAppliedConfigEnvironment = null;
+                    }
                 }
                 catch (Exception e)
                 {
