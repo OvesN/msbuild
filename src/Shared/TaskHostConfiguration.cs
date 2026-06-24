@@ -552,12 +552,49 @@ namespace Microsoft.Build.BackEnd
                 ThProfile.AddField("cfg_globalProps", globalProps);
                 ThProfile.AddField("cfg_warnings", warnings);
                 ThProfile.AddField("cfg_other", total - env - taskParams - globalProps - warnings);
+
+                // Exact serialized byte cost of the (build-invariant) CurrentSolutionConfigurationContents
+                // global property -- the dominant, dedup-able slice of cfg_globalProps. See dotnet/msbuild#14097.
+                ThProfile.AddField("cfg_solutionConfig", MeasureSolutionConfigEntryBytes(_globalParameters));
             }
 
             if (ThProfile.Enabled)
             {
                 ThProfile.AddPhase(translator.Mode == TranslationDirection.ReadFromStream ? "cfg_deserialize" : "cfg_serialize", thStart);
             }
+        }
+
+        /// <summary>
+        /// TEMPORARY measurement (#14097): returns the exact number of serialized bytes the
+        /// <c>CurrentSolutionConfigurationContents</c> entry contributes to the global-properties dictionary on the
+        /// wire (0 when absent, e.g. restore-phase configs). This mirrors the translator's per-entry serialization
+        /// -- <see cref="ITranslator"/>'s <c>TranslateDictionary</c> writes each entry as
+        /// <c>Translate(ref key); Translate(ref value)</c>, and <c>Translate(ref string)</c> writes a one-byte
+        /// nullable flag followed by <see cref="System.IO.BinaryWriter.Write(string)"/> (length-prefixed UTF-8).
+        /// Replicating those exact calls on a scratch writer yields a byte-identical figure without changing the wire,
+        /// letting us split <c>cfg_globalProps</c> into the solution-config blob vs. everything else.
+        /// </summary>
+        private static long MeasureSolutionConfigEntryBytes(Dictionary<string, string> globalProperties)
+        {
+            const string SolutionConfigKey = "CurrentSolutionConfigurationContents";
+            if (globalProperties is null || !globalProperties.TryGetValue(SolutionConfigKey, out string value) || value is null)
+            {
+                return 0;
+            }
+
+            using var stream = new System.IO.MemoryStream();
+            using var writer = new System.IO.BinaryWriter(stream);
+
+            // Translate(ref key): nullable flag (true) + length-prefixed UTF-8 key.
+            writer.Write(true);
+            writer.Write(SolutionConfigKey);
+
+            // Translate(ref value): nullable flag (true) + length-prefixed UTF-8 value.
+            writer.Write(true);
+            writer.Write(value);
+
+            writer.Flush();
+            return stream.Length;
         }
 
         /// <summary>

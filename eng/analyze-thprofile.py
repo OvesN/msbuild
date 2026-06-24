@@ -41,12 +41,20 @@ for d in sys.argv[1:]:
     print("\n--- TaskHostConfiguration content (bytes sent parent->child) ---")
     tot = bf.get('cfg_total',[0,0])
     n = tot[0]
-    print(f"{'field':<16}{'count':>8}{'total':>14}{'avg/cfg':>12}{'% of cfg':>10}")
-    for k in ['cfg_total','cfg_env','cfg_taskParams','cfg_globalProps','cfg_warnings','cfg_other']:
+    print(f"{'field':<18}{'count':>8}{'total':>14}{'avg/cfg':>12}{'% of cfg':>10}")
+    # cfg_solutionConfig is the exact serialized size of the CurrentSolutionConfigurationContents
+    # entry; it is a *subset* of cfg_globalProps (shown indented), not an extra slice of cfg_total.
+    for k in ['cfg_total','cfg_env','cfg_taskParams','cfg_globalProps','cfg_solutionConfig','cfg_warnings','cfg_other']:
         c,t = bf.get(k,[0,0])
         pct = (100.0*t/tot[1]) if tot[1] else 0
         avg = (t/c) if c else 0
-        print(f"{k:<16}{c:>8}{fmt_mb(t):>14}{avg:>10,.0f}B{pct:>9.1f}%")
+        label = ("  -> "+k) if k == 'cfg_solutionConfig' else k
+        print(f"{label:<18}{c:>8}{fmt_mb(t):>14}{avg:>10,.0f}B{pct:>9.1f}%")
+
+    gp = bf.get('cfg_globalProps',[0,0])[1]
+    sc = bf.get('cfg_solutionConfig',[0,0])[1]
+    if gp:
+        print(f"\n  CurrentSolutionConfigurationContents = {fmt_mb(sc)} = {100.0*sc/gp:.1f}% of global props, {100.0*sc/tot[1]:.1f}% of all config bytes")
 
     dedup = bf.get('cfg_env',[0,0])[1] + bf.get('cfg_globalProps',[0,0])[1] + bf.get('cfg_warnings',[0,0])[1]
     print(f"\n  dedup-able (env+globalProps+warnings) = {fmt_mb(dedup)}  = {100.0*dedup/tot[1]:.1f}% of config bytes" if tot[1] else "")
