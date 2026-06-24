@@ -1027,6 +1027,16 @@ namespace Microsoft.Build.BackEnd
             /// </summary>
             private Dictionary<string, string> _forwardEnvironmentBaseline;
 
+            /// <summary>
+            /// The CurrentSolutionConfigurationContents value most recently sent in full to this task-host
+            /// connection. Used to avoid re-transmitting the (solution-level, invariant) configuration blob in every
+            /// <see cref="TaskHostConfiguration"/>: when an outgoing configuration's value matches this baseline it is
+            /// sent as <see cref="TaskHostConfiguration.SolutionConfigIdentical"/> instead. The value is an immutable
+            /// string, so no defensive copy is needed. Only ever touched by the single packet-writing thread
+            /// (<see cref="DrainPacketQueue"/>), so no synchronization is required.
+            /// </summary>
+            private string _forwardSolutionConfigBaseline;
+
 
 #if FEATURE_APM
             // used in BodyReadComplete callback to avoid allocations due to passing state through BeginRead
@@ -1214,6 +1224,39 @@ namespace Microsoft.Build.BackEnd
             }
 
             /// <summary>
+            /// Prepares the (solution-level, invariant) CurrentSolutionConfigurationContents global property of an
+            /// outgoing <see cref="TaskHostConfiguration"/> for transmission. If it matches the value last sent in
+            /// full on this connection it is marked <see cref="TaskHostConfiguration.SolutionConfigIdentical"/> (the
+            /// large blob is omitted from the wire); otherwise it is sent in full and becomes the new baseline.
+            /// Configurations without the property (e.g. restore-phase configs) carry it in full (a null value),
+            /// which never updates the baseline. Runs only on the single packet-writing thread
+            /// (<see cref="DrainPacketQueue"/>), in the same order packets are written, so the parent and child
+            /// baselines stay in lock-step without additional synchronization.
+            /// </summary>
+            private void PrepareSolutionConfigForSend(TaskHostConfiguration configuration)
+            {
+                string value = null;
+                configuration.GlobalProperties?.TryGetValue(TaskHostConfiguration.SolutionConfigKey, out value);
+
+                if (value != null && _forwardSolutionConfigBaseline != null && string.Equals(value, _forwardSolutionConfigBaseline, StringComparison.Ordinal))
+                {
+                    configuration.SolutionConfigMode = TaskHostConfiguration.SolutionConfigIdentical;
+                }
+                else
+                {
+                    configuration.SolutionConfigMode = TaskHostConfiguration.SolutionConfigFull;
+                    configuration.SolutionConfigValue = value;
+
+                    // Only a real (non-null) value updates the baseline, so an interleaved config without the
+                    // property (e.g. a restore-phase config) does not clobber the last-known solution configuration.
+                    if (value != null)
+                    {
+                        _forwardSolutionConfigBaseline = value;
+                    }
+                }
+            }
+
+            /// <summary>
             /// We use a dedicated thread to avoid blocking a threadpool thread.
             /// </summary>
             /// <remarks>Usually there'll be a single packet in the queue, but sometimes
@@ -1263,6 +1306,13 @@ namespace Microsoft.Build.BackEnd
                             if (packet is TaskHostConfiguration taskHostConfiguration && writeTranslator.NegotiatedPacketVersion >= 5)
                             {
                                 context.PrepareEnvironmentForSend(taskHostConfiguration);
+
+                                // When the negotiated wire format supports it, deduplicate the (invariant) solution
+                                // configuration blob the same way: send it once per connection, then a marker.
+                                if (writeTranslator.NegotiatedPacketVersion >= 6)
+                                {
+                                    context.PrepareSolutionConfigForSend(taskHostConfiguration);
+                                }
                             }
 
                             packet.Translate(writeTranslator);

@@ -31,11 +31,13 @@ internal static class NodePacketTypeExtensions
     /// 4: Added IsRunningMultipleNodes, Request/ReleaseCores, BuildProjectFile callbacks support for OOP TaskHost.
     /// 5: Added build-process-environment delta transfer for TaskHostConfiguration / TaskHostTaskComplete
     ///    (the invariant environment is sent once per connection, then only an "unchanged" marker per task).
+    /// 6: Added CurrentSolutionConfigurationContents delta transfer for TaskHostConfiguration (the invariant,
+    ///    solution-level configuration blob is sent once per connection, then only an "unchanged" marker per task).
     /// 
     /// When incrementing this version, ensure compatibility with existing
     /// task hosts and update the corresponding deserialization logic.
     /// </summary>
-    public const byte PacketVersion = 5;
+    public const byte PacketVersion = 6;
 
     // Flag bits in upper 2 bits
     private const byte ExtendedHeaderFlag = 0x40;  // Bit 6: 01000000

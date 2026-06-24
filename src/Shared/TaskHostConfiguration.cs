@@ -55,6 +55,42 @@ namespace Microsoft.Build.BackEnd
         private byte _environmentMode = EnvironmentFull;
 
         /// <summary>
+        /// Solution-config transfer mode indicating that the (solution-level, invariant)
+        /// CurrentSolutionConfigurationContents global property is carried on the wire (the first config on a
+        /// connection or whenever it differs from the connection's last-known value). Only meaningful when the
+        /// negotiated packet version is &gt;= 6. The value is always carried out of the global-properties
+        /// dictionary in its own field so the dictionary on the wire never contains the large blob twice.
+        /// </summary>
+        internal const byte SolutionConfigFull = 0;
+
+        /// <summary>
+        /// Solution-config transfer mode indicating that CurrentSolutionConfigurationContents is identical to the
+        /// connection's last-known value, so it is not serialized on the wire. The receiver reconstructs it from
+        /// the baseline it already holds for this connection. Only meaningful when the negotiated packet version is &gt;= 6.
+        /// </summary>
+        internal const byte SolutionConfigIdentical = 1;
+
+        /// <summary>
+        /// The name of the (solution-level, build-invariant) global property whose value dominates the
+        /// global-properties payload and is therefore deduplicated per connection. See dotnet/msbuild#14097.
+        /// </summary>
+        internal const string SolutionConfigKey = "CurrentSolutionConfigurationContents";
+
+        /// <summary>
+        /// How the <see cref="SolutionConfigKey"/> global property is represented on the wire. Defaults to
+        /// <see cref="SolutionConfigFull"/> so the value is always carried when the sender did not run the
+        /// per-connection dedup pass (e.g. round-trip serialization in tests).
+        /// </summary>
+        private byte _solutionConfigMode = SolutionConfigFull;
+
+        /// <summary>
+        /// The CurrentSolutionConfigurationContents value carried in its own field (extracted from the global
+        /// properties dictionary on the wire). Non-null only when <see cref="_solutionConfigMode"/> is
+        /// <see cref="SolutionConfigFull"/> and the property is present.
+        /// </summary>
+        private string _solutionConfigValue;
+
+        /// <summary>
         /// The culture
         /// </summary>
         private CultureInfo _culture = CultureInfo.CurrentCulture;
@@ -313,6 +349,44 @@ namespace Microsoft.Build.BackEnd
         }
 
         /// <summary>
+        /// How the <see cref="SolutionConfigKey"/> global property is transferred on the wire. See
+        /// <see cref="SolutionConfigFull"/> and <see cref="SolutionConfigIdentical"/>. Set by the sender (per
+        /// connection) when the negotiated packet version supports solution-config delta transfer.
+        /// </summary>
+        internal byte SolutionConfigMode
+        {
+            [DebuggerStepThrough]
+            get { return _solutionConfigMode; }
+            [DebuggerStepThrough]
+            set { _solutionConfigMode = value; }
+        }
+
+        /// <summary>
+        /// The <see cref="SolutionConfigKey"/> value carried in its own field. Set by the sender when the value
+        /// is sent in full (<see cref="SolutionConfigFull"/>); read by the receiver to refresh its connection baseline.
+        /// </summary>
+        internal string SolutionConfigValue
+        {
+            [DebuggerStepThrough]
+            get { return _solutionConfigValue; }
+            [DebuggerStepThrough]
+            set { _solutionConfigValue = value; }
+        }
+
+        /// <summary>
+        /// Re-inserts the <see cref="SolutionConfigKey"/> global property after deserialization when it was sent as
+        /// <see cref="SolutionConfigIdentical"/> (i.e. reconstructed from the connection's baseline). No-op when the
+        /// value or the global-properties dictionary is null.
+        /// </summary>
+        internal void ApplyResolvedSolutionConfig(string value)
+        {
+            if (value != null && _globalParameters != null)
+            {
+                _globalParameters[SolutionConfigKey] = value;
+            }
+        }
+
+        /// <summary>
         /// The culture
         /// </summary>
         public CultureInfo Culture
@@ -557,7 +631,7 @@ namespace Microsoft.Build.BackEnd
             translator.Translate(ref _isTaskInputLoggingEnabled);
             translator.TranslateDictionary(ref _taskParameters, StringComparer.OrdinalIgnoreCase, TaskParameter.FactoryForDeserialization);
             translator.Translate(ref _continueOnError);
-            translator.TranslateDictionary(ref _globalParameters, StringComparer.OrdinalIgnoreCase);
+            TranslateGlobalProperties(translator);
             translator.Translate(collection: ref _warningsAsErrors,
                                  objectTranslator: (ITranslator t, ref string s) => t.Translate(ref s),
                                  collectionFactory: count => new HashSet<string>(count, StringComparer.OrdinalIgnoreCase));
@@ -591,6 +665,125 @@ namespace Microsoft.Build.BackEnd
             {
                 translator.TranslateDictionary(ref _buildProcessEnvironment, StringComparer.OrdinalIgnoreCase);
             }
+        }
+
+        /// <summary>
+        /// Translates the global properties dictionary, deduplicating the (solution-level, build-invariant)
+        /// <see cref="SolutionConfigKey"/> value per connection. For negotiated packet version &gt;= 6 the value is
+        /// carried in its own field (so the dictionary on the wire never contains the large blob), preceded by a
+        /// one-byte <see cref="SolutionConfigMode"/>: <see cref="SolutionConfigFull"/> serializes the value once,
+        /// <see cref="SolutionConfigIdentical"/> omits it and the receiver reconstructs it from the connection's
+        /// baseline via <see cref="ApplyResolvedSolutionConfig"/>. Older versions keep the legacy full-dictionary format.
+        /// </summary>
+        private void TranslateGlobalProperties(ITranslator translator)
+        {
+            if (translator.NegotiatedPacketVersion >= 6)
+            {
+                if (translator.Mode == TranslationDirection.WriteToStream)
+                {
+                    // When sending the value in full, make sure the field is populated from the dictionary even if
+                    // the sender did not run the per-connection dedup pass (e.g. round-trip serialization in tests).
+                    if (_solutionConfigMode == SolutionConfigFull && _solutionConfigValue is null && _globalParameters is not null)
+                    {
+                        _globalParameters.TryGetValue(SolutionConfigKey, out _solutionConfigValue);
+                    }
+
+                    translator.Translate(ref _solutionConfigMode);
+
+                    if (_solutionConfigMode == SolutionConfigFull)
+                    {
+                        translator.Translate(ref _solutionConfigValue);
+                    }
+
+                    WriteGlobalPropertiesExcludingSolutionConfig(translator);
+                }
+                else
+                {
+                    translator.Translate(ref _solutionConfigMode);
+
+                    if (_solutionConfigMode == SolutionConfigFull)
+                    {
+                        translator.Translate(ref _solutionConfigValue);
+                    }
+
+                    ReadGlobalProperties(translator);
+
+                    // A full send is self-contained: re-insert the value so the dictionary is complete after
+                    // deserialization. An identical send is reconstructed later from the connection baseline
+                    // (the receiver calls ApplyResolvedSolutionConfig).
+                    if (_solutionConfigMode == SolutionConfigFull)
+                    {
+                        ApplyResolvedSolutionConfig(_solutionConfigValue);
+                    }
+                }
+            }
+            else
+            {
+                translator.TranslateDictionary(ref _globalParameters, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>
+        /// Serializes <see cref="_globalParameters"/> in the same wire format as
+        /// <c>ITranslator.TranslateDictionary</c> but omitting the <see cref="SolutionConfigKey"/> entry, which is
+        /// carried separately. Write side only.
+        /// </summary>
+        private void WriteGlobalPropertiesExcludingSolutionConfig(ITranslator translator)
+        {
+            // Mirror TranslateDictionary's nullable + count + per-entry (key, value) format.
+            if (!translator.TranslateNullable(_globalParameters))
+            {
+                return;
+            }
+
+            int count = _globalParameters.Count;
+            if (_globalParameters.ContainsKey(SolutionConfigKey))
+            {
+                count--;
+            }
+
+            translator.Translate(ref count);
+
+            foreach (KeyValuePair<string, string> pair in _globalParameters)
+            {
+                if (string.Equals(pair.Key, SolutionConfigKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string key = pair.Key;
+                string value = pair.Value;
+                translator.Translate(ref key);
+                translator.Translate(ref value);
+            }
+        }
+
+        /// <summary>
+        /// Deserializes <see cref="_globalParameters"/> written by <see cref="WriteGlobalPropertiesExcludingSolutionConfig"/>
+        /// (i.e. without the <see cref="SolutionConfigKey"/> entry). Read side only.
+        /// </summary>
+        private void ReadGlobalProperties(ITranslator translator)
+        {
+            if (!translator.TranslateNullable(_globalParameters))
+            {
+                _globalParameters = null;
+                return;
+            }
+
+            int count = 0;
+            translator.Translate(ref count);
+
+            Dictionary<string, string> dictionary = new Dictionary<string, string>(count, StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < count; i++)
+            {
+                string key = null;
+                string value = null;
+                translator.Translate(ref key);
+                translator.Translate(ref value);
+                dictionary[key] = value;
+            }
+
+            _globalParameters = dictionary;
         }
 
         /// <summary>

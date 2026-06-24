@@ -787,6 +787,114 @@ namespace Microsoft.Build.UnitTests.BackEnd
             deserializedConfig.BuildProcessEnvironment.ShouldBe(environment);
         }
 
+        /// <summary>
+        /// With the solution-config delta wire format (packet version >= 6) and the default
+        /// <see cref="TaskHostConfiguration.SolutionConfigFull"/> mode, the CurrentSolutionConfigurationContents
+        /// global property is carried in its own field (out of the dictionary) and round-trips correctly.
+        /// </summary>
+        [Fact]
+        public void TestTranslationSolutionConfigFullRoundTripsAtVersion6()
+        {
+            const string solutionConfigValue = "<SolutionConfiguration><ProjectConfiguration>Debug|AnyCPU</ProjectConfiguration></SolutionConfiguration>";
+            Dictionary<string, string> globalProperties = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Configuration"] = "Debug",
+                [TaskHostConfiguration.SolutionConfigKey] = solutionConfigValue,
+            };
+
+            TaskHostConfiguration config = CreateConfigurationWithGlobalProperties(globalProperties);
+            config.SolutionConfigMode.ShouldBe(TaskHostConfiguration.SolutionConfigFull);
+
+            ITranslator writeTranslator = TranslationHelpers.GetWriteTranslator();
+            writeTranslator.NegotiatedPacketVersion = 6;
+            ((ITranslatable)config).Translate(writeTranslator);
+
+            ITranslator readTranslator = TranslationHelpers.GetReadTranslator();
+            readTranslator.NegotiatedPacketVersion = 6;
+            TaskHostConfiguration deserializedConfig = (TaskHostConfiguration)TaskHostConfiguration.FactoryForDeserialization(readTranslator);
+
+            deserializedConfig.SolutionConfigMode.ShouldBe(TaskHostConfiguration.SolutionConfigFull);
+            deserializedConfig.GlobalProperties.ShouldNotBeNull();
+            deserializedConfig.GlobalProperties.Count.ShouldBe(globalProperties.Count);
+            deserializedConfig.GlobalProperties["Configuration"].ShouldBe("Debug");
+            deserializedConfig.GlobalProperties[TaskHostConfiguration.SolutionConfigKey].ShouldBe(solutionConfigValue);
+        }
+
+        /// <summary>
+        /// With the solution-config delta wire format (packet version >= 6) and
+        /// <see cref="TaskHostConfiguration.SolutionConfigIdentical"/> mode, the CurrentSolutionConfigurationContents
+        /// value is omitted from the wire (saving bytes) and the receiver reconstructs it from the connection's
+        /// baseline via <see cref="TaskHostConfiguration.ApplyResolvedSolutionConfig"/>.
+        /// </summary>
+        [Fact]
+        public void TestTranslationSolutionConfigIdenticalOmitsBlobAtVersion6()
+        {
+            // A large, representative blob so the "Identical" form is clearly smaller on the wire.
+            string solutionConfigValue = "<SolutionConfiguration>" + string.Concat(Enumerable.Repeat(
+                "<ProjectConfiguration Project=\"{GUID}\" AbsolutePath=\"c:\\repo\\project.csproj\">Debug|AnyCPU</ProjectConfiguration>", 50)) + "</SolutionConfiguration>";
+            Dictionary<string, string> globalProperties = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Configuration"] = "Debug",
+                [TaskHostConfiguration.SolutionConfigKey] = solutionConfigValue,
+            };
+
+            // Serialize the same config both ways to prove the "Identical" form is smaller on the wire.
+            TaskHostConfiguration fullConfig = CreateConfigurationWithGlobalProperties(globalProperties);
+            ITranslator fullWriter = TranslationHelpers.GetWriteTranslator();
+            fullWriter.NegotiatedPacketVersion = 6;
+            ((ITranslatable)fullConfig).Translate(fullWriter);
+            long fullLength = TranslationHelpers.GetWriteStreamLength();
+
+            TaskHostConfiguration identicalConfig = CreateConfigurationWithGlobalProperties(globalProperties);
+            identicalConfig.SolutionConfigMode = TaskHostConfiguration.SolutionConfigIdentical;
+
+            ITranslator writeTranslator = TranslationHelpers.GetWriteTranslator();
+            writeTranslator.NegotiatedPacketVersion = 6;
+            ((ITranslatable)identicalConfig).Translate(writeTranslator);
+            TranslationHelpers.GetWriteStreamLength().ShouldBeLessThan(fullLength);
+
+            ITranslator readTranslator = TranslationHelpers.GetReadTranslator();
+            readTranslator.NegotiatedPacketVersion = 6;
+            TaskHostConfiguration deserializedConfig = (TaskHostConfiguration)TaskHostConfiguration.FactoryForDeserialization(readTranslator);
+
+            // The blob was not on the wire, so the dictionary holds only the other properties until reconstructed.
+            deserializedConfig.SolutionConfigMode.ShouldBe(TaskHostConfiguration.SolutionConfigIdentical);
+            deserializedConfig.GlobalProperties.ShouldNotBeNull();
+            deserializedConfig.GlobalProperties.ContainsKey(TaskHostConfiguration.SolutionConfigKey).ShouldBeFalse();
+            deserializedConfig.GlobalProperties["Configuration"].ShouldBe("Debug");
+
+            deserializedConfig.ApplyResolvedSolutionConfig(solutionConfigValue);
+            deserializedConfig.GlobalProperties[TaskHostConfiguration.SolutionConfigKey].ShouldBe(solutionConfigValue);
+        }
+
+        private TaskHostConfiguration CreateConfigurationWithGlobalProperties(Dictionary<string, string> globalProperties)
+        {
+            return new TaskHostConfiguration(
+                nodeId: 1,
+                startupDirectory: Directory.GetCurrentDirectory(),
+                buildProcessEnvironment: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = @"c:\windows" },
+                culture: Thread.CurrentThread.CurrentCulture,
+                uiCulture: Thread.CurrentThread.CurrentUICulture,
+                hostServices: null,
+#if FEATURE_APPDOMAIN
+                appDomainSetup: null,
+#endif
+                lineNumberOfTask: 1,
+                columnNumberOfTask: 1,
+                projectFileOfTask: @"c:\my project\myproj.proj",
+                targetName: "TargetName",
+                projectFile: "proj.proj",
+                continueOnError: _continueOnErrorDefault,
+                taskName: "TaskName",
+                taskLocation: @"c:\MyTasks\MyTask.dll",
+                isTaskInputLoggingEnabled: false,
+                taskParameters: new Dictionary<string, object>(),
+                globalParameters: globalProperties,
+                warningsAsErrors: null,
+                warningsNotAsErrors: null,
+                warningsAsMessages: null);
+        }
+
         private TaskHostConfiguration CreateConfigurationWithEnvironment(Dictionary<string, string> environment)
         {
             return new TaskHostConfiguration(

@@ -99,6 +99,15 @@ namespace Microsoft.Build.CommandLine
         private Dictionary<string, string> _forwardEnvironmentBaseline;
 
         /// <summary>
+        /// The CurrentSolutionConfigurationContents value most recently received in full from the parent on this
+        /// connection. When a <see cref="TaskHostConfiguration"/> arrives marked
+        /// <see cref="TaskHostConfiguration.SolutionConfigIdentical"/> (the parent omitted the invariant solution
+        /// configuration blob to save IPC bytes) it is reconstructed from this baseline. Only touched on the single
+        /// packet-reading thread, so no synchronization is required.
+        /// </summary>
+        private string _forwardSolutionConfigBaseline;
+
+        /// <summary>
         /// The build process environment whose values are currently reflected in this task host process. Used to
         /// skip the redundant per-task environment apply + restore when the next task's environment is identical
         /// and the previous task did not mutate it. Set to <see langword="null"/> whenever a task blocks on a
@@ -1203,6 +1212,9 @@ namespace Microsoft.Build.CommandLine
             // or refresh the baseline when a full environment was sent.
             ResolveIncomingEnvironment(taskHostConfiguration);
 
+            // Likewise for the (invariant) solution configuration blob inside the global properties.
+            ResolveIncomingSolutionConfig(taskHostConfiguration);
+
             // Create task execution context for this task
             var context = CreateTaskContext(taskHostConfiguration);
             context.State = TaskExecutionState.Executing;
@@ -1230,6 +1242,25 @@ namespace Microsoft.Build.CommandLine
             else
             {
                 _forwardEnvironmentBaseline = configuration.BuildProcessEnvironment;
+            }
+        }
+
+        /// <summary>
+        /// Resolves the CurrentSolutionConfigurationContents global property of an incoming configuration. When the
+        /// parent marked it <see cref="TaskHostConfiguration.SolutionConfigIdentical"/> the value was not serialized
+        /// on the wire, so it is re-inserted into the global properties from this connection's baseline; otherwise
+        /// the baseline is refreshed with the full value that was sent (the configuration already re-inserted it
+        /// during deserialization).
+        /// </summary>
+        private void ResolveIncomingSolutionConfig(TaskHostConfiguration configuration)
+        {
+            if (configuration.SolutionConfigMode == TaskHostConfiguration.SolutionConfigIdentical)
+            {
+                configuration.ApplyResolvedSolutionConfig(_forwardSolutionConfigBaseline);
+            }
+            else if (configuration.SolutionConfigValue != null)
+            {
+                _forwardSolutionConfigBaseline = configuration.SolutionConfigValue;
             }
         }
 
