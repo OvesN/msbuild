@@ -374,13 +374,6 @@ namespace Microsoft.Build.Framework
         public readonly bool ReuseTaskHostNodes = Environment.GetEnvironmentVariable("MSBUILDREUSETASKHOSTNODES") == "1";
 
         /// <summary>
-        /// Disables the optimization that lets an out-of-proc task host skip re-applying and restoring the build
-        /// process environment between tasks when it is unchanged. Set MSBUILDDISABLETASKHOSTENVIRONMENTREUSE=1 to
-        /// force the task host to apply and restore the environment on every task (the pre-optimization behavior).
-        /// </summary>
-        public readonly bool DisableTaskHostEnvironmentReuse = Environment.GetEnvironmentVariable("MSBUILDDISABLETASKHOSTENVIRONMENTREUSE") == "1";
-
-        /// <summary>
         /// Whether or not to ignore imports that are considered empty.  See ProjectRootElement.IsEmptyXmlFile() for more info.
         /// </summary>
         public readonly bool IgnoreEmptyImports = Environment.GetEnvironmentVariable("MSBUILDIGNOREEMPTYIMPORTS") == "1";

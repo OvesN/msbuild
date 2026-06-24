@@ -109,12 +109,6 @@ namespace Microsoft.Build.CommandLine
         private IDictionary<string, string> _lastAppliedConfigEnvironment;
 
         /// <summary>
-        /// Whether the task host may skip re-applying/restoring an unchanged environment between tasks. Enabled by
-        /// default; opt out with MSBUILDDISABLETASKHOSTENVIRONMENTREUSE=1.
-        /// </summary>
-        private static readonly bool s_environmentReuseEnabled = !Traits.Instance.EscapeHatches.DisableTaskHostEnvironmentReuse;
-
-        /// <summary>
         /// The event which is set when we should shut down.
         /// </summary>
         private ManualResetEvent _shutdownEvent;
@@ -1482,8 +1476,7 @@ namespace Microsoft.Build.CommandLine
                 // environment from the previous task on this connection and no nested task is running (blocking
                 // clears the cache via SaveOperatingEnvironment). This avoids re-walking the whole environment for
                 // every task; the environment is invariant for the vast majority of task-host tasks.
-                bool canSkipEnvironmentApply = s_environmentReuseEnabled
-                    && _lastAppliedConfigEnvironment is not null
+                bool canSkipEnvironmentApply = _lastAppliedConfigEnvironment is not null
                     && _blockedTaskCount == 0
                     && _activeTaskCount == 1
                     && CommunicationsUtilities.AreEnvironmentsEquivalent(taskConfiguration.BuildProcessEnvironment, _lastAppliedConfigEnvironment);
@@ -1502,10 +1495,7 @@ namespace Microsoft.Build.CommandLine
 
                 // The process now reflects this task's environment (freshly applied or already present from the
                 // previous task). Tracked so the next identical task can skip the apply and the restore below.
-                if (s_environmentReuseEnabled)
-                {
-                    _lastAppliedConfigEnvironment = taskConfiguration.BuildProcessEnvironment;
-                }
+                _lastAppliedConfigEnvironment = taskConfiguration.BuildProcessEnvironment;
 
                 // Set culture
                 Thread.CurrentThread.CurrentCulture = taskConfiguration.Culture;
@@ -1600,8 +1590,7 @@ namespace Microsoft.Build.CommandLine
                     // SaveOperatingEnvironment on blocking). The process is left holding this task's environment so
                     // the next identical task can also skip the apply above. Otherwise restore and force a fresh
                     // apply for the next task.
-                    bool canSkipEnvironmentRestore = s_environmentReuseEnabled
-                        && environmentUnchangedByTask
+                    bool canSkipEnvironmentRestore = environmentUnchangedByTask
                         && _blockedTaskCount == 0
                         && ReferenceEquals(_lastAppliedConfigEnvironment, taskConfiguration.BuildProcessEnvironment);
 
