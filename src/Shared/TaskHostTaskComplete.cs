@@ -8,6 +8,7 @@ using System.Diagnostics;
 using Microsoft.Build.Experimental.FileAccess;
 #endif
 using Microsoft.Build.Shared;
+using Microsoft.Build.Internal;
 
 #nullable disable
 
@@ -271,12 +272,22 @@ namespace Microsoft.Build.BackEnd
         /// <param name="translator">The translator to use.</param>
         public void Translate(ITranslator translator)
         {
+            long thStart = ThProfile.Now();
+            // Byte positions are readable only on the write side (the read pipe is non-seekable).
+            // The serialized byte count is identical either way. See dotnet/msbuild#14097.
+            bool prof = ThProfile.Enabled && translator.Mode == TranslationDirection.WriteToStream;
+            long Pos() => translator.Writer.BaseStream.Position;
+            long p0 = prof ? Pos() : 0;
+
             translator.TranslateEnum(ref _taskResult, (int)_taskResult);
             translator.TranslateException(ref _taskException);
             translator.Translate(ref _taskExceptionMessage);
             translator.Translate(ref _taskExceptionMessageArgs);
+            long pBeforeOutputs = prof ? Pos() : 0;
             translator.TranslateDictionary(ref _taskOutputParameters, StringComparer.OrdinalIgnoreCase, TaskParameter.FactoryForDeserialization);
+            long pBeforeEnv = prof ? Pos() : 0;
             TranslateBuildProcessEnvironment(translator);
+            long pAfterEnv = prof ? Pos() : 0;
 #if FEATURE_REPORTFILEACCESSES
             translator.Translate(ref _fileAccessData,
                 (ITranslator translator, ref FileAccessData data) => ((ITranslatable)data).Translate(translator));
@@ -284,6 +295,21 @@ namespace Microsoft.Build.BackEnd
             bool hasFileAccessData = false;
             translator.Translate(ref hasFileAccessData);
 #endif
+
+            if (prof)
+            {
+                long pEnd = Pos();
+                long total = pEnd - p0;
+                long outputs = pBeforeEnv - pBeforeOutputs;
+                long env = pAfterEnv - pBeforeEnv;
+                long other = total - outputs - env;
+                ThProfile.AddField("res_total", total);
+                ThProfile.AddField("res_outputs", outputs);
+                ThProfile.AddField("res_env", env);
+                ThProfile.AddField("res_other", other);
+            }
+
+            ThProfile.AddPhase(translator.Mode == TranslationDirection.WriteToStream ? "res_serialize" : "res_deserialize", thStart);
         }
 
         /// <summary>

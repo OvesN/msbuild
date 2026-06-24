@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Internal;
 
 #nullable disable
 
@@ -89,6 +90,13 @@ namespace Microsoft.Build.BackEnd
         /// <see cref="SolutionConfigFull"/> and the property is present.
         /// </summary>
         private string _solutionConfigValue;
+
+        /// <summary>
+        /// TEMPORARY measurement (#14097): the actual on-the-wire byte cost of the
+        /// <see cref="SolutionConfigKey"/> value (mode byte plus the value only when sent in full), captured on the
+        /// write side of <see cref="TranslateGlobalProperties"/>. Not serialized; reported as <c>cfg_solutionConfig</c>.
+        /// </summary>
+        private long _measuredSolutionConfigWireBytes;
 
         /// <summary>
         /// The culture
@@ -582,9 +590,18 @@ namespace Microsoft.Build.BackEnd
         /// <param name="translator">The translator to use.</param>
         public void Translate(ITranslator translator)
         {
+            long thStart = ThProfile.Now();
+            // Byte positions are readable only on the write side (the MemoryStream is seekable; the read
+            // pipe is not). The serialized byte count is identical either way. See dotnet/msbuild#14097.
+            bool prof = ThProfile.Enabled && translator.Mode == TranslationDirection.WriteToStream;
+            long Pos() => translator.Writer.BaseStream.Position;
+            long p0 = prof ? Pos() : 0;
+
             translator.Translate(ref _nodeId);
             translator.Translate(ref _startupDirectory);
+            long pBeforeEnv = prof ? Pos() : 0;
             TranslateBuildProcessEnvironment(translator);
+            long pAfterEnv = prof ? Pos() : 0;
             translator.TranslateCulture(ref _culture);
             translator.TranslateCulture(ref _uiCulture);
 #if FEATURE_APPDOMAIN
@@ -629,9 +646,13 @@ namespace Microsoft.Build.BackEnd
 #endif
 
             translator.Translate(ref _isTaskInputLoggingEnabled);
+            long pBeforeTaskParams = prof ? Pos() : 0;
             translator.TranslateDictionary(ref _taskParameters, StringComparer.OrdinalIgnoreCase, TaskParameter.FactoryForDeserialization);
+            long pAfterTaskParams = prof ? Pos() : 0;
             translator.Translate(ref _continueOnError);
+            long pBeforeGlobalProps = prof ? Pos() : 0;
             TranslateGlobalProperties(translator);
+            long pBeforeWarnings = prof ? Pos() : 0;
             translator.Translate(collection: ref _warningsAsErrors,
                                  objectTranslator: (ITranslator t, ref string s) => t.Translate(ref s),
                                  collectionFactory: count => new HashSet<string>(count, StringComparer.OrdinalIgnoreCase));
@@ -641,6 +662,30 @@ namespace Microsoft.Build.BackEnd
             translator.Translate(collection: ref _warningsAsMessages,
                                  objectTranslator: (ITranslator t, ref string s) => t.Translate(ref s),
                                  collectionFactory: count => new HashSet<string>(count, StringComparer.OrdinalIgnoreCase));
+
+            if (prof)
+            {
+                long pEnd = Pos();
+                long total = pEnd - p0;
+                long env = pAfterEnv - pBeforeEnv;
+                long taskParams = pAfterTaskParams - pBeforeTaskParams;
+                long globalProps = pBeforeWarnings - pBeforeGlobalProps;
+                long warnings = pEnd - pBeforeWarnings;
+                long other = total - env - taskParams - globalProps - warnings;
+                ThProfile.AddField("cfg_total", total);
+                ThProfile.AddField("cfg_env", env);
+                ThProfile.AddField("cfg_taskParams", taskParams);
+                ThProfile.AddField("cfg_globalProps", globalProps);
+                ThProfile.AddField("cfg_warnings", warnings);
+                ThProfile.AddField("cfg_other", other);
+
+                // Actual on-the-wire byte cost of the CurrentSolutionConfigurationContents value after the
+                // per-connection dedup (the mode byte plus the value only when sent in full). Compare against the
+                // baseline branch, where the same field measures the full blob sent on every config. See #14097.
+                ThProfile.AddField("cfg_solutionConfig", _measuredSolutionConfigWireBytes);
+            }
+
+            ThProfile.AddPhase(translator.Mode == TranslationDirection.WriteToStream ? "cfg_serialize" : "cfg_deserialize", thStart);
         }
 
         /// <summary>
@@ -688,11 +733,18 @@ namespace Microsoft.Build.BackEnd
                         _globalParameters.TryGetValue(SolutionConfigKey, out _solutionConfigValue);
                     }
 
+                    long scStart = ThProfile.Enabled ? translator.Writer.BaseStream.Position : 0;
+
                     translator.Translate(ref _solutionConfigMode);
 
                     if (_solutionConfigMode == SolutionConfigFull)
                     {
                         translator.Translate(ref _solutionConfigValue);
+                    }
+
+                    if (ThProfile.Enabled)
+                    {
+                        _measuredSolutionConfigWireBytes = translator.Writer.BaseStream.Position - scStart;
                     }
 
                     WriteGlobalPropertiesExcludingSolutionConfig(translator);
