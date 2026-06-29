@@ -1020,12 +1020,13 @@ namespace Microsoft.Build.BackEnd
             private Dictionary<string, string> _forwardEnvironmentBaseline;
 
             /// <summary>
-            /// The CurrentSolutionConfigurationContents value most recently sent in full to this task-host
-            /// connection. Used to avoid re-transmitting the configuration blob in every
-            /// <see cref="TaskHostConfiguration"/>: when an outgoing configuration's value matches this baseline it is
-            /// sent as <see cref="InvariantPayloadTransfer.Identical"/> instead.
+            /// A snapshot of the global properties most recently sent in full to this task-host connection.
+            /// Used to avoid re-transmitting the (largely invariant) global properties in every
+            /// <see cref="TaskHostConfiguration"/>: when an outgoing configuration's global properties match this
+            /// baseline they are sent as <see cref="InvariantPayloadTransfer.Identical"/> instead. A defensive copy,
+            /// not an alias of the configuration's dictionary.
             /// </summary>
-            private string _forwardSolutionConfigBaseline;
+            private Dictionary<string, string> _forwardGlobalParametersBaseline;
 
 
 #if FEATURE_APM
@@ -1205,31 +1206,26 @@ namespace Microsoft.Build.BackEnd
             }
 
             /// <summary>
-            /// Marks an outgoing config <see cref="InvariantPayloadTransfer.Identical"/> when its
-            /// CurrentSolutionConfigurationContents matches the connection baseline (leaving the large blob off the
-            /// wire); otherwise sends it in full and updates the baseline. A config without the property carries a
-            /// null value that never updates the baseline (e.g. restore-phase configs). As in
-            /// <see cref="PrepareEnvironmentForSend"/>, only <see cref="DrainPacketQueue"/> calls this in wire
-            /// order, so the baselines never drift and no locking is needed.
+            /// Marks an outgoing config <see cref="InvariantPayloadTransfer.Identical"/> when its global properties
+            /// match the connection baseline (leaving the dictionary off the wire); otherwise sends them in full and
+            /// updates the baseline with a defensive copy. As in <see cref="PrepareEnvironmentForSend"/>, only
+            /// <see cref="DrainPacketQueue"/> calls this in wire order, so the baselines never drift and no locking
+            /// is needed.
             /// </summary>
-            private void PrepareSolutionConfigForSend(TaskHostConfiguration configuration)
+            private void PrepareGlobalParametersForSend(TaskHostConfiguration configuration)
             {
-                string value = null;
-                configuration.GlobalProperties?.TryGetValue(TaskHostConfiguration.SolutionConfigKey, out value);
+                Dictionary<string, string> globalParameters = configuration.GlobalProperties;
 
-                if (value != null && _forwardSolutionConfigBaseline != null && string.Equals(value, _forwardSolutionConfigBaseline, StringComparison.Ordinal))
+                if (_forwardGlobalParametersBaseline != null && CommunicationsUtilities.AreEnvironmentsEquivalent(globalParameters, _forwardGlobalParametersBaseline))
                 {
-                    configuration.SolutionConfigMode = InvariantPayloadTransfer.Identical;
+                    configuration.GlobalParametersMode = InvariantPayloadTransfer.Identical;
                 }
                 else
                 {
-                    configuration.SolutionConfigMode = InvariantPayloadTransfer.Full;
-                    configuration.SolutionConfigValue = value;
-
-                    if (value != null)
-                    {
-                        _forwardSolutionConfigBaseline = value;
-                    }
+                    configuration.GlobalParametersMode = InvariantPayloadTransfer.Full;
+                    _forwardGlobalParametersBaseline = globalParameters == null
+                        ? null
+                        : new Dictionary<string, string>(globalParameters, StringComparer.OrdinalIgnoreCase);
                 }
             }
 
@@ -1279,12 +1275,12 @@ namespace Microsoft.Build.BackEnd
                             }
 
                             // When the negotiated wire format supports it, send the (invariant) build process
-                            // environment and solution configuration only when they changed; otherwise mark them
+                            // environment and global properties only when they changed; otherwise mark them
                             // as unchanged on the wire.
                             if (packet is TaskHostConfiguration taskHostConfiguration && writeTranslator.NegotiatedPacketVersion >= NodePacketTypeExtensions.EnvironmentDeltaMinVersion)
                             {
                                 context.PrepareEnvironmentForSend(taskHostConfiguration);
-                                context.PrepareSolutionConfigForSend(taskHostConfiguration);
+                                context.PrepareGlobalParametersForSend(taskHostConfiguration);
                             }
 
                             packet.Translate(writeTranslator);
