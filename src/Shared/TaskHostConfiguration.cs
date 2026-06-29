@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using Microsoft.Build.Execution;
+using Microsoft.Build.Internal;
 
 #nullable disable
 
@@ -534,9 +535,16 @@ namespace Microsoft.Build.BackEnd
         /// <param name="translator">The translator to use.</param>
         public void Translate(ITranslator translator)
         {
+            long thStart = ThProfile.Now();
+            bool prof = ThProfile.Enabled && translator.Mode == TranslationDirection.WriteToStream;
+            long Pos() => translator.Writer.BaseStream.Position;
+            long p0 = prof ? Pos() : 0;
+
             translator.Translate(ref _nodeId);
             translator.Translate(ref _startupDirectory);
+            long pBeforeEnv = prof ? Pos() : 0;
             TranslateBuildProcessEnvironment(translator);
+            long pAfterEnv = prof ? Pos() : 0;
             translator.TranslateCulture(ref _culture);
             translator.TranslateCulture(ref _uiCulture);
 #if FEATURE_APPDOMAIN
@@ -581,9 +589,13 @@ namespace Microsoft.Build.BackEnd
 #endif
 
             translator.Translate(ref _isTaskInputLoggingEnabled);
+            long pBeforeTaskParams = prof ? Pos() : 0;
             translator.TranslateDictionary(ref _taskParameters, StringComparer.OrdinalIgnoreCase, TaskParameter.FactoryForDeserialization);
+            long pAfterTaskParams = prof ? Pos() : 0;
             translator.Translate(ref _continueOnError);
+            long pBeforeGlobalProps = prof ? Pos() : 0;
             TranslateGlobalProperties(translator);
+            long pAfterGlobalProps = prof ? Pos() : 0;
             translator.Translate(collection: ref _warningsAsErrors,
                                  objectTranslator: (ITranslator t, ref string s) => t.Translate(ref s),
                                  collectionFactory: count => new HashSet<string>(count, StringComparer.OrdinalIgnoreCase));
@@ -593,6 +605,25 @@ namespace Microsoft.Build.BackEnd
             translator.Translate(collection: ref _warningsAsMessages,
                                  objectTranslator: (ITranslator t, ref string s) => t.Translate(ref s),
                                  collectionFactory: count => new HashSet<string>(count, StringComparer.OrdinalIgnoreCase));
+
+            if (prof)
+            {
+                long pEnd = Pos();
+                long total = pEnd - p0;
+                long env = pAfterEnv - pBeforeEnv;
+                long taskParams = pAfterTaskParams - pBeforeTaskParams;
+                long globalProps = pAfterGlobalProps - pBeforeGlobalProps;
+                long warnings = pEnd - pAfterGlobalProps;
+                long other = total - env - taskParams - globalProps - warnings;
+                ThProfile.AddField("cfg_total", total);
+                ThProfile.AddField("cfg_env", env);
+                ThProfile.AddField("cfg_taskParams", taskParams);
+                ThProfile.AddField("cfg_globalProps", globalProps);
+                ThProfile.AddField("cfg_warnings", warnings);
+                ThProfile.AddField("cfg_other", other);
+            }
+
+            ThProfile.AddPhase(translator.Mode == TranslationDirection.WriteToStream ? "cfg_serialize" : "cfg_deserialize", thStart);
         }
 
         /// <summary>
@@ -628,11 +659,22 @@ namespace Microsoft.Build.BackEnd
         {
             if (translator.NegotiatedPacketVersion >= NodePacketTypeExtensions.EnvironmentDeltaMinVersion)
             {
+                bool prof = ThProfile.Enabled && translator.Mode == TranslationDirection.WriteToStream;
+                long pStart = prof ? translator.Writer.BaseStream.Position : 0;
+
                 translator.TranslateEnum(ref _globalParametersMode, (int)_globalParametersMode);
 
                 if (_globalParametersMode == InvariantPayloadTransfer.Full)
                 {
                     translator.TranslateDictionary(ref _globalParameters, StringComparer.OrdinalIgnoreCase);
+                }
+
+                if (prof)
+                {
+                    long bytes = translator.Writer.BaseStream.Position - pStart;
+                    ThProfile.AddField(
+                        _globalParametersMode == InvariantPayloadTransfer.Full ? "cfg_globalProps_full" : "cfg_globalProps_identical",
+                        bytes);
                 }
             }
             else
