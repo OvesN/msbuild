@@ -1495,7 +1495,7 @@ namespace Microsoft.Build.CommandLine
                 bool canSkipEnvironmentApply = _lastAppliedConfigEnvironment is not null
                     && _blockedTaskCount == 0
                     && _activeTaskCount == 1
-                    && CommunicationsUtilities.AreEnvironmentsEquivalent(taskConfiguration.BuildProcessEnvironment, _lastAppliedConfigEnvironment);
+                    && CommunicationsUtilities.AreDictionariesEquivalent(taskConfiguration.BuildProcessEnvironment, _lastAppliedConfigEnvironment);
 
                 if (!canSkipEnvironmentApply)
                 {
@@ -1570,7 +1570,7 @@ namespace Microsoft.Build.CommandLine
                     currentEnvironment = UpdateEnvironmentForMainNode(currentEnvironment);
 
                     bool environmentUnchangedByTask =
-                        CommunicationsUtilities.AreEnvironmentsEquivalent(currentEnvironment, taskConfiguration.BuildProcessEnvironment);
+                        CommunicationsUtilities.AreDictionariesEquivalent(currentEnvironment, taskConfiguration.BuildProcessEnvironment);
 
                     taskResult ??= new OutOfProcTaskHostTaskResult(TaskCompleteType.Failure);
                     _taskCompletePacket = new TaskHostTaskComplete(

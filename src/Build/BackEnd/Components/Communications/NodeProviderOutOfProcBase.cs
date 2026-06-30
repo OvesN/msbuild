@@ -1023,8 +1023,10 @@ namespace Microsoft.Build.BackEnd
             /// A snapshot of the global properties most recently sent in full to this task-host connection.
             /// Used to avoid re-transmitting the (largely invariant) global properties in every
             /// <see cref="TaskHostConfiguration"/>: when an outgoing configuration's global properties match this
-            /// baseline they are sent as <see cref="InvariantPayloadTransfer.Identical"/> instead. A defensive copy,
-            /// not an alias of the configuration's dictionary.
+            /// baseline they are sent as <see cref="InvariantPayloadTransfer.Identical"/> instead. Held as a defensive
+            /// copy for robustness and for consistency with <see cref="_forwardEnvironmentBaseline"/>; unlike the
+            /// environment, the configuration's global-properties dictionary is freshly allocated per configuration
+            /// today, so it is not actually aliased to a mutated-in-place source.
             /// </summary>
             private Dictionary<string, string> _forwardGlobalParametersBaseline;
 
@@ -1194,7 +1196,7 @@ namespace Microsoft.Build.BackEnd
             {
                 Dictionary<string, string> environment = configuration.BuildProcessEnvironment;
 
-                if (_forwardEnvironmentBaseline != null && CommunicationsUtilities.AreEnvironmentsEquivalent(environment, _forwardEnvironmentBaseline))
+                if (_forwardEnvironmentBaseline != null && CommunicationsUtilities.AreDictionariesEquivalent(environment, _forwardEnvironmentBaseline))
                 {
                     configuration.EnvironmentMode = InvariantPayloadTransfer.Identical;
                 }
@@ -1208,7 +1210,7 @@ namespace Microsoft.Build.BackEnd
             /// <summary>
             /// Marks an outgoing config <see cref="InvariantPayloadTransfer.Identical"/> when its global properties
             /// match the connection baseline (leaving the dictionary off the wire); otherwise sends them in full and
-            /// updates the baseline with a defensive copy. As in <see cref="PrepareEnvironmentForSend"/>, only
+            /// snapshots them as the new baseline. As in <see cref="PrepareEnvironmentForSend"/>, only
             /// <see cref="DrainPacketQueue"/> calls this in wire order, so the baselines never drift and no locking
             /// is needed.
             /// </summary>
@@ -1216,7 +1218,7 @@ namespace Microsoft.Build.BackEnd
             {
                 Dictionary<string, string> globalParameters = configuration.GlobalProperties;
 
-                if (_forwardGlobalParametersBaseline != null && CommunicationsUtilities.AreEnvironmentsEquivalent(globalParameters, _forwardGlobalParametersBaseline))
+                if (_forwardGlobalParametersBaseline != null && CommunicationsUtilities.AreDictionariesEquivalent(globalParameters, _forwardGlobalParametersBaseline))
                 {
                     configuration.GlobalParametersMode = InvariantPayloadTransfer.Identical;
                 }

@@ -12,7 +12,7 @@ using Microsoft.Build.Execution;
 namespace Microsoft.Build.BackEnd
 {
     /// <summary>
-    /// How an invariant payload (e.g. the build process environment or the solution-config blob) is transferred
+    /// How an invariant payload (e.g. the build process environment or the global properties) is transferred
     /// across a task-host connection. Only meaningful when the negotiated packet version is &gt;= 5.
     /// </summary>
     internal enum InvariantPayloadTransfer : byte
