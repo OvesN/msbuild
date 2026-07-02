@@ -355,6 +355,9 @@ namespace Microsoft.Build.BackEnd
 
             taskLoggingContext?.TargetLoggingContext?.ProjectLoggingContext?.ProjectTelemetry?.AddTaskExecution(GetType().FullName, isTaskHost: useTaskFactory);
 
+            // TEMPORALY ONLY FOR DIAGNOSTIC
+            useTaskFactory = true;
+
             if (useTaskFactory)
             {
                 Assumed.NotNull(buildComponentHost);
