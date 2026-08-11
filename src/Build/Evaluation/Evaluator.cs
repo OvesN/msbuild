@@ -413,26 +413,31 @@ namespace Microsoft.Build.Evaluation
             }
             finally
             {
-                evaluator._observationSession?.Complete(evaluationSucceeded);
-
-                IEnumerable globalProperties = null;
-                IEnumerable properties = null;
-                IEnumerable items = null;
-
-                if (evaluator._evaluationLoggingContext.LoggingService.IncludeEvaluationPropertiesAndItemsInEvaluationFinishedEvent)
+                try
                 {
-                    globalProperties = evaluator._data.GlobalPropertiesDictionary;
-                    properties = Traits.LogAllEnvironmentVariables ? evaluator._data.Properties : evaluator.FilterOutEnvironmentDerivedProperties(evaluator._data.Properties);
-                    items = evaluator._data.Items;
-                }
+                    IEnumerable globalProperties = null;
+                    IEnumerable properties = null;
+                    IEnumerable items = null;
 
-                string skippedMessage = evaluator._projectRootElementCache.ParserIgnoreConfiguration?.GetSkippedSummaryMessage();
-                if (skippedMessage is not null)
+                    if (evaluator._evaluationLoggingContext.LoggingService.IncludeEvaluationPropertiesAndItemsInEvaluationFinishedEvent)
+                    {
+                        globalProperties = evaluator._data.GlobalPropertiesDictionary;
+                        properties = Traits.LogAllEnvironmentVariables ? evaluator._data.Properties : evaluator.FilterOutEnvironmentDerivedProperties(evaluator._data.Properties);
+                        items = evaluator._data.Items;
+                    }
+
+                    string skippedMessage = evaluator._projectRootElementCache.ParserIgnoreConfiguration?.GetSkippedSummaryMessage();
+                    if (skippedMessage is not null)
+                    {
+                        evaluator._evaluationLoggingContext.LogCommentFromText(MessageImportance.Low, skippedMessage);
+                    }
+
+                    evaluator._evaluationLoggingContext.LogProjectEvaluationFinished(globalProperties, properties, items, evaluator._evaluationProfiler.ProfiledResult);
+                }
+                finally
                 {
-                    evaluator._evaluationLoggingContext.LogCommentFromText(MessageImportance.Low, skippedMessage);
+                    evaluator._observationSession?.Complete(evaluationSucceeded);
                 }
-
-                evaluator._evaluationLoggingContext.LogProjectEvaluationFinished(globalProperties, properties, items, evaluator._evaluationProfiler.ProfiledResult);
             }
 
             MSBuildEventSource.Log.EvaluateStop(root.ProjectFileLocation.File);
