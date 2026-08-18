@@ -24,7 +24,7 @@ internal static class EvaluationObservationNativeBridge
                     metrics.MetadataReads += report.MetadataReads.Length;
                     metrics.FileReads += report.FileReads.Length;
 
-                    if (collectPaths)
+                    if (collectPaths && metrics.UniquePathCount == 0)
                     {
                         foreach (EvaluationPathProbeObservation observation in report.PathProbes)
                         {
