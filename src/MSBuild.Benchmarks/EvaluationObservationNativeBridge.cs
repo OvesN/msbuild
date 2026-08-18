@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Microsoft.Build.Evaluation.Context;
+
 namespace MSBuild.Benchmarks;
 
 internal static class EvaluationObservationNativeBridge
@@ -10,20 +12,17 @@ internal static class EvaluationObservationNativeBridge
         EvaluationObservationNativeMetrics? metrics,
         bool collectPaths)
     {
-        if (enabled)
-        {
-            throw new NotSupportedException("The evaluator-native observer is not available in this benchmark variant.");
-        }
-
-        return NoopDisposable.Instance;
-    }
-
-    private sealed class NoopDisposable : IDisposable
-    {
-        internal static NoopDisposable Instance { get; } = new();
-
-        public void Dispose()
-        {
-        }
+        return EvaluationObservationSession.TestOnlyConfigure(
+            enabled,
+            metrics is null
+                ? null
+                : report =>
+                {
+                    metrics.Reports++;
+                    metrics.PathProbes += report.PathProbes.Length;
+                    metrics.Enumerations += report.DirectoryEnumerations.Length;
+                    metrics.MetadataReads += report.MetadataReads.Length;
+                    metrics.FileReads += report.FileReads.Length;
+                });
     }
 }
