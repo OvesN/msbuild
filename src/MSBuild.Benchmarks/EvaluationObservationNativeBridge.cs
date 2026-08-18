@@ -7,7 +7,8 @@ internal static class EvaluationObservationNativeBridge
 {
     internal static IDisposable Enable(
         bool enabled,
-        EvaluationObservationNativeMetrics? metrics)
+        EvaluationObservationNativeMetrics? metrics,
+        bool collectPaths)
     {
         if (enabled)
         {
@@ -26,4 +27,3 @@ internal static class EvaluationObservationNativeBridge
         }
     }
 }
-

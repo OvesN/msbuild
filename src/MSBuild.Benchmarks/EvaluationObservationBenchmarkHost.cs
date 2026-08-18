@@ -36,7 +36,7 @@ internal static class EvaluationObservationBenchmarkHost
 
         bool nativeEnabled = (mode & EvaluationObservationBenchmarkMode.Native) != 0;
 
-        using (EvaluationObservationNativeBridge.Enable(nativeEnabled, metrics: null))
+        using (EvaluationObservationNativeBridge.Enable(nativeEnabled, metrics: null, collectPaths: false))
         {
             Evaluate(projectPath);
         }
@@ -54,7 +54,10 @@ internal static class EvaluationObservationBenchmarkHost
 
         _ = File.Exists(Path.Combine(projectDirectory, EvaluationObservationBenchmarkProtocol.MeasurementStartMarker));
         Stopwatch stopwatch = Stopwatch.StartNew();
-        using (EvaluationObservationNativeBridge.Enable(nativeEnabled, nativeMetrics))
+        using (EvaluationObservationNativeBridge.Enable(
+            nativeEnabled,
+            nativeMetrics,
+            collectPaths: (mode & EvaluationObservationBenchmarkMode.Detours) != 0))
         {
             for (int i = 0; i < iterations; i++)
             {
