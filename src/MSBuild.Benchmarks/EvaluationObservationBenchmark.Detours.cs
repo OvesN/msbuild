@@ -5,8 +5,10 @@ using BenchmarkDotNet.Attributes;
 
 namespace MSBuild.Benchmarks;
 
+#if NETFRAMEWORK
 public partial class EvaluationObservationBenchmark
 {
     [Benchmark]
     public long Detours() => Run(EvaluationObservationBenchmarkMode.Detours);
 }
+#endif
