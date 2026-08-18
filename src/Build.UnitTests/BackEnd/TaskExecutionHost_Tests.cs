@@ -511,6 +511,21 @@ namespace Microsoft.Build.UnitTests.BackEnd
             ValidateTaskParameterNotSet("AbsolutePathParam", "@(NonExistentItem)");
         }
 
+        [Fact]
+        public void KnownPathTaskItemFactoriesDoNotRequireDynamicCode()
+        {
+            ITaskItem backingItem = new Microsoft.Build.Utilities.TaskItem(Path.GetFullPath("input.txt"));
+
+            foreach (Type type in new[] { typeof(AbsolutePath), typeof(FileInfo), typeof(DirectoryInfo) })
+            {
+                TaskExecutionHost.TryCreateKnownPathTaskItemOfT(type, backingItem, out ITaskItem typedItem).ShouldBeTrue();
+                typedItem.GetType().GetGenericArguments().ShouldBe([type]);
+                typedItem.ItemSpec.ShouldBe(backingItem.ItemSpec);
+            }
+
+            TaskExecutionHost.TryCreateKnownPathTaskItemOfT(typeof(int), backingItem, out _).ShouldBeFalse();
+        }
+
         #endregion
 
         #region AbsolutePath Array Params
