@@ -50,7 +50,9 @@ internal static class EvaluationObservationBenchmarkHost
         int gen1Before = GC.CollectionCount(1);
         int gen2Before = GC.CollectionCount(2);
         EvaluationObservationNativeMetrics nativeMetrics = new();
+        string projectDirectory = Path.GetDirectoryName(projectPath)!;
 
+        _ = File.Exists(Path.Combine(projectDirectory, EvaluationObservationBenchmarkProtocol.MeasurementStartMarker));
         Stopwatch stopwatch = Stopwatch.StartNew();
         using (EvaluationObservationNativeBridge.Enable(nativeEnabled, nativeMetrics))
         {
@@ -61,6 +63,7 @@ internal static class EvaluationObservationBenchmarkHost
         }
 
         stopwatch.Stop();
+        _ = File.Exists(Path.Combine(projectDirectory, EvaluationObservationBenchmarkProtocol.MeasurementStopMarker));
 
         long managedMemoryAfter = GC.GetTotalMemory(forceFullCollection: true);
         using Process process = Process.GetCurrentProcess();

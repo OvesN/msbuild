@@ -5,6 +5,12 @@ using System.Globalization;
 
 namespace MSBuild.Benchmarks;
 
+internal static class EvaluationObservationBenchmarkProtocol
+{
+    internal const string MeasurementStartMarker = ".evaluation-observer-measure-start";
+    internal const string MeasurementStopMarker = ".evaluation-observer-measure-stop";
+}
+
 [Flags]
 internal enum EvaluationObservationBenchmarkMode
 {
