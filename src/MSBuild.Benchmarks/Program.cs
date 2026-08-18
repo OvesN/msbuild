@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnostics.Windows;
+using BenchmarkDotNet.Environments;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
 using MSBuild.Benchmarks;
@@ -49,6 +50,10 @@ static IConfig GetConfig(bool collectEtw, bool disableNGen, bool disableJitInlin
     // (default or CLI-specified like --job short).
     Job overrides = new Job()
         .DontEnforcePowerPlan();
+
+#if NETFRAMEWORK
+    overrides = overrides.WithPlatform(Platform.X64);
+#endif
 
     if (disableNGen)
     {

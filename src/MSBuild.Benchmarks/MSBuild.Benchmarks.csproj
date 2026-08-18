@@ -10,13 +10,18 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(TargetFramework)' == '$(FullFrameworkTFM)'">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
     <PackageReference Include="BenchmarkDotNet.Diagnostics.Windows" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework'">
-    <PackageReference Include="Microsoft.BuildXL.Processes" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.BuildXL.Processes" Condition="'$(FeatureReportFileAccesses)' == 'true'" PrivateAssets="all" />
     <!-- Fix transitive dependency from BenchmarkDotNet that conflicts with Microsoft.VisualStudio.OpenTelemetry.ClientExtensions. -->
     <PackageReference Include="Microsoft.Extensions.Logging.Configuration" VersionOverride="8.0.0" />
   </ItemGroup>
