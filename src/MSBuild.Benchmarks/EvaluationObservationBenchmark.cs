@@ -1,8 +1,9 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Text;
+using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using BenchmarkDotNet.Attributes;
 
 namespace MSBuild.Benchmarks;
@@ -108,6 +109,10 @@ public partial class EvaluationObservationBenchmark
     {
         private int _samples;
         private long _evaluationTicks;
+        private long _minimumEvaluationTicks = long.MaxValue;
+        private long _maximumEvaluationTicks = long.MinValue;
+        private double _meanEvaluationTicks;
+        private double _evaluationTicksM2;
         private long _retainedManagedBytes;
         private long _privateBytes;
         private long _peakWorkingSetBytes;
@@ -127,6 +132,13 @@ public partial class EvaluationObservationBenchmark
         {
             _samples++;
             _evaluationTicks += result.EvaluationTicks;
+            _minimumEvaluationTicks = Math.Min(_minimumEvaluationTicks, result.EvaluationTicks);
+            _maximumEvaluationTicks = Math.Max(_maximumEvaluationTicks, result.EvaluationTicks);
+
+            double delta = result.EvaluationTicks - _meanEvaluationTicks;
+            _meanEvaluationTicks += delta / _samples;
+            _evaluationTicksM2 += delta * (result.EvaluationTicks - _meanEvaluationTicks);
+
             _retainedManagedBytes += result.RetainedManagedBytes;
             _privateBytes += result.PrivateBytes;
             _peakWorkingSetBytes += result.PeakWorkingSetBytes;
@@ -154,6 +166,10 @@ public partial class EvaluationObservationBenchmark
                 $"Scenario={scenario}",
                 Pair("Samples", _samples),
                 Pair("EvaluationTicks", Average(_evaluationTicks)),
+                Pair("EvaluationMilliseconds", ToMilliseconds(_meanEvaluationTicks)),
+                Pair("EvaluationStdDevMilliseconds", ToMilliseconds(StandardDeviationTicks())),
+                Pair("EvaluationMinMilliseconds", ToMilliseconds(_minimumEvaluationTicks)),
+                Pair("EvaluationMaxMilliseconds", ToMilliseconds(_maximumEvaluationTicks)),
                 Pair("RetainedManagedBytes", Average(_retainedManagedBytes)),
                 Pair("PrivateBytes", Average(_privateBytes)),
                 Pair("PeakWorkingSetBytes", Average(_peakWorkingSetBytes)),
@@ -174,5 +190,14 @@ public partial class EvaluationObservationBenchmark
 
         private static string Pair(string name, long value) =>
             string.Concat(name, "=", value.ToString(CultureInfo.InvariantCulture));
+
+        private static string Pair(string name, double value) =>
+            string.Concat(name, "=", value.ToString("F3", CultureInfo.InvariantCulture));
+
+        private double StandardDeviationTicks() =>
+            _samples <= 1 ? 0 : Math.Sqrt(_evaluationTicksM2 / (_samples - 1));
+
+        private static double ToMilliseconds(double ticks) =>
+            ticks * 1_000d / Stopwatch.Frequency;
     }
 }
