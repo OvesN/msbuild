@@ -27,6 +27,7 @@ internal static class EvaluationObservationBenchmarkHost
             typeof(EvaluationObservationBenchmarkMode),
             TakeValue(args, "--mode"),
             ignoreCase: false);
+        string? resultFile = TryTakeValue(args, "--result-file");
 
         if (args.Count != 0)
         {
@@ -81,7 +82,13 @@ internal static class EvaluationObservationBenchmarkHost
             NativeFileReads = nativeMetrics.FileReads,
         };
 
-        Console.WriteLine(result.Serialize());
+        string serializedResult = result.Serialize();
+        Console.WriteLine(serializedResult);
+        if (resultFile is not null)
+        {
+            File.WriteAllText(resultFile, serializedResult);
+        }
+
         exitCode = 0;
         return true;
     }
@@ -107,6 +114,25 @@ internal static class EvaluationObservationBenchmarkHost
         if (index < 0 || index + 1 >= args.Count)
         {
             throw new ArgumentException($"Missing required benchmark host argument '{name}'.");
+        }
+
+        string value = args[index + 1];
+        args.RemoveAt(index + 1);
+        args.RemoveAt(index);
+        return value;
+    }
+
+    private static string? TryTakeValue(List<string> args, string name)
+    {
+        int index = args.IndexOf(name);
+        if (index < 0)
+        {
+            return null;
+        }
+
+        if (index + 1 >= args.Count)
+        {
+            throw new ArgumentException($"Missing value for benchmark host argument '{name}'.");
         }
 
         string value = args[index + 1];
