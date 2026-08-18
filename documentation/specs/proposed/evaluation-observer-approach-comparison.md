@@ -50,7 +50,7 @@ Two synthetic scenarios are used:
 | GlobHeavy | The same project shape with 2,000 glob members. |
 
 The comparison used BenchmarkDotNet `Short` jobs. Each result below is the average of two
-independent runs. The custom summary includes nine host invocations spanning BenchmarkDotNet
+independent runs. The custom summary includes eight host invocations spanning BenchmarkDotNet
 jitting, warm-up, and actual phases; it is not an actual-iterations-only confidence
 interval.
 
@@ -63,16 +63,20 @@ BenchmarkDotNet process-launch time is not used to estimate evaluator overhead.
 
 | Scenario | Baseline | Current native facade | Native overhead | Detours upper bound | Detours overhead | Simultaneous observers | Simultaneous overhead |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Typical | 178.1 ms | 185.1 ms | **+4.0%** | 225.6 ms | **+26.7%** | 235.2 ms | **+32.1%** |
-| GlobHeavy | 333.4 ms | 340.3 ms | **+2.1%** | 383.5 ms | **+15.0%** | 399.7 ms | **+19.9%** |
+| Typical | 177.2 ms | 182.3 ms | **+2.9%** | 220.2 ms | **+24.3%** | 227.2 ms | **+28.2%** |
+| GlobHeavy | 318.2 ms | 322.1 ms | **+1.2%** | 368.3 ms | **+15.1%** | 387.2 ms | **+21.7%** |
 
 These are batch times for 50 evaluations.
 
 Across the two individual runs:
 
-- native overhead was 2.9-5.1% for Typical and 1.3-2.9% for GlobHeavy;
-- Detours overhead was 24.2-29.3% for Typical and 12.5-17.6% for GlobHeavy;
-- combined overhead was 28.1-36.3% for Typical and 18.0-21.8% for GlobHeavy.
+- native overhead was 1.2-4.7% for Typical and 1.1-1.4% for GlobHeavy;
+- Detours overhead was 21.7-27.0% for Typical and 14.6-17.0% for GlobHeavy;
+- simultaneous overhead was 21.5-35.4% for Typical and 19.2-24.2% for GlobHeavy.
+
+Within-run standard deviations ranged from approximately 2.6 ms to 18 ms. The small
+native deltas, especially GlobHeavy, are near the noise floor and should be treated as a
+directional range rather than a precise budget.
 
 The measured native implementation recorded probes and directory enumeration only:
 
@@ -89,14 +93,14 @@ the complete observation design.
 
 | Scenario | Baseline | Native | Detoured host | Native + Detours host |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 49.2 MiB | 49.4 MiB | 52.8 MiB | 53.1 MiB |
-| GlobHeavy | 52.2 MiB | 53.4 MiB | 55.9 MiB | 57.2 MiB |
+| Typical | 49.2 MiB | 49.3 MiB | 52.7 MiB | 53.0 MiB |
+| GlobHeavy | 52.2 MiB | 53.3 MiB | 55.9 MiB | 57.0 MiB |
 
 Approximate deltas:
 
-- native: +0.4% Typical, +2.4% GlobHeavy;
-- Detours: +7.4% Typical, +7.1% GlobHeavy;
-- combined: +7.9% Typical, +9.5% GlobHeavy.
+- native: +0.2% Typical, +2.1% GlobHeavy;
+- Detours: +7.0% Typical, +7.1% GlobHeavy;
+- simultaneous host: +7.7% Typical, +9.2% GlobHeavy.
 
 The hybrid run retains an additional diagnostic native path set to calculate overlap.
 Its retained managed memory is therefore not a production-native manifest estimate.
