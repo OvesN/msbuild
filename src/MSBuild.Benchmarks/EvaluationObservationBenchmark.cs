@@ -17,7 +17,7 @@ public partial class EvaluationObservationBenchmark
     [Params(EvaluationObservationBenchmarkScenario.Typical, EvaluationObservationBenchmarkScenario.GlobHeavy)]
     public EvaluationObservationBenchmarkScenario Scenario { get; set; }
 
-    [Params(10)]
+    [Params(50)]
     public int EvaluationsPerProcess { get; set; }
 
     private string _root = null!;
