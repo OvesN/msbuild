@@ -1396,7 +1396,7 @@ namespace Microsoft.Build.UnitTests.Definition
         private abstract class TestFileSystemBase : IFileSystem
         {
             public virtual TextReader ReadFile(string path) => throw new NotSupportedException();
-            public virtual Stream GetFileStream(string path, FileMode mode, FileAccess access, FileShare share) => throw new NotSupportedException();
+            public virtual Stream GetFileStream(string path, FileMode mode, System.IO.FileAccess access, FileShare share) => throw new NotSupportedException();
             public virtual string ReadFileAllText(string path) => throw new NotSupportedException();
             public virtual byte[] ReadFileAllBytes(string path) => throw new NotSupportedException();
             public virtual IEnumerable<string> EnumerateFiles(string path, string searchPattern = "*", SearchOption searchOption = SearchOption.TopDirectoryOnly) => throw new NotSupportedException();
