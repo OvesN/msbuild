@@ -10,6 +10,7 @@ internal static class EvaluationObservationDetoursRunner
 {
 #if NETFRAMEWORK
     private const int BrokerTimeoutMilliseconds = 120_000;
+    private static int s_reportedPathDiff;
 #endif
 
     internal static EvaluationObservationBenchmarkResult Run(
@@ -68,7 +69,13 @@ internal static class EvaluationObservationDetoursRunner
                     $"{standardOutput.Result}{Environment.NewLine}{standardError.Result}");
             }
 
-            return EvaluationObservationBenchmarkResult.Parse(File.ReadAllText(resultFile));
+            string resultContent = File.ReadAllText(resultFile);
+            if (Interlocked.Exchange(ref s_reportedPathDiff, 1) == 0)
+            {
+                WritePathDiff(resultContent);
+            }
+
+            return EvaluationObservationBenchmarkResult.Parse(resultContent);
         }
         finally
         {
@@ -84,4 +91,22 @@ internal static class EvaluationObservationDetoursRunner
 
     internal static string Encode(string value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
+
+#if NETFRAMEWORK
+    private static void WritePathDiff(string content)
+    {
+        using StringReader reader = new(content);
+        while (reader.ReadLine() is { } line)
+        {
+            if (!line.StartsWith(EvaluationObservationDetoursHost.DetoursOnlyPathPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string encodedPath = line.Substring(EvaluationObservationDetoursHost.DetoursOnlyPathPrefix.Length);
+            string path = Encoding.UTF8.GetString(Convert.FromBase64String(encodedPath));
+            Console.WriteLine($"EVALUATION_OBSERVATION_DETOURS_ONLY_PATH|{path}");
+        }
+    }
+#endif
 }

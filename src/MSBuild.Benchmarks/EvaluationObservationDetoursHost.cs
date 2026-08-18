@@ -15,6 +15,7 @@ namespace MSBuild.Benchmarks;
 internal static class EvaluationObservationDetoursHost
 {
     internal const string HostSwitch = "--evaluation-observation-detours-host";
+    internal const string DetoursOnlyPathPrefix = "EVALUATION_OBSERVATION_DETOURS_ONLY_PATH|";
 
     internal static bool TryRun(List<string> args, out int exitCode)
     {
@@ -110,7 +111,23 @@ internal static class EvaluationObservationDetoursHost
                 DetoursOnlyPaths = detoursPaths.Count - overlap,
             };
 
-            File.WriteAllText(resultFile, result.Serialize());
+            StringBuilder serializedResult = new(result.Serialize());
+            if (nativePaths.Count != 0)
+            {
+                foreach (string path in detoursPaths.OrderBy(static path => path, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (nativePaths.Contains(path))
+                    {
+                        continue;
+                    }
+
+                    serializedResult.AppendLine();
+                    serializedResult.Append(DetoursOnlyPathPrefix);
+                    serializedResult.Append(EvaluationObservationDetoursRunner.Encode(path));
+                }
+            }
+
+            File.WriteAllText(resultFile, serializedResult.ToString());
             return 0;
         }
         catch (Exception exception)
