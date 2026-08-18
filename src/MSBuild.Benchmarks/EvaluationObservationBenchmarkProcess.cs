@@ -1,0 +1,77 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System.Diagnostics;
+using System.Globalization;
+
+namespace MSBuild.Benchmarks;
+
+internal static class EvaluationObservationBenchmarkProcess
+{
+    internal static EvaluationObservationBenchmarkResult Run(
+        EvaluationObservationBenchmarkMode mode,
+        string projectPath,
+        string scenarioRoot,
+        int iterations)
+    {
+        string assemblyPath = typeof(EvaluationObservationBenchmarkProcess).Assembly.Location;
+        string executable;
+        string arguments;
+
+#if NETFRAMEWORK
+        executable = Path.ChangeExtension(assemblyPath, ".exe");
+        arguments = CreateHostArguments(projectPath, iterations, mode);
+#else
+        executable = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
+        arguments = string.Concat(
+            Quote(assemblyPath),
+            " ",
+            CreateHostArguments(projectPath, iterations, mode));
+#endif
+
+        if ((mode & EvaluationObservationBenchmarkMode.Detours) != 0)
+        {
+            return EvaluationObservationDetoursRunner.Run(executable, arguments, scenarioRoot);
+        }
+
+        ProcessStartInfo startInfo = new(executable, arguments)
+        {
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+
+        using Process process = Process.Start(startInfo) ??
+            throw new InvalidOperationException($"Could not start benchmark host '{executable}'.");
+        string standardOutput = process.StandardOutput.ReadToEnd();
+        string standardError = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Benchmark host exited with code {process.ExitCode}.{Environment.NewLine}{standardOutput}{Environment.NewLine}{standardError}");
+        }
+
+        return EvaluationObservationBenchmarkResult.Parse(standardOutput);
+    }
+
+    private static string CreateHostArguments(
+        string projectPath,
+        int iterations,
+        EvaluationObservationBenchmarkMode mode)
+    {
+        return string.Join(
+            " ",
+            "--evaluation-observation-host",
+            "--project",
+            Quote(projectPath),
+            "--iterations",
+            iterations.ToString(CultureInfo.InvariantCulture),
+            "--mode",
+            mode.ToString());
+    }
+
+    internal static string Quote(string value) => string.Concat("\"", value.Replace("\"", "\\\""), "\"");
+}
