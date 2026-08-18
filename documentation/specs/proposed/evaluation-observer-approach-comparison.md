@@ -163,6 +163,8 @@ misses root/import content and other categories documented in
 
 - It does not measure a complete native observer.
 - It does not measure content hashing, environment, Registry, SDK/toolset, or host inputs.
+- It does not measure shared-`EvaluationContext` concurrency, where creating a
+  per-evaluation context and `FileMatcher` may duplicate glob expansion work.
 - It does not satisfy the design's real-workload acceptance gate.
 - It does not establish a production overhead budget.
 - It does not show that 23 of 25 raw paths means 92% semantic coverage.
@@ -207,3 +209,6 @@ artifacts\bin\MSBuild.Benchmarks\Release\net472\MSBuild.Benchmarks.exe `
 Use the `EVALUATION_OBSERVATION_SUMMARY` lines for internal evaluation and host-process
 memory metrics. Ignore BenchmarkDotNet `Allocated` columns for observer memory; those
 describe the benchmark orchestration process.
+
+`NativeDetoursOverlap`, `NativeOnlyPaths`, and `DetoursOnlyPaths` are meaningful only for
+the `NativeAndDetours` mode. In Detours-only mode the native set is absent by definition.
