@@ -8,7 +8,6 @@ using BenchmarkDotNet.Attributes;
 
 namespace MSBuild.Benchmarks;
 
-[MemoryDiagnoser]
 public partial class EvaluationObservationBenchmark
 {
     private const int TypicalFileCount = 200;
@@ -80,7 +79,18 @@ public partial class EvaluationObservationBenchmark
 
         if (Directory.Exists(_root))
         {
-            Directory.Delete(_root, recursive: true);
+            try
+            {
+                Directory.Delete(_root, recursive: true);
+            }
+            catch (IOException exception)
+            {
+                Console.Error.WriteLine($"Could not delete benchmark directory '{_root}': {exception.Message}");
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                Console.Error.WriteLine($"Could not delete benchmark directory '{_root}': {exception.Message}");
+            }
         }
     }
 
