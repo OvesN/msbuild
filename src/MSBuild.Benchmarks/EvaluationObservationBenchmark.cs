@@ -116,8 +116,12 @@ public partial class EvaluationObservationBenchmark
         private long _nativeEnumerations;
         private long _nativeMetadataReads;
         private long _nativeFileReads;
+        private long _nativeUniquePaths;
         private long _detoursAccesses;
         private long _detoursUniquePaths;
+        private long _nativeDetoursOverlap;
+        private long _nativeOnlyPaths;
+        private long _detoursOnlyPaths;
 
         internal void Add(EvaluationObservationBenchmarkResult result)
         {
@@ -131,8 +135,12 @@ public partial class EvaluationObservationBenchmark
             _nativeEnumerations += result.NativeEnumerations;
             _nativeMetadataReads += result.NativeMetadataReads;
             _nativeFileReads += result.NativeFileReads;
+            _nativeUniquePaths += result.NativeUniquePaths;
             _detoursAccesses += result.DetoursAccesses;
             _detoursUniquePaths += result.DetoursUniquePaths;
+            _nativeDetoursOverlap += result.NativeDetoursOverlap;
+            _nativeOnlyPaths += result.NativeOnlyPaths;
+            _detoursOnlyPaths += result.DetoursOnlyPaths;
         }
 
         internal string Format(
@@ -154,8 +162,12 @@ public partial class EvaluationObservationBenchmark
                 Pair("NativeEnumerations", Average(_nativeEnumerations)),
                 Pair("NativeMetadataReads", Average(_nativeMetadataReads)),
                 Pair("NativeFileReads", Average(_nativeFileReads)),
+                Pair("NativeUniquePaths", Average(_nativeUniquePaths)),
                 Pair("DetoursAccesses", Average(_detoursAccesses)),
-                Pair("DetoursUniquePaths", Average(_detoursUniquePaths)));
+                Pair("DetoursUniquePaths", Average(_detoursUniquePaths)),
+                Pair("NativeDetoursOverlap", Average(_nativeDetoursOverlap)),
+                Pair("NativeOnlyPaths", Average(_nativeOnlyPaths)),
+                Pair("DetoursOnlyPaths", Average(_detoursOnlyPaths)));
         }
 
         private long Average(long value) => _samples == 0 ? 0 : value / _samples;

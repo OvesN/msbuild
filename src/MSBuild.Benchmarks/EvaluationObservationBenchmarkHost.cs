@@ -83,13 +83,17 @@ internal static class EvaluationObservationBenchmarkHost
             NativeEnumerations = nativeMetrics.Enumerations,
             NativeMetadataReads = nativeMetrics.MetadataReads,
             NativeFileReads = nativeMetrics.FileReads,
+            NativeUniquePaths = nativeMetrics.UniquePathCount,
+            NativeOnlyPaths = nativeMetrics.UniquePathCount,
         };
 
         string serializedResult = result.Serialize();
         Console.WriteLine(serializedResult);
         if (resultFile is not null)
         {
-            File.WriteAllText(resultFile, serializedResult);
+            File.WriteAllText(
+                resultFile,
+                string.Concat(serializedResult, Environment.NewLine, nativeMetrics.SerializePaths()));
         }
 
         exitCode = 0;

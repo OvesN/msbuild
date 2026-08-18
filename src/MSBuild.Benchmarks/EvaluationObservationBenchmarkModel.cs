@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Globalization;
+using System.Text;
 
 namespace MSBuild.Benchmarks;
 
@@ -9,6 +10,7 @@ internal static class EvaluationObservationBenchmarkProtocol
 {
     internal const string MeasurementStartMarker = ".evaluation-observer-measure-start";
     internal const string MeasurementStopMarker = ".evaluation-observer-measure-stop";
+    internal const string NativePathPrefix = "EVALUATION_OBSERVATION_NATIVE_PATH|";
 }
 
 [Flags]
@@ -42,8 +44,12 @@ internal sealed class EvaluationObservationBenchmarkResult
     internal int NativeEnumerations { get; init; }
     internal int NativeMetadataReads { get; init; }
     internal int NativeFileReads { get; init; }
+    internal int NativeUniquePaths { get; init; }
     internal int DetoursAccesses { get; init; }
     internal int DetoursUniquePaths { get; init; }
+    internal int NativeDetoursOverlap { get; init; }
+    internal int NativeOnlyPaths { get; init; }
+    internal int DetoursOnlyPaths { get; init; }
 
     internal string Serialize()
     {
@@ -62,8 +68,12 @@ internal sealed class EvaluationObservationBenchmarkResult
             Pair(nameof(NativeEnumerations), NativeEnumerations),
             Pair(nameof(NativeMetadataReads), NativeMetadataReads),
             Pair(nameof(NativeFileReads), NativeFileReads),
+            Pair(nameof(NativeUniquePaths), NativeUniquePaths),
             Pair(nameof(DetoursAccesses), DetoursAccesses),
-            Pair(nameof(DetoursUniquePaths), DetoursUniquePaths));
+            Pair(nameof(DetoursUniquePaths), DetoursUniquePaths),
+            Pair(nameof(NativeDetoursOverlap), NativeDetoursOverlap),
+            Pair(nameof(NativeOnlyPaths), NativeOnlyPaths),
+            Pair(nameof(DetoursOnlyPaths), DetoursOnlyPaths));
     }
 
     internal static EvaluationObservationBenchmarkResult Parse(string output)
@@ -113,8 +123,12 @@ internal sealed class EvaluationObservationBenchmarkResult
             NativeEnumerations = checked((int)Get(nameof(NativeEnumerations))),
             NativeMetadataReads = checked((int)Get(nameof(NativeMetadataReads))),
             NativeFileReads = checked((int)Get(nameof(NativeFileReads))),
+            NativeUniquePaths = checked((int)Get(nameof(NativeUniquePaths))),
             DetoursAccesses = checked((int)Get(nameof(DetoursAccesses))),
             DetoursUniquePaths = checked((int)Get(nameof(DetoursUniquePaths))),
+            NativeDetoursOverlap = checked((int)Get(nameof(NativeDetoursOverlap))),
+            NativeOnlyPaths = checked((int)Get(nameof(NativeOnlyPaths))),
+            DetoursOnlyPaths = checked((int)Get(nameof(DetoursOnlyPaths))),
         };
 
         long Get(string name) =>
@@ -134,4 +148,46 @@ internal sealed class EvaluationObservationNativeMetrics
     internal int Enumerations = 0;
     internal int MetadataReads = 0;
     internal int FileReads = 0;
+    private readonly HashSet<string> _uniquePaths = new(StringComparer.OrdinalIgnoreCase);
+
+    internal int UniquePathCount => _uniquePaths.Count;
+
+    internal void AddPath(string? path)
+    {
+        if (!string.IsNullOrEmpty(path))
+        {
+            _uniquePaths.Add(Path.GetFullPath(path));
+        }
+    }
+
+    internal string SerializePaths()
+    {
+        StringBuilder result = new();
+        foreach (string path in _uniquePaths.OrderBy(static path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            result.Append(EvaluationObservationBenchmarkProtocol.NativePathPrefix);
+            result.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(path)));
+            result.AppendLine();
+        }
+
+        return result.ToString();
+    }
+
+    internal static HashSet<string> ParsePaths(string content)
+    {
+        HashSet<string> paths = new(StringComparer.OrdinalIgnoreCase);
+        using StringReader reader = new(content);
+        while (reader.ReadLine() is { } line)
+        {
+            if (!line.StartsWith(EvaluationObservationBenchmarkProtocol.NativePathPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string encodedPath = line.Substring(EvaluationObservationBenchmarkProtocol.NativePathPrefix.Length);
+            paths.Add(Encoding.UTF8.GetString(Convert.FromBase64String(encodedPath)));
+        }
+
+        return paths;
+    }
 }
