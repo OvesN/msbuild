@@ -8,6 +8,8 @@ namespace MSBuild.Benchmarks;
 
 internal static class EvaluationObservationBenchmarkProcess
 {
+    private const int HostTimeoutMilliseconds = 120_000;
+
     internal static EvaluationObservationBenchmarkResult Run(
         EvaluationObservationBenchmarkMode mode,
         string projectPath,
@@ -44,17 +46,25 @@ internal static class EvaluationObservationBenchmarkProcess
 
         using Process process = Process.Start(startInfo) ??
             throw new InvalidOperationException($"Could not start benchmark host '{executable}'.");
-        string standardOutput = process.StandardOutput.ReadToEnd();
-        string standardError = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+        Task<string> standardOutput = process.StandardOutput.ReadToEndAsync();
+        Task<string> standardError = process.StandardError.ReadToEndAsync();
+
+        if (!process.WaitForExit(HostTimeoutMilliseconds))
+        {
+            process.Kill();
+            throw new TimeoutException($"Benchmark host exceeded {HostTimeoutMilliseconds} ms.");
+        }
+
+        Task.WaitAll(standardOutput, standardError);
 
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"Benchmark host exited with code {process.ExitCode}.{Environment.NewLine}{standardOutput}{Environment.NewLine}{standardError}");
+                $"Benchmark host exited with code {process.ExitCode}.{Environment.NewLine}" +
+                $"{standardOutput.Result}{Environment.NewLine}{standardError.Result}");
         }
 
-        return EvaluationObservationBenchmarkResult.Parse(standardOutput);
+        return EvaluationObservationBenchmarkResult.Parse(standardOutput.Result);
     }
 
     private static string CreateHostArguments(

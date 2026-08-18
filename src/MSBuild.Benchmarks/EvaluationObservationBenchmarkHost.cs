@@ -87,8 +87,12 @@ internal static class EvaluationObservationBenchmarkHost
             NativeMetadataReads = nativeMetrics.MetadataReads,
             NativeFileReads = nativeMetrics.FileReads,
             NativeUniquePaths = nativeMetrics.UniquePathCount,
-            NativeOnlyPaths = nativeMetrics.UniquePathCount,
         };
+
+        if (mode == EvaluationObservationBenchmarkMode.Baseline && result.NativeReports != 0)
+        {
+            throw new InvalidOperationException("The baseline benchmark unexpectedly produced native observation reports.");
+        }
 
         string serializedResult = result.Serialize();
         Console.WriteLine(serializedResult);
