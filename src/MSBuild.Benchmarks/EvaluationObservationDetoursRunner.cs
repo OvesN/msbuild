@@ -19,6 +19,12 @@ internal static class EvaluationObservationDetoursRunner
         string scenarioRoot)
     {
 #if NETFRAMEWORK
+        if (!Environment.Is64BitProcess)
+        {
+            throw new PlatformNotSupportedException(
+                "The Detours observer benchmark requires an x64 process. Build MSBuild.Benchmarks with PlatformTarget=x64.");
+        }
+
         string resultFile = Path.GetTempFileName();
         try
         {
@@ -51,6 +57,7 @@ internal static class EvaluationObservationDetoursRunner
             if (!process.WaitForExit(BrokerTimeoutMilliseconds))
             {
                 process.Kill();
+                process.WaitForExit();
                 throw new TimeoutException($"Detours benchmark broker exceeded {BrokerTimeoutMilliseconds} ms.");
             }
 
