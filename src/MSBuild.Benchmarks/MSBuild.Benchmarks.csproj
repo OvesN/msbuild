@@ -16,6 +16,7 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework'">
+    <PackageReference Include="Microsoft.BuildXL.Processes" PrivateAssets="all" />
     <!-- Fix transitive dependency from BenchmarkDotNet that conflicts with Microsoft.VisualStudio.OpenTelemetry.ClientExtensions. -->
     <PackageReference Include="Microsoft.Extensions.Logging.Configuration" VersionOverride="8.0.0" />
   </ItemGroup>
