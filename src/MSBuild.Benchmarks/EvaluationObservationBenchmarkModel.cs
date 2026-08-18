@@ -149,8 +149,20 @@ internal sealed class EvaluationObservationNativeMetrics
     internal int MetadataReads = 0;
     internal int FileReads = 0;
     private readonly HashSet<string> _uniquePaths = new(StringComparer.OrdinalIgnoreCase);
+    private bool _pathsSampled;
 
     internal int UniquePathCount => _uniquePaths.Count;
+
+    internal bool TryBeginPathSample()
+    {
+        if (_pathsSampled)
+        {
+            return false;
+        }
+
+        _pathsSampled = true;
+        return true;
+    }
 
     internal void AddPath(string? path)
     {

@@ -94,6 +94,12 @@ internal static class EvaluationObservationBenchmarkHost
             throw new InvalidOperationException("The baseline benchmark unexpectedly produced native observation reports.");
         }
 
+        if (nativeEnabled && result.NativeReports != iterations)
+        {
+            throw new InvalidOperationException(
+                $"The native benchmark expected {iterations} reports but observed {result.NativeReports}.");
+        }
+
         string serializedResult = result.Serialize();
         Console.WriteLine(serializedResult);
         if (resultFile is not null)
