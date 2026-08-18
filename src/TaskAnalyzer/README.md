@@ -461,6 +461,7 @@ dotnet test
 
 ## Related
 
+- [Using the MSBuild task analyzer](../../documentation/wiki/Using-MSBuild-Task-Analyzer.md)
 - [Multithreaded Task Execution Spec](https://github.com/dotnet/msbuild/pull/12583)
 - [Analyzer Implementation PR](https://github.com/dotnet/msbuild/pull/12143)
 - [IMultiThreadableTask Interface](../Framework/IMultiThreadableTask.cs)

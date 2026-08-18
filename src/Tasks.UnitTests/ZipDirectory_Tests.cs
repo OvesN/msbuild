@@ -6,8 +6,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using Microsoft.Build.Framework;
 using Microsoft.Build.UnitTests;
-using Microsoft.Build.Utilities;
 using Shouldly;
 using Xunit;
 
@@ -50,9 +50,8 @@ namespace Microsoft.Build.Tasks.UnitTests
                 {
                     BuildEngine = _mockEngine,
                     CompressionLevel = compressionLevel,
-                    DestinationFile = new TaskItem(zipFilePath),
-                    SourceDirectory = new TaskItem(sourceFolder.Path),
-                    TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
+                    DestinationFile = CreateFileItem(zipFilePath),
+                    SourceDirectory = CreateDirectoryItem(sourceFolder.Path),
                 };
 
                 zipDirectory.Execute().ShouldBeTrue(_mockEngine.Log);
@@ -108,10 +107,9 @@ namespace Microsoft.Build.Tasks.UnitTests
                 ZipDirectory zipDirectory = new ZipDirectory
                 {
                     BuildEngine = _mockEngine,
-                    DestinationFile = new TaskItem(file.Path),
+                    DestinationFile = CreateFileItem(file.Path),
                     Overwrite = true,
-                    SourceDirectory = new TaskItem(sourceFolder.Path),
-                    TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
+                    SourceDirectory = CreateDirectoryItem(sourceFolder.Path),
                 };
 
                 zipDirectory.Execute().ShouldBeTrue(_mockEngine.Log);
@@ -147,9 +145,8 @@ namespace Microsoft.Build.Tasks.UnitTests
                 ZipDirectory zipDirectory = new ZipDirectory
                 {
                     BuildEngine = _mockEngine,
-                    DestinationFile = new TaskItem(file.Path),
-                    SourceDirectory = new TaskItem(folder.Path),
-                    TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
+                    DestinationFile = CreateFileItem(file.Path),
+                    SourceDirectory = CreateDirectoryItem(folder.Path),
                 };
 
                 zipDirectory.Execute().ShouldBeFalse(_mockEngine.Log);
@@ -164,13 +161,16 @@ namespace Microsoft.Build.Tasks.UnitTests
             ZipDirectory zipDirectory = new ZipDirectory
             {
                 BuildEngine = _mockEngine,
-                SourceDirectory = new TaskItem(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))),
-                TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
+                SourceDirectory = CreateDirectoryItem(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))),
             };
 
             zipDirectory.Execute().ShouldBeFalse(_mockEngine.Log);
 
             _mockEngine.Log.ShouldContain("MSB3941", customMessage: _mockEngine.Log);
         }
+
+        private static ITaskItem<FileInfo> CreateFileItem(string path) => new TaskItem<FileInfo>(new FileInfo(path));
+
+        private static ITaskItem<DirectoryInfo> CreateDirectoryItem(string path) => new TaskItem<DirectoryInfo>(new DirectoryInfo(path));
     }
 }
