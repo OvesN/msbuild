@@ -2194,6 +2194,7 @@ namespace Microsoft.Build.Evaluation.Context
                     entries.Add(string.Concat(SerializeValue(entry.Key), "=", SerializeValue(entry.Value)));
                 }
 
+                entries.Sort(StringComparer.Ordinal);
                 return string.Join(";", entries);
             }
 

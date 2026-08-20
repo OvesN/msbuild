@@ -55,16 +55,17 @@ Measured with `OrchardCoreNoOpBuildBenchmark` against
 Release build run before measurement; each sample is an external
 `dotnet build --no-restore` with unchanged inputs.
 
-| Baseline median | Observer median | Time overhead |
-| ---: | ---: | ---: |
-| 4.911 s | 5.091 s | +3.7% / 180 ms |
+Three independent 12-iteration runs measured **+3.7%, +3.8%, and +5.2%**. Their
+aggregate means are 4.910 s baseline and 5.107 s with observation:
+**approximately +4.0% / +197 ms**. Per-run median deltas ranged from 180 ms to 251 ms.
 
-Removing report sorting changed the measured overhead from 189 ms to 180 ms. The 9 ms
-difference is within VM noise.
+Removing report sorting reduced allocation substantially, but its wall-time effect was
+within VM noise.
 
 ### Observer Allocation Attribution
 
-Inclusive scopes; rows overlap and are not additive.
+Measured with temporary child-process counters across 6 MSBuild processes and 13 project
+evaluations. Scopes are inclusive, overlap, and are not additive.
 
 | Activity | Per evaluation |
 | --- | ---: |
@@ -78,6 +79,9 @@ Inclusive scopes; rows overlap and are not additive.
 
 Removing sorting reduced report-finalization allocation from 259 KB to 44 KB per
 evaluation (-83%, -215 KB).
+
+See [evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md)
+for per-activity CPU-time attribution and optimization priorities.
 
 ## Improvement Areas
 

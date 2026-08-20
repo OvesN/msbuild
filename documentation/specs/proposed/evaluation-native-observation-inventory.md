@@ -610,9 +610,10 @@ This is an implementation checklist, not a second set of dependency categories.
 The native prototype implements the closed observation model, while provider provenance
 remains intentionally fail-closed.
 
-Top-level report collection order is unspecified and is not part of dependency identity.
-Ordered semantic payloads such as glob members, enumeration members, and search candidates
-retain the order consumed by evaluation.
+Report collection order, including nested named-value and SDK-item collections, is
+unspecified and is not part of dependency identity unless a field is explicitly documented
+as ordered. Semantic payloads such as glob members, enumeration members, and search
+candidates retain the order consumed by evaluation.
 
 | Category | Current coverage |
 | --- | --- |
