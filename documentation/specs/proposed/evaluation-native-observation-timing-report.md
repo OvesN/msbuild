@@ -20,6 +20,22 @@ Timing self-overhead was noisy but bounded. BenchmarkDotNet reported ratio 1.00
 (about 1.7%) with one large outlier. Treat individual activity values as approximate;
 the ranking was stable across five repeated telemetry runs.
 
+### Subtractive Wall-Time Cross-Check
+
+A separate diagnostic build disabled one activity at a time with no timing scopes.
+Twenty paired external builds were collected for the three strongest candidates:
+
+| Disabled activity | Median saving | Mean saving | Saving standard deviation | Faster runs |
+| --- | ---: | ---: | ---: | ---: |
+| Report finalization | 23 ms | 73 ms | 602 ms | 11/20 |
+| Filesystem records | 27 ms | 55 ms | 112 ms | 13/20 |
+| Source observation | -2 ms | -71 ms | 200 ms | 10/20 |
+
+These marginal wall-time effects are below the external-process/VM noise floor and are
+**not** used as attributable savings in this report. They do not contradict the CPU
+timings: evaluation runs across several parallel MSBuild processes, while the subtractive
+test measures one noisy end-to-end wall clock.
+
 ## Exclusive Time
 
 | Activity | ms/evaluation | Calls/evaluation | Share of instrumented CPU |
@@ -73,3 +89,13 @@ evaluation reduces its observed wall-clock contribution to about 180 ms.
 The first target should be report finalization plus request snapshotting. Together they
 consume about 12 ms of exclusive CPU per evaluation and require no loss of dependency
 coverage.
+
+## Confidence
+
+The report publishes only:
+
+- whole-build overhead reproduced in three independent BenchmarkDotNet runs;
+- exclusive activity CPU time stable across five runs, 65 evaluations, and 30 processes;
+- allocation attribution collected across all MSBuild processes.
+
+Per-category subtractive wall-time estimates are retained only as a noise-floor check.
