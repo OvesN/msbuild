@@ -55,8 +55,6 @@ public class OrchardCoreNoOpBuildBenchmark
         }
     }
 
-    #endif
-
     [Benchmark(Baseline = true)]
     public Task Before() => ExecuteNoOpBuildAsync(_settings.Before);
 
@@ -290,3 +288,5 @@ public class OrchardCoreNoOpBuildBenchmark
         }
     }
 }
+
+#endif

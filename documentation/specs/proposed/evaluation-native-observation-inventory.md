@@ -590,7 +590,6 @@ This is an implementation checklist, not a second set of dependency categories.
 | `ProjectRootElement.IsEmptyXmlFile` and source reload helpers | Project source / import search |
 | Evaluator import `FileSystems.Default.FileExists` call sites | Path probe / import search |
 | `IntrinsicFunctions.FileExists`, `DirectoryExists`, `DoesTaskHostExist` | Path probe |
-| `IntrinsicFunctions.RegisterBuildCheck` assembly probe and registration | Path probe / side effect |
 | `EngineFileUtilities.GetFileList` decisions before `FileMatcher` | Glob |
 | `FileMatcher.Default` and process/per-context glob caches | Glob |
 | `FileUtilities.MaybeAdjustFilePath` / `LooksLikeUnixFilePath` | Path probe/path normalization |
@@ -610,6 +609,10 @@ This is an implementation checklist, not a second set of dependency categories.
 
 The native prototype implements the closed observation model, while provider provenance
 remains intentionally fail-closed.
+
+Top-level report collection order is unspecified and is not part of dependency identity.
+Ordered semantic payloads such as glob members, enumeration members, and search candidates
+retain the order consumed by evaluation.
 
 | Category | Current coverage |
 | --- | --- |

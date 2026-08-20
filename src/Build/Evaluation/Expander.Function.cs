@@ -512,7 +512,15 @@ internal partial class Expander<P, I>
                         if (!wellKnownFunctionSuccess)
                         {
                             // Some well-known functions need evaluated value from properties.
-                            wellKnownFunctionSuccess = WellKnownFunctions.TryExecuteWellKnownFunctionWithPropertiesParam(_methodMethodName, _receiverType, _loggingContext, properties, out functionResult, objectInstance, args);
+                            wellKnownFunctionSuccess = WellKnownFunctions.TryExecuteWellKnownFunctionWithPropertiesParam(
+                                _methodMethodName,
+                                _receiverType,
+                                _fileSystem,
+                                _loggingContext,
+                                properties,
+                                out functionResult,
+                                objectInstance,
+                                args);
                         }
                     }
                     // we need to preserve the same behavior on exceptions as the actual binder

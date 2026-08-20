@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 4;
+        private const int ObservationSchemaVersion = 5;
         private const int PropertyFunctionClassificationVersion = 1;
 
         [ThreadStatic]
@@ -871,12 +871,12 @@ namespace Microsoft.Build.Evaluation.Context
                         result?.Path,
                         result?.Version,
                         fromCache,
-                        CopyAndSortStrings(result?.AdditionalPaths),
+                        CopyStrings(result?.AdditionalPaths),
                         CreateNamedValueSnapshot(result?.PropertiesToAdd, "SdkProperty"),
                         CreateSdkItemSnapshot(result?.ItemsToAdd),
                         CreateNamedValueSnapshot(result?.EnvironmentVariablesToAdd, "SdkEnvironment"),
-                        CopyAndSortStrings(result?.Warnings),
-                        CopyAndSortStrings(result?.Errors)));
+                        CopyStrings(result?.Warnings),
+                        CopyStrings(result?.Errors)));
                 });
         }
 
@@ -1312,45 +1312,19 @@ namespace Microsoft.Build.Evaluation.Context
                     EvaluationSideEffectObservation[] sideEffects;
                     categories = CreateCategorySnapshot();
                     request = _request;
-                    projectSources = CreateSortedSnapshot(_projectSources);
+                    projectSources = CreateSnapshot(_projectSources.Values);
                     pathProbes = CreatePathProbeSnapshot();
-                    directoryEnumerations = CreateEnumerationSnapshot();
-                    metadataReads = CreateMetadataSnapshot();
-                    fileReads = CreateFileReadSnapshot();
-                    globs = CreateSortedSnapshot(_globs);
-                    searches = CreateSortedSnapshot(_searches);
-                    environment = CreateEnvironmentSnapshot();
-                    externalInputs = CreateSortedSnapshot(_externalInputs);
-                    propertyFunctions = CreateSortedSnapshot(_propertyFunctions);
-                    sdkResolutions = CreateSortedSnapshot(
-                        _sdkResolutions,
-                        static (left, right) =>
-                        {
-                            int comparison = string.Compare(left.SdkName, right.SdkName, StringComparison.Ordinal);
-                            if (comparison != 0)
-                            {
-                                return comparison;
-                            }
-
-                            comparison = string.Compare(left.RequestedVersion, right.RequestedVersion, StringComparison.Ordinal);
-                            if (comparison != 0)
-                            {
-                                return comparison;
-                            }
-
-                            comparison = string.Compare(left.MinimumVersion, right.MinimumVersion, StringComparison.Ordinal);
-                            if (comparison != 0)
-                            {
-                                return comparison;
-                            }
-
-                            comparison = string.Compare(left.Path, right.Path, StringComparison.Ordinal);
-                            return comparison != 0
-                                ? comparison
-                                : left.FromCache.CompareTo(right.FromCache);
-                        });
-                    taskRegistrations = CreateSortedSnapshot(_taskRegistrations);
-                    sideEffects = CreateSortedSnapshot(_sideEffects);
+                    directoryEnumerations = CreateSnapshot(_directoryEnumerations.Values);
+                    metadataReads = CreateSnapshot(_metadataReads.Values);
+                    fileReads = CreateSnapshot(_fileReads.Values);
+                    globs = CreateSnapshot(_globs.Values);
+                    searches = CreateSnapshot(_searches.Values);
+                    environment = CreateSnapshot(_environment.Values);
+                    externalInputs = CreateSnapshot(_externalInputs.Values);
+                    propertyFunctions = CreateSnapshot(_propertyFunctions.Values);
+                    sdkResolutions = _sdkResolutions.ToArray();
+                    taskRegistrations = CreateSnapshot(_taskRegistrations.Values);
+                    sideEffects = CreateSnapshot(_sideEffects.Values);
 
                     report = new EvaluationObservationReport(
                         _evaluationId,
@@ -1489,150 +1463,17 @@ namespace Microsoft.Build.Evaluation.Context
 
         private EvaluationPathProbeObservation[] CreatePathProbeSnapshot()
         {
-            var observations = new List<EvaluationPathProbeObservation>(_pathProbes.Count);
+            var snapshot = new EvaluationPathProbeObservation[_pathProbes.Count];
+            int index = 0;
             foreach (KeyValuePair<PathProbeKey, bool> observation in _pathProbes)
             {
-                observations.Add(new EvaluationPathProbeObservation(
+                snapshot[index++] = new EvaluationPathProbeObservation(
                     observation.Key.Path,
                     observation.Key.Kind,
                     observation.Value,
-                    observation.Key.Provider));
+                    observation.Key.Provider);
             }
 
-            EvaluationPathProbeObservation[] snapshot = observations.ToArray();
-            Array.Sort(snapshot, static (left, right) =>
-            {
-                int pathComparison = FileUtilities.PathComparer.Compare(left.Path, right.Path);
-                if (pathComparison != 0)
-                {
-                    return pathComparison;
-                }
-
-                int kindComparison = left.Kind.CompareTo(right.Kind);
-                return kindComparison != 0
-                    ? kindComparison
-                    : string.Compare(left.Provider, right.Provider, StringComparison.Ordinal);
-            });
-            return snapshot;
-        }
-
-        private EvaluationDirectoryEnumerationObservation[] CreateEnumerationSnapshot()
-        {
-            var observations = new List<EvaluationDirectoryEnumerationObservation>(_directoryEnumerations.Count);
-            foreach (EvaluationDirectoryEnumerationObservation observation in _directoryEnumerations.Values)
-            {
-                observations.Add(observation);
-            }
-
-            EvaluationDirectoryEnumerationObservation[] snapshot = observations.ToArray();
-            Array.Sort(snapshot, static (left, right) =>
-            {
-                int pathComparison = FileUtilities.PathComparer.Compare(left.Path, right.Path);
-                if (pathComparison != 0)
-                {
-                    return pathComparison;
-                }
-
-                int patternComparison = string.Compare(left.SearchPattern, right.SearchPattern, StringComparison.Ordinal);
-                if (patternComparison != 0)
-                {
-                    return patternComparison;
-                }
-
-                int searchOptionComparison = left.SearchOption.CompareTo(right.SearchOption);
-                if (searchOptionComparison != 0)
-                {
-                    return searchOptionComparison;
-                }
-
-                int kindComparison = left.Kind.CompareTo(right.Kind);
-                return kindComparison != 0
-                    ? kindComparison
-                    : string.Compare(left.Provider, right.Provider, StringComparison.Ordinal);
-            });
-            return snapshot;
-        }
-
-        private EvaluationEnvironmentObservation[] CreateEnvironmentSnapshot()
-        {
-            var snapshot = new EvaluationEnvironmentObservation[_environment.Count];
-            _environment.Values.CopyTo(snapshot, 0);
-            Array.Sort(snapshot, static (left, right) =>
-            {
-                int sourceComparison = left.Source.CompareTo(right.Source);
-                if (sourceComparison != 0)
-                {
-                    return sourceComparison;
-                }
-
-                StringComparer comparer = GetEnvironmentNameComparer(left.Source);
-                int nameComparison = comparer.Compare(left.Name, right.Name);
-                return nameComparison != 0
-                    ? nameComparison
-                    : string.Compare(left.Name, right.Name, StringComparison.Ordinal);
-            });
-            return snapshot;
-        }
-
-        private EvaluationMetadataObservation[] CreateMetadataSnapshot()
-        {
-            var observations = new List<EvaluationMetadataObservation>(_metadataReads.Count);
-            foreach (EvaluationMetadataObservation observation in _metadataReads.Values)
-            {
-                observations.Add(observation);
-            }
-
-            EvaluationMetadataObservation[] snapshot = observations.ToArray();
-            Array.Sort(snapshot, static (left, right) =>
-            {
-                int pathComparison = FileUtilities.PathComparer.Compare(left.Path, right.Path);
-                if (pathComparison != 0)
-                {
-                    return pathComparison;
-                }
-
-                int kindComparison = left.Kind.CompareTo(right.Kind);
-                if (kindComparison != 0)
-                {
-                    return kindComparison;
-                }
-
-                int operationComparison = string.Compare(left.Operation, right.Operation, StringComparison.Ordinal);
-                if (operationComparison != 0)
-                {
-                    return operationComparison;
-                }
-
-                int baseDirectoryComparison = FileUtilities.PathComparer.Compare(left.BaseDirectory, right.BaseDirectory);
-                return baseDirectoryComparison != 0
-                    ? baseDirectoryComparison
-                    : string.Compare(left.Provider, right.Provider, StringComparison.Ordinal);
-            });
-            return snapshot;
-        }
-
-        private EvaluationFileReadObservation[] CreateFileReadSnapshot()
-        {
-            var observations = new List<EvaluationFileReadObservation>(_fileReads.Count);
-            foreach (EvaluationFileReadObservation observation in _fileReads.Values)
-            {
-                observations.Add(observation);
-            }
-
-            EvaluationFileReadObservation[] snapshot = observations.ToArray();
-            Array.Sort(snapshot, static (left, right) =>
-            {
-                int pathComparison = FileUtilities.PathComparer.Compare(left.Path, right.Path);
-                if (pathComparison != 0)
-                {
-                    return pathComparison;
-                }
-
-                int kindComparison = left.HashKind.CompareTo(right.HashKind);
-                return kindComparison != 0
-                    ? kindComparison
-                    : string.Compare(left.Provider, right.Provider, StringComparison.Ordinal);
-            });
             return snapshot;
         }
 
@@ -1654,27 +1495,15 @@ namespace Microsoft.Build.Evaluation.Context
             }
         }
 
-        private static T[] CreateSortedSnapshot<T>(Dictionary<string, T> observations)
+        private static T[] CreateSnapshot<T>(ICollection<T> observations)
         {
-            string[] keys = new string[observations.Count];
-            observations.Keys.CopyTo(keys, 0);
-            Array.Sort(keys, StringComparer.Ordinal);
-
-            T[] snapshot = new T[keys.Length];
-            for (int i = 0; i < keys.Length; i++)
+            if (observations.Count == 0)
             {
-                snapshot[i] = observations[keys[i]];
+                return [];
             }
 
-            return snapshot;
-        }
-
-        private static T[] CreateSortedSnapshot<T>(
-            List<T> observations,
-            Comparison<T> comparison)
-        {
-            T[] snapshot = observations.ToArray();
-            Array.Sort(snapshot, comparison);
+            T[] snapshot = new T[observations.Count];
+            observations.CopyTo(snapshot, 0);
             return snapshot;
         }
 
@@ -2365,7 +2194,6 @@ namespace Microsoft.Build.Evaluation.Context
                     entries.Add(string.Concat(SerializeValue(entry.Key), "=", SerializeValue(entry.Value)));
                 }
 
-                entries.Sort(StringComparer.Ordinal);
                 return string.Join(";", entries);
             }
 
@@ -2401,7 +2229,7 @@ namespace Microsoft.Build.Evaluation.Context
             return snapshot;
         }
 
-        private static string[] CopyAndSortStrings(IEnumerable<string> values)
+        private static string[] CopyStrings(IEnumerable<string> values)
         {
             if (values is null)
             {
@@ -2416,7 +2244,6 @@ namespace Microsoft.Build.Evaluation.Context
                 snapshot.Add(value);
             }
 
-            snapshot.Sort(StringComparer.Ordinal);
             return snapshot.ToArray();
         }
 
@@ -2439,9 +2266,6 @@ namespace Microsoft.Build.Evaluation.Context
                     source);
             }
 
-            Array.Sort(
-                snapshot,
-                static (left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
             return snapshot;
         }
 
@@ -2463,15 +2287,6 @@ namespace Microsoft.Build.Evaluation.Context
                     CreateNamedValueSnapshot(item.Value?.Metadata, "SdkItemMetadata"));
             }
 
-            Array.Sort(
-                snapshot,
-                static (left, right) =>
-                {
-                    int typeComparison = string.Compare(left.ItemType, right.ItemType, StringComparison.OrdinalIgnoreCase);
-                    return typeComparison != 0
-                        ? typeComparison
-                        : string.Compare(left.ItemSpec, right.ItemSpec, StringComparison.Ordinal);
-                });
             return snapshot;
         }
 
