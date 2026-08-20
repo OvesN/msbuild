@@ -13,6 +13,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
@@ -502,7 +503,12 @@ namespace Microsoft.Build.Evaluation
             }
 #endif
 
-            return taskHostLocation != null && FileUtilities.FileExistsNoThrow(taskHostLocation);
+            bool exists = taskHostLocation != null && FileUtilities.FileExistsNoThrow(taskHostLocation);
+            EvaluationObservationSession.Current?.RecordProbe(
+                taskHostLocation,
+                EvaluationPathKind.File,
+                exists);
+            return exists;
         }
 
         /// <summary>
@@ -534,7 +540,9 @@ namespace Microsoft.Build.Evaluation
         /// <returns></returns>
         public static bool FileExists(string path)
         {
-            return FileUtilities.FileExistsNoThrow(path);
+            bool exists = FileUtilities.FileExistsNoThrow(path);
+            EvaluationObservationSession.Current?.RecordProbe(path, EvaluationPathKind.File, exists);
+            return exists;
         }
 
         /// <summary>
@@ -544,7 +552,9 @@ namespace Microsoft.Build.Evaluation
         /// <returns></returns>
         public static bool DirectoryExists(string path)
         {
-            return FileUtilities.DirectoryExistsNoThrow(path);
+            bool exists = FileUtilities.DirectoryExistsNoThrow(path);
+            EvaluationObservationSession.Current?.RecordProbe(path, EvaluationPathKind.Directory, exists);
+            return exists;
         }
 
         /// <summary>
@@ -723,9 +733,36 @@ namespace Microsoft.Build.Evaluation
         public static bool RegisterBuildCheck(string projectPath, string pathToAssembly, LoggingContext loggingContext)
         {
             pathToAssembly = FileUtilities.GetFullPathNoThrow(pathToAssembly);
-            if (FileSystems.Default.FileExists(pathToAssembly))
+            bool exists = FileSystems.Default.FileExists(pathToAssembly);
+            EvaluationObservationSession.Current?.RecordProbe(
+                pathToAssembly,
+                EvaluationPathKind.File,
+                exists);
+            if (exists)
             {
+                EvaluationObservationSession observationSession = EvaluationObservationSession.Current;
+                if (observationSession is not null)
+                {
+                    try
+                    {
+                        byte[] assemblyContent = FileSystems.Default.ReadFileAllBytes(pathToAssembly);
+                        observationSession.RecordFileRead(
+                            pathToAssembly,
+                            EvaluationObservationSession.ComputeBytesHash(assemblyContent),
+                            isVerifiable: true,
+                            hashKind: EvaluationContentHashKind.RawBytes);
+                    }
+                    catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                    {
+                        observationSession.MarkReason(EvaluationObservationReason.ObservationIncomplete);
+                    }
+                }
+
                 loggingContext.LogBuildEvent(new BuildCheckAcquisitionEventArgs(pathToAssembly, projectPath));
+                EvaluationObservationSession.Current?.RecordSideEffect(
+                    "RegisterBuildCheck",
+                    pathToAssembly,
+                    projectPath);
 
                 return true;
             }

@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -45,6 +46,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
             if (Traits.Instance.EscapeHatches.DisableSdkResolutionCache)
             {
+                wasResultCached = false;
                 result = base.ResolveSdk(submissionId, sdk, loggingContext, sdkReferenceLocation, solutionPath, projectPath, interactive, isRunningInVisualStudio, failOnUnresolvedSdk);
             }
             else
@@ -58,14 +60,22 @@ namespace Microsoft.Build.BackEnd.SdkResolution
                  * Get a Lazy<SdkResult> if available, otherwise create a Lazy<SdkResult> which will resolve the SDK with the SdkResolverService.Instance.  If multiple projects are attempting to resolve
                  * the same SDK, they will all get back the same Lazy<SdkResult> which ensures that a single build submission resolves each unique SDK only one time.
                  */
-                Lazy<SdkResult> resultLazy = cached.GetOrAdd(
-                    sdk.Name,
-                    key => new Lazy<SdkResult>(() =>
+                Lazy<SdkResult> resultLazy;
+                if (cached.TryGetValue(sdk.Name, out resultLazy))
+                {
+                    wasResultCached = true;
+                }
+                else
+                {
+                    EvaluationObservationSession observationSession = EvaluationObservationSession.Current;
+                    var candidate = new Lazy<SdkResult>(() =>
                     {
-                        wasResultCached = false;
-
+                        using IDisposable observationScope = observationSession?.Enter();
                         return base.ResolveSdk(submissionId, sdk, loggingContext, sdkReferenceLocation, solutionPath, projectPath, interactive, isRunningInVisualStudio, failOnUnresolvedSdk);
-                    }));
+                    });
+                    resultLazy = cached.GetOrAdd(sdk.Name, candidate);
+                    wasResultCached = !ReferenceEquals(resultLazy, candidate);
+                }
 
                 // Get the lazy value which will block all waiting threads until the SDK is resolved at least once while subsequent calls get cached results.
                 result = resultLazy.Value;
@@ -77,6 +87,16 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             {
                 // MSB4240: Multiple versions of the same SDK "{0}" cannot be specified. The previously resolved SDK version "{1}" from location "{2}" will be used and the version "{3}" will be ignored.
                 loggingContext.LogWarning(null, new BuildEventFileInfo(sdkReferenceLocation), "ReferencingMultipleVersionsOfTheSameSdk", sdk.Name, result.Version, result.ElementLocation, sdk.Version);
+            }
+
+            if (wasResultCached)
+            {
+                EvaluationObservationSession.Current?.RecordSdkResolution(
+                    sdk,
+                    resolver: null,
+                    result,
+                    fromCache: true);
+                EvaluationObservationSession.Current?.MarkReason(EvaluationObservationReason.UnversionedSdkResolverCache);
             }
 
             MSBuildEventSource.Log.CachedSdkResolverServiceResolveSdkStop(sdk.Name, solutionPath ?? string.Empty, projectPath ?? string.Empty, result.Success, wasResultCached);

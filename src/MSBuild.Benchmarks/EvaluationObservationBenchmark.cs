@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using BenchmarkDotNet.Attributes;
 
@@ -13,7 +14,10 @@ public partial class EvaluationObservationBenchmark
     private const int TypicalFileCount = 200;
     private const int GlobHeavyFileCount = 2_000;
 
-    [Params(EvaluationObservationBenchmarkScenario.Typical, EvaluationObservationBenchmarkScenario.GlobHeavy)]
+    [Params(
+        EvaluationObservationBenchmarkScenario.Typical,
+        EvaluationObservationBenchmarkScenario.GlobHeavy,
+        EvaluationObservationBenchmarkScenario.AmbientAndSdk)]
     public EvaluationObservationBenchmarkScenario Scenario { get; set; }
 
     [Params(50)]
@@ -21,6 +25,8 @@ public partial class EvaluationObservationBenchmark
 
     private string _root = null!;
     private string _projectPath = null!;
+    private string? _previousSdkPath;
+    private string? _previousEnvironmentInput;
     private readonly Dictionary<EvaluationObservationBenchmarkMode, Aggregate> _aggregates = new();
 
     [GlobalSetup]
@@ -32,7 +38,9 @@ public partial class EvaluationObservationBenchmark
 
         int fileCount = Scenario == EvaluationObservationBenchmarkScenario.Typical
             ? TypicalFileCount
-            : GlobHeavyFileCount;
+            : Scenario == EvaluationObservationBenchmarkScenario.GlobHeavy
+                ? GlobHeavyFileCount
+                : TypicalFileCount;
 
         for (int i = 0; i < fileCount; i++)
         {
@@ -42,6 +50,18 @@ public partial class EvaluationObservationBenchmark
         }
 
         File.WriteAllText(Path.Combine(_root, "present.marker"), string.Empty);
+        File.WriteAllText(Path.Combine(_root, "settings.txt"), "settings-value");
+
+        string sdkRoot = Path.Combine(_root, "Sdks");
+        string sdkDirectory = Path.Combine(sdkRoot, "Observed.Sdk", "Sdk");
+        Directory.CreateDirectory(sdkDirectory);
+        File.WriteAllText(Path.Combine(sdkDirectory, "Sdk.props"), "<Project />");
+        File.WriteAllText(Path.Combine(sdkDirectory, "Sdk.targets"), "<Project />");
+
+        _previousSdkPath = Environment.GetEnvironmentVariable("MSBuildSDKsPath");
+        _previousEnvironmentInput = Environment.GetEnvironmentVariable("EVALUATION_OBSERVATION_BENCHMARK_ENV");
+        Environment.SetEnvironmentVariable("MSBuildSDKsPath", sdkRoot);
+        Environment.SetEnvironmentVariable("EVALUATION_OBSERVATION_BENCHMARK_ENV", "benchmark-environment-value");
         File.WriteAllText(
             Path.Combine(_root, "imported.props"),
             """
@@ -53,16 +73,39 @@ public partial class EvaluationObservationBenchmark
             """);
 
         StringBuilder project = new();
-        project.AppendLine("<Project>");
+        project.AppendLine(Scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk
+            ? "<Project Sdk=\"Observed.Sdk\">"
+            : "<Project>");
         project.AppendLine("  <Import Project=\"imported.props\" />");
         project.AppendLine("  <PropertyGroup>");
         project.AppendLine("    <RequestedProperty>$(ImportedProperty)</RequestedProperty>");
         project.AppendLine("    <PresentMarker Condition=\"Exists('present.marker')\">true</PresentMarker>");
         project.AppendLine("    <MissingMarker Condition=\"Exists('missing.marker')\">true</MissingMarker>");
+        if (Scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk)
+        {
+            project.AppendLine("    <ImportedEnvironment>$(EVALUATION_OBSERVATION_BENCHMARK_ENV)</ImportedEnvironment>");
+            project.AppendLine("    <LiveEnvironment>$([System.Environment]::GetEnvironmentVariable('EVALUATION_OBSERVATION_BENCHMARK_ENV'))</LiveEnvironment>");
+            project.AppendLine("    <Settings>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)settings.txt'))</Settings>");
+            project.AppendLine("    <Above>$([MSBuild]::GetPathOfFileAbove('settings.txt', '$(MSBuildThisFileDirectory)'))</Above>");
+            project.AppendLine("    <Volatile>$([System.DateTime]::UtcNow)</Volatile>");
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                project.AppendLine("    <Registry>$([MSBuild]::GetRegistryValue('HKEY_CURRENT_USER\\Software\\MSBuildObservationMissing', 'Value', 'fallback'))</Registry>");
+            }
+        }
         project.AppendLine("  </PropertyGroup>");
         project.AppendLine("  <ItemGroup>");
         project.AppendLine("    <Compile Include=\"src/**/*.cs\" />");
+        if (Scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk)
+        {
+            project.AppendLine("    <Input Include=\"settings.txt\" />");
+            project.AppendLine("    <MetadataValue Include=\"@(Input->'%(ModifiedTime)')\" />");
+        }
         project.AppendLine("  </ItemGroup>");
+        if (Scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk)
+        {
+            project.AppendLine("  <UsingTask TaskName=\"ObservedTask\" AssemblyFile=\"observed-task.dll\" />");
+        }
         project.AppendLine("</Project>");
 
         _projectPath = Path.Combine(_root, "benchmark.proj");
@@ -76,6 +119,9 @@ public partial class EvaluationObservationBenchmark
         {
             Console.WriteLine(entry.Value.Format(entry.Key, Scenario));
         }
+
+        Environment.SetEnvironmentVariable("MSBuildSDKsPath", _previousSdkPath);
+        Environment.SetEnvironmentVariable("EVALUATION_OBSERVATION_BENCHMARK_ENV", _previousEnvironmentInput);
 
         if (Directory.Exists(_root))
         {
@@ -123,6 +169,7 @@ public partial class EvaluationObservationBenchmark
         private long _maximumEvaluationTicks = long.MinValue;
         private double _meanEvaluationTicks;
         private double _evaluationTicksM2;
+        private long _allocatedManagedBytes;
         private long _retainedManagedBytes;
         private long _privateBytes;
         private long _peakWorkingSetBytes;
@@ -131,6 +178,7 @@ public partial class EvaluationObservationBenchmark
         private long _nativeEnumerations;
         private long _nativeMetadataReads;
         private long _nativeFileReads;
+        private long _nativeSemanticObservations;
         private long _nativeUniquePaths;
         private long _detoursAccesses;
         private long _detoursUniquePaths;
@@ -149,6 +197,7 @@ public partial class EvaluationObservationBenchmark
             _meanEvaluationTicks += delta / _samples;
             _evaluationTicksM2 += delta * (result.EvaluationTicks - _meanEvaluationTicks);
 
+            _allocatedManagedBytes += result.AllocatedManagedBytes;
             _retainedManagedBytes += result.RetainedManagedBytes;
             _privateBytes += result.PrivateBytes;
             _peakWorkingSetBytes += result.PeakWorkingSetBytes;
@@ -157,6 +206,7 @@ public partial class EvaluationObservationBenchmark
             _nativeEnumerations += result.NativeEnumerations;
             _nativeMetadataReads += result.NativeMetadataReads;
             _nativeFileReads += result.NativeFileReads;
+            _nativeSemanticObservations += result.NativeSemanticObservations;
             _nativeUniquePaths += result.NativeUniquePaths;
             _detoursAccesses += result.DetoursAccesses;
             _detoursUniquePaths += result.DetoursUniquePaths;
@@ -180,6 +230,7 @@ public partial class EvaluationObservationBenchmark
                 Pair("EvaluationStdDevMilliseconds", ToMilliseconds(StandardDeviationTicks())),
                 Pair("EvaluationMinMilliseconds", ToMilliseconds(_minimumEvaluationTicks)),
                 Pair("EvaluationMaxMilliseconds", ToMilliseconds(_maximumEvaluationTicks)),
+                Pair("AllocatedManagedBytes", Average(_allocatedManagedBytes)),
                 Pair("RetainedManagedBytes", Average(_retainedManagedBytes)),
                 Pair("PrivateBytes", Average(_privateBytes)),
                 Pair("PeakWorkingSetBytes", Average(_peakWorkingSetBytes)),
@@ -188,6 +239,7 @@ public partial class EvaluationObservationBenchmark
                 Pair("NativeEnumerations", Average(_nativeEnumerations)),
                 Pair("NativeMetadataReads", Average(_nativeMetadataReads)),
                 Pair("NativeFileReads", Average(_nativeFileReads)),
+                Pair("NativeSemanticObservations", Average(_nativeSemanticObservations)),
                 Pair("NativeUniquePaths", Average(_nativeUniquePaths)),
                 Pair("DetoursAccesses", Average(_detoursAccesses)),
                 Pair("DetoursUniquePaths", Average(_detoursUniquePaths)),

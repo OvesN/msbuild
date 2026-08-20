@@ -10,6 +10,7 @@ using System.IO;
 #endif
 using System.Linq;
 using System.Reflection;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
@@ -108,7 +109,6 @@ internal partial class Expander<P, I>
                     {
                         continue;
                     }
-
                     string result = null;
 
                     try
@@ -190,7 +190,12 @@ internal partial class Expander<P, I>
                         ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "InvalidItemFunctionExpression", functionName, item.Value, e.Message);
                     }
 
-                    if (FileSystems.Default.FileOrDirectoryExists(rootedPath))
+                    bool exists = FileSystems.Default.FileOrDirectoryExists(rootedPath);
+                    EvaluationObservationSession.Current?.RecordProbe(
+                        rootedPath,
+                        EvaluationPathKind.FileOrDirectory,
+                        exists);
+                    if (exists)
                     {
                         output.Add(item);
                     }

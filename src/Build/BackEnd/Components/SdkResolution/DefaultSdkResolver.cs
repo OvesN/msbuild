@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.IO;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using SdkResolverBase = Microsoft.Build.Framework.SdkResolver;
@@ -29,8 +30,13 @@ namespace Microsoft.Build.BackEnd.SdkResolution
         public override SdkResultBase Resolve(SdkReference sdk, SdkResolverContextBase context, SdkResultFactoryBase factory)
         {
             string sdkPath = Path.Combine(BuildEnvironmentHelper.Instance.MSBuildSDKsPath, sdk.Name, "Sdk");
+            bool exists = FileUtilities.DirectoryExistsNoThrow(sdkPath);
+            EvaluationObservationSession.Current?.RecordProbe(
+                sdkPath,
+                EvaluationPathKind.Directory,
+                exists);
 
-            return FileUtilities.DirectoryExistsNoThrow(sdkPath)
+            return exists
                 ? factory.IndicateSuccess(sdkPath, string.Empty)
                 : factory.IndicateFailure([ResourceUtilities.FormatResourceStringIgnoreCodeAndKeyword("DefaultSDKResolverError", sdk.Name, sdkPath)], null);
         }
