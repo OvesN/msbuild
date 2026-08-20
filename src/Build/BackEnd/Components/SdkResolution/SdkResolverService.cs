@@ -10,7 +10,6 @@ using System.Text.RegularExpressions;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Evaluation;
-using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -176,7 +175,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             List<SdkResolverManifest> matchingResolversManifests = new();
             foreach (SdkResolverManifest manifest in _specificResolversManifestsRegistry)
             {
-                EvaluationObservationSession.Current?.RecordSdkResolverManifest(manifest);
                 WaitIfTestRequires(); 
                 try
                 {
@@ -274,7 +272,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             List<SdkResolver> resolvers = new List<SdkResolver>();
             foreach (var resolverManifest in resolversManifests)
             {
-                EvaluationObservationSession.Current?.RecordSdkResolverManifest(resolverManifest);
                 IReadOnlyList<SdkResolver> newResolvers;
                 lock (_lockObject)
                 {
@@ -301,11 +298,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
                         _manifestToResolvers[resolverManifest] = newResolvers;
                     }
-                }
-
-                foreach (SdkResolver resolver in newResolvers)
-                {
-                    EvaluationObservationSession.Current?.RecordDiscoveredSdkResolver(resolver);
                 }
 
                 resolvers.AddRange(newResolvers);
@@ -375,11 +367,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
                 }
                 finally
                 {
-                    EvaluationObservationSession.Current?.RecordSdkResolution(
-                        sdk,
-                        sdkResolver,
-                        result,
-                        fromCache: false);
                     MSBuildEventSource.Log.SdkResolverResolveSdkStop(sdkResolver.Name, sdk.Name, solutionPath ?? string.Empty, projectPath ?? string.Empty, result?.Path ?? string.Empty, result?.Success ?? false);
                 }
 

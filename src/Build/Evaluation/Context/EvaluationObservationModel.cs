@@ -23,16 +23,12 @@ namespace Microsoft.Build.Evaluation.Context
         UnversionedDirectoryCache = 1L << 10,
         ProjectXmlContentNotObserved = 1L << 11,
         UnversionedProjectRootElementCache = 1L << 12,
-        UnversionedSdkResolverCache = 1L << 13,
         IncompleteEvaluationStage = 1L << 14,
         UnrootedPath = 1L << 15,
         AllPropertyFunctionsEnabled = 1L << 16,
         UnclassifiedPropertyFunction = 1L << 17,
         UnsupportedVolatileInput = 1L << 18,
         EvaluationSideEffect = 1L << 19,
-        CustomSdkResolver = 1L << 20,
-        SdkResolverDependencyManifestUnavailable = 1L << 21,
-        OutOfProcSdkResolver = 1L << 22,
         UnversionedToolsetInputs = 1L << 23,
         UnversionedCustomProvider = 1L << 24,
         ParserConfigurationProvenanceUnavailable = 1L << 25,
@@ -40,7 +36,6 @@ namespace Microsoft.Build.Evaluation.Context
         OpaqueExternalInput = 1L << 27,
         UnversionedToolLocationHelperCache = 1L << 28,
         ObservationIncomplete = 1L << 29,
-        SdkResolverDiscoveryProvenanceUnavailable = 1L << 30,
         UnversionedSourceProvider = 1L << 31,
     }
 
@@ -549,10 +544,6 @@ namespace Microsoft.Build.Evaluation.Context
             string sdkName,
             string requestedVersion,
             string minimumVersion,
-            string resolverName,
-            string resolverType,
-            string resolverAssembly,
-            int priority,
             bool success,
             string path,
             string version,
@@ -567,10 +558,6 @@ namespace Microsoft.Build.Evaluation.Context
             SdkName = sdkName;
             RequestedVersion = requestedVersion;
             MinimumVersion = minimumVersion;
-            ResolverName = resolverName;
-            ResolverType = resolverType;
-            ResolverAssembly = resolverAssembly;
-            Priority = priority;
             Success = success;
             Path = path;
             Version = version;
@@ -586,10 +573,6 @@ namespace Microsoft.Build.Evaluation.Context
         internal string SdkName { get; }
         internal string RequestedVersion { get; }
         internal string MinimumVersion { get; }
-        internal string ResolverName { get; }
-        internal string ResolverType { get; }
-        internal string ResolverAssembly { get; }
-        internal int Priority { get; }
         internal bool Success { get; }
         internal string Path { get; }
         internal string Version { get; }

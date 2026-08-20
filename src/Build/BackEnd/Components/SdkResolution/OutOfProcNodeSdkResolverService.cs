@@ -96,11 +96,8 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
             EvaluationObservationSession.Current?.RecordSdkResolution(
                 sdk,
-                resolver: null,
                 sdkResult,
                 wasResultCached);
-            EvaluationObservationSession.Current?.MarkReason(EvaluationObservationReason.OutOfProcSdkResolver);
-            EvaluationObservationSession.Current?.MarkReason(EvaluationObservationReason.SdkResolverDependencyManifestUnavailable);
 
             MSBuildEventSource.Log.OutOfProcSdkResolverServiceRequestSdkPathFromMainNodeStop(submissionId, sdk.Name, solutionPath, projectPath, _lastResponse.Success, wasResultCached);
 

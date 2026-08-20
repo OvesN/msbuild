@@ -725,7 +725,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(3);
+            report.SchemaVersion.ShouldBe(4);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -1094,17 +1094,16 @@ namespace Microsoft.Build.UnitTests.Definition
             });
 
             report.ShouldNotBeNull();
-            report.SdkResolutions.ShouldContain(observation =>
+            report.SdkResolutions.Count(observation =>
                 observation.SdkName == "foo" &&
-                observation.ResolverType == _resolver.GetType().FullName &&
-                observation.Success);
+                !observation.FromCache).ShouldBe(1);
+            report.SdkResolutions.ShouldAllBe(observation => observation.Success);
             report.TaskRegistrations.ShouldContain(observation =>
                 observation.TaskName == "ObservedTask" &&
                 observation.AssemblyFile.EndsWith("observed-task.dll", StringComparison.OrdinalIgnoreCase));
-            (report.Reasons & EvaluationObservationReason.CustomSdkResolver)
-                .ShouldBe(EvaluationObservationReason.CustomSdkResolver);
-            (report.Reasons & EvaluationObservationReason.SdkResolverDependencyManifestUnavailable)
-                .ShouldBe(EvaluationObservationReason.SdkResolverDependencyManifestUnavailable);
+            report.Categories.ShouldContain(observation =>
+                observation.Category == EvaluationObservationCategory.SdkResolution &&
+                observation.State == EvaluationObservationCategoryState.Observed);
         }
 
         [Fact]
@@ -1170,28 +1169,7 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
-        public void EvaluationObservationMarksSharedSdkResolverCacheAsUnversioned()
-        {
-            EvaluationObservationReport report = null;
-            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
-                enabled: true,
-                createdReport => report = createdReport);
-
-            string projectFile = _env.CreateFile("shared-sdk-cache.proj", "<Project />").Path;
-
-            Project.FromFile(projectFile, new ProjectOptions
-            {
-                ProjectCollection = _env.CreateProjectCollection().Collection,
-                EvaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.SharedSDKCache),
-            });
-
-            report.ShouldNotBeNull();
-            (report.Reasons & EvaluationObservationReason.UnversionedSdkResolverCache)
-                .ShouldBe(EvaluationObservationReason.UnversionedSdkResolverCache);
-        }
-
-        [Fact]
-        public void EvaluationObservationReplaysCustomResolverIdentityOnSdkCacheHit()
+        public void EvaluationObservationRecordsSdkResultOnCacheHit()
         {
             var reports = new List<EvaluationObservationReport>();
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
@@ -1214,13 +1192,14 @@ namespace Microsoft.Build.UnitTests.Definition
             }
 
             reports.Count.ShouldBe(2);
-            EvaluationObservationReport cacheHitReport = reports.Last(report =>
-                report.SdkResolutions.Any(observation => observation.FromCache));
+            reports[0].SdkResolutions.Count(observation =>
+                observation.SdkName == "foo" &&
+                !observation.FromCache).ShouldBe(1);
+            EvaluationObservationReport cacheHitReport = reports[1];
             cacheHitReport.SdkResolutions.ShouldContain(observation =>
                 observation.FromCache &&
-                observation.ResolverType == _resolver.GetType().FullName);
-            (cacheHitReport.Reasons & EvaluationObservationReason.CustomSdkResolver)
-                .ShouldBe(EvaluationObservationReason.CustomSdkResolver);
+                observation.SdkName == "foo" &&
+                observation.Success);
         }
 
         [Fact]

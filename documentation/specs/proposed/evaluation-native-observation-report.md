@@ -31,7 +31,7 @@
   - Recorded after execution in `Expander`; pure calls are omitted and unknown/unsafe calls fail closed.
 
 - **SDK resolution**
-  - Tracks the complete SDK request key, cache hit/miss, and returned `SdkResult`.
+  - Tracks the complete SDK request record, cache hit/miss, and returned `SdkResult`.
   - Resolver dependencies are not observed; the SDK result cache owns reuse until it is cleared.
 
 - **Toolsets, tasks, providers, and caches**
@@ -46,7 +46,7 @@
 
 The implementation reuses PRE versions/cache data, filesystem abstractions, `FileMatcher`, property tracking, and SDK resolver/cache seams. It does not yet implement persistent evaluated-result storage or invalidation.
 
-SDK resolver dependencies are not observed. The SDK cache returns the stored `SdkResult` for the same complete resolver request key until that cache is cleared.
+SDK resolver dependencies are not observed. The current SDK cache returns the stored `SdkResult` for the same SDK name within its cache scope until that cache is cleared.
 
 ## Measurements
 
@@ -54,7 +54,10 @@ SDK resolver dependencies are not observed. The SDK cache returns the stored `Sd
 | --- | ---: | ---: |
 | Typical | +4.39% / 0.21 ms | +22.4 KB |
 | Glob-heavy | +4.04% / 0.30 ms | +22.7 KB |
-| Ambient/SDK | +7.74% / 0.47 ms | +40.1 KB |
+| Ambient/SDK | +5.93% / 0.37 ms | +40.5 KB |
+
+An identical 15x1000 A/B run reduced Ambient/SDK from +7.58% / 0.47 ms / 42.1 KB to +5.93% / 0.37 ms / 40.5 KB.
+Typical and Glob-heavy use the earlier paired 9x500 run.
 
 ## Improvement Areas
 

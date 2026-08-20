@@ -2285,11 +2285,6 @@ namespace Microsoft.Build.Evaluation
                         _interactive,
                         _isRunningInVisualStudio);
 
-                    if (_sdkResolverService is OutOfProcNodeSdkResolverService)
-                    {
-                        _observationSession?.MarkReason(EvaluationObservationReason.OutOfProcSdkResolver);
-                    }
-
                     using var assemblyLoadsTracker = AssemblyLoadsTracker.StartTracking(_evaluationLoggingContext, AssemblyLoadingContext.SdkResolution, _sdkResolverService.GetType());
 
                     sdkResult = _sdkResolverService.ResolveSdk(
