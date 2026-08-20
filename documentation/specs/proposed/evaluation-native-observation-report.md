@@ -48,21 +48,32 @@ The implementation reuses PRE versions/cache data, filesystem abstractions, `Fil
 
 SDK resolver dependencies are not observed. The current SDK cache returns the stored `SdkResult` for the same SDK name within its cache scope until that cache is cleared.
 
-## Measurements
+## Orchard Core Measurements
 
-| Scenario | Time overhead | Allocation |
+Measured with the existing [Orchard Core command-line evaluation benchmark](https://github.com/dotnet/msbuild/pull/14634), normalized per evaluation.
+
+| Query | Baseline | Observer | Time overhead | Allocation |
+| --- | ---: | ---: | ---: | ---: |
+| `GetProperty` | 55.08 ms | 60.67 ms | +10.1% | 3.99 MB -> 4.32 MB |
+| `GetItems` | 64.19 ms | 67.83 ms | +5.7% | 4.56 MB -> 4.89 MB |
+
+### Observer Allocation Attribution
+
+Inclusive scopes; rows overlap and are not additive.
+
+| Activity | `GetProperty` | `GetItems` |
 | --- | ---: | ---: |
-| Typical | +4.39% / 0.21 ms | +22.4 KB |
-| Glob-heavy | +4.04% / 0.30 ms | +22.7 KB |
-| Ambient/SDK | +5.93% / 0.37 ms | +40.5 KB |
-
-An identical 15x1000 A/B run reduced Ambient/SDK from +7.58% / 0.47 ms / 42.1 KB to +5.93% / 0.37 ms / 40.5 KB.
-Typical and Glob-heavy use the earlier paired 9x500 run.
+| Report finalization | 103 KB | 105 KB |
+| Project-source records | 70 KB | 74 KB |
+| Environment records | 62 KB | 64 KB |
+| Filesystem records | 31 KB | 40 KB |
+| Initial request snapshot | 11 KB | 13 KB |
+| Property-function records | 7.6 KB | 7.7 KB |
 
 ## Improvement Areas
 
-- Lazily create request, report, and category data.
-- Reuse static request values and existing source hashes.
+- Defer report array creation and sorting until a cache entry is stored.
+- Reuse normalized project-source identities and source records.
+- Compact environment and filesystem records.
+- Lazily create request and category data.
 - Define the complete SDK request key and cache lifetime.
-- Reduce property-function payload serialization.
-- Prioritize the Ambient/SDK scenario.
