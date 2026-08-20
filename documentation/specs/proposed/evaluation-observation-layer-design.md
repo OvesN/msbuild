@@ -74,7 +74,7 @@ coverage.
 | `Expander` and `Expander.Function` | Property-function classification and observation. |
 | `PropertyExpander.ExpandRegistryValue` | Classic `$(Registry:...)` access. |
 | `IntrinsicFunctions.GetRegistryValue*` | `[MSBuild]::GetRegistryValue*` access. |
-| `ISdkResolverService`, `SdkReference`, `SdkResult` | SDK request, result, resolver identity, and cache provenance. |
+| `ISdkResolverService`, `SdkReference`, `SdkResult` | SDK request, final result, and cache hit/miss. |
 | `BuildParameters` and `ProjectCollection.EnvironmentProperties` | Effective environment sources already consumed by evaluation. |
 | Existing Detours reporting | Windows-only coverage comparison, not production semantics. |
 
@@ -216,11 +216,12 @@ Environment observation has several levels.
 ### Engine and SDK inputs
 
 Engine-owned environment reads move behind request/provider snapshots or named providers.
-SDK-injected environment values record resolver identity, name, value, and later reads.
+SDK-injected environment values record name, value, and later reads. Resolver internals
+are opaque and the SDK cache owns result reuse validity.
 
-Opaque third-party resolver or custom property-function code is non-cacheable. A full
-environment snapshot is not sufficient because such code may also read files, Registry,
-network, or private process state.
+Opaque custom property-function code is non-cacheable. A full environment snapshot is not
+sufficient because such code may also read files, Registry, network, or private process
+state.
 
 There is no portable notification for arbitrary process environment mutation. Known
 engine mutations bump an environment generation; a generation mismatch makes the report
@@ -255,10 +256,12 @@ correctness mechanism.
 An SDK observer records:
 
 - complete SDK reference and project/solution context;
-- resolver identity and version;
 - success/failure;
 - resolved paths/version/properties/items;
-- dependency replay token or authoritative provider generation.
+- cache hit/miss.
+
+Resolver discovery, manifests, files, and internal dependencies are opaque. The SDK
+result cache owns reuse validity within its current cache scope.
 
 An inner shared cache can skip work that an outer observer would otherwise see.
 
@@ -268,10 +271,11 @@ Every shared cache must:
 2. expose an authoritative generation; or
 3. make the evaluation non-cacheable.
 
-This applies to filesystem, glob, PRE/loaded-project, SDK, toolset, and host caches.
+This applies to filesystem, glob, PRE/loaded-project, toolset, and host caches. The SDK
+result cache follows the separate cache-owned policy above.
 
-Any non-`Isolated` sharing policy, and any process-global cache used under any policy,
-remains non-cacheable until every reused cache satisfies this contract.
+Any sharing policy or process-global cache that reuses one of those caches remains
+non-cacheable until that cache satisfies this contract.
 
 ## Validation and invalidation
 
@@ -287,7 +291,8 @@ Examples:
 - repeat named live environment reads;
 - compare canonical full-environment snapshots;
 - repeat recorded ambient reads such as live current directory;
-- replay SDK/toolset dependencies.
+- reissue the SDK request through the same SDK cache scope and compare the returned `SdkResult`;
+- replay toolset dependencies.
 
 The cached evaluation baseline is immutable. Each build receives a deep copy or
 copy-on-write execution overlay.
@@ -322,7 +327,7 @@ event loss, or unsupported roots fall back to validation.
 | Globs/enumeration | Membership fingerprinting and optional diagnostics |
 | Property functions | Classification and typed record/non-cacheable reason |
 | Registry | Copy request and returned value |
-| SDK/toolset | Canonical request/result and provenance replay |
+| SDK/toolset | SDK request/result/hit plus toolset provenance |
 | Completion | Freeze records and calculate counters |
 
 Primary risks:
@@ -401,7 +406,7 @@ and cannot represent semantic inputs such as in-memory project versions.
    searches, shared-cache provenance.
 3. **Environment/Registry/ambient:** property reads, live environment calls, both Registry
    syntaxes, stable/unstable ambient classification.
-4. **SDK/toolset/host:** resolver decorator, built-in instrumentation, provenance replay,
+4. **SDK/toolset/host:** SDK request/result/cache-hit recording, toolset provenance, and
    host document versions.
 5. **Eligibility/performance:** complete coverage and accepted overhead.
 6. **In-memory Server cache:** key, immutable baseline, validation, execution copy,

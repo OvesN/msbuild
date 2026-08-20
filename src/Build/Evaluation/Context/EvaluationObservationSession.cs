@@ -12,11 +12,9 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using Microsoft.Build.BackEnd.SdkResolution;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Framework;
 using Microsoft.Build.ObjectModelRemoting;
-using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 using SdkResult = Microsoft.Build.BackEnd.SdkResolution.SdkResult;
 
@@ -27,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 3;
+        private const int ObservationSchemaVersion = 4;
         private const int PropertyFunctionClassificationVersion = 1;
 
         [ThreadStatic]
@@ -36,7 +34,6 @@ namespace Microsoft.Build.Evaluation.Context
         private static readonly bool s_enabled =
             Environment.GetEnvironmentVariable(ObservationEnvironmentVariable) == "1";
         private static readonly ConditionalWeakTable<ProjectRootElement, ProjectSourceHashCache> s_projectSourceHashes = new();
-        private static readonly ConditionalWeakTable<SdkResult, SdkResolverIdentityCache> s_sdkResolverIdentities = new();
         private static readonly string s_defaultFileSystemProvider =
             FileSystems.Default.GetType().AssemblyQualifiedName;
         private static readonly HashSet<string> s_knownPureIntrinsicMembers = new(StringComparer.OrdinalIgnoreCase)
@@ -189,12 +186,6 @@ namespace Microsoft.Build.Evaluation.Context
             if (sharingPolicy == EvaluationContext.SharingPolicy.Shared)
             {
                 AddReason(EvaluationObservationReason.UnversionedSharedCache);
-                MarkCategory(EvaluationObservationCategory.SharedCache, EvaluationObservationCategoryState.Incomplete);
-            }
-
-            if (sharingPolicy != EvaluationContext.SharingPolicy.Isolated)
-            {
-                AddReason(EvaluationObservationReason.UnversionedSdkResolverCache);
                 MarkCategory(EvaluationObservationCategory.SharedCache, EvaluationObservationCategoryState.Incomplete);
             }
 
@@ -860,7 +851,6 @@ namespace Microsoft.Build.Evaluation.Context
 
         internal void RecordSdkResolution(
             SdkReference sdk,
-            SdkResolver resolver,
             SdkResult result,
             bool fromCache)
         {
@@ -873,38 +863,10 @@ namespace Microsoft.Build.Evaluation.Context
             Record(
                 () =>
                 {
-                    SdkResolverIdentityCache identity = null;
-                    if (resolver is not null)
-                    {
-                        Type type = resolver.GetType();
-                        identity = new SdkResolverIdentityCache(
-                            resolver.Name,
-                            type.FullName,
-                            type.Assembly.GetName().Name,
-                            type.Assembly.Location,
-                            resolver.Priority);
-                        if (result is not null)
-                        {
-                            identity = s_sdkResolverIdentities.GetValue(result, _ => identity);
-                        }
-                    }
-                    else if (result is not null)
-                    {
-                        s_sdkResolverIdentities.TryGetValue(result, out identity);
-                    }
-
-                    string resolverName = identity?.Name;
-                    string resolverTypeName = identity?.TypeName;
-                    string resolverAssembly = identity?.AssemblyName;
-                    int priority = identity?.Priority ?? int.MinValue;
                     _sdkResolutions.Add(new EvaluationSdkResolutionObservation(
                         sdk.Name,
                         sdk.Version,
                         sdk.MinimumVersion,
-                        resolverName,
-                        resolverTypeName,
-                        resolverAssembly,
-                        priority,
                         result?.Success ?? false,
                         result?.Path,
                         result?.Version,
@@ -915,115 +877,7 @@ namespace Microsoft.Build.Evaluation.Context
                         CreateNamedValueSnapshot(result?.EnvironmentVariablesToAdd, "SdkEnvironment"),
                         CopyAndSortStrings(result?.Warnings),
                         CopyAndSortStrings(result?.Errors)));
-
-                    bool isDefaultResolver = string.Equals(
-                        resolverTypeName,
-                        typeof(DefaultSdkResolver).FullName,
-                        StringComparison.Ordinal);
-                    if (fromCache && identity is null)
-                    {
-                        AddReason(EvaluationObservationReason.SdkResolverDependencyManifestUnavailable);
-                        AddReason(EvaluationObservationReason.SdkResolverDiscoveryProvenanceUnavailable);
-                    }
-
-                    if (identity is not null && !isDefaultResolver)
-                    {
-                        AddReason(EvaluationObservationReason.SdkResolverDependencyManifestUnavailable);
-                        MarkCategory(EvaluationObservationCategory.SdkResolution, EvaluationObservationCategoryState.Incomplete);
-                        if (!IsTrustedMicrosoftResolver(resolverAssembly, identity.AssemblyLocation))
-                        {
-                            AddReason(EvaluationObservationReason.CustomSdkResolver);
-                            MarkCategory(EvaluationObservationCategory.SdkResolution, EvaluationObservationCategoryState.Unsupported);
-                        }
-                    }
                 });
-        }
-
-        internal void RecordDiscoveredSdkResolver(SdkResolver resolver)
-        {
-            if (resolver is null)
-            {
-                return;
-            }
-
-            try
-            {
-                Type resolverType = resolver.GetType();
-                RecordExternalInput(
-                    EvaluationExternalInputKind.Sdk,
-                    "SdkResolverDiscovered",
-                    resolverType.AssemblyQualifiedName,
-                    string.Concat(resolver.Name, "|Priority=", resolver.Priority));
-
-                if (resolverType != typeof(DefaultSdkResolver))
-                {
-                    AddReason(EvaluationObservationReason.SdkResolverDiscoveryProvenanceUnavailable);
-                    if (!IsTrustedMicrosoftResolver(
-                        resolverType.Assembly.GetName().Name,
-                        resolverType.Assembly.Location))
-                    {
-                        AddReason(EvaluationObservationReason.CustomSdkResolver);
-                    }
-                }
-            }
-            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
-            {
-                AddReason(EvaluationObservationReason.ObservationIncomplete);
-            }
-        }
-
-        internal void RecordSdkResolverManifest(SdkResolverManifest manifest)
-        {
-            if (manifest is null)
-            {
-                return;
-            }
-
-            try
-            {
-                RecordExternalInput(
-                    EvaluationExternalInputKind.Sdk,
-                    "SdkResolverManifestCandidate",
-                    manifest.Path,
-                    manifest.ResolvableSdkRegex?.ToString());
-                AddReason(EvaluationObservationReason.SdkResolverDiscoveryProvenanceUnavailable);
-
-                string assemblyName = Path.GetFileNameWithoutExtension(manifest.Path);
-                if (!IsTrustedMicrosoftResolver(assemblyName, manifest.Path))
-                {
-                    AddReason(EvaluationObservationReason.CustomSdkResolver);
-                }
-            }
-            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
-            {
-                AddReason(EvaluationObservationReason.ObservationIncomplete);
-            }
-        }
-
-        private static bool IsTrustedMicrosoftResolver(
-            string resolverAssembly,
-            string resolverPath)
-        {
-            bool knownIdentity =
-                string.Equals(resolverAssembly, "Microsoft.DotNet.MSBuildSdkResolver", StringComparison.Ordinal) ||
-                string.Equals(resolverAssembly, "Microsoft.Build.NuGetSdkResolver", StringComparison.Ordinal) ||
-                string.Equals(resolverAssembly, "Microsoft.NET.Sdk.WorkloadMSBuildSdkResolver", StringComparison.Ordinal);
-            if (!knownIdentity || string.IsNullOrEmpty(resolverPath))
-            {
-                return false;
-            }
-
-            string resolverRoot = Path.Combine(
-                BuildEnvironmentHelper.Instance.MSBuildToolsDirectoryRoot,
-                "SdkResolvers");
-            string fullResolverPath = FileUtilities.GetFullPathNoThrow(resolverPath);
-            string fullResolverRoot = FileUtilities.GetFullPathNoThrow(resolverRoot);
-            return FileUtilities.PathsEqual(fullResolverPath, fullResolverRoot) ||
-                fullResolverPath.StartsWith(
-                    FileUtilities.EnsureTrailingSlash(fullResolverRoot),
-                    NativeMethodsShared.IsWindows
-                        ? StringComparison.OrdinalIgnoreCase
-                        : StringComparison.Ordinal);
         }
 
         internal void RecordSdkRequest(
@@ -1478,10 +1332,22 @@ namespace Microsoft.Build.Evaluation.Context
                                 return comparison;
                             }
 
-                            comparison = string.Compare(left.ResolverType, right.ResolverType, StringComparison.Ordinal);
+                            comparison = string.Compare(left.RequestedVersion, right.RequestedVersion, StringComparison.Ordinal);
+                            if (comparison != 0)
+                            {
+                                return comparison;
+                            }
+
+                            comparison = string.Compare(left.MinimumVersion, right.MinimumVersion, StringComparison.Ordinal);
+                            if (comparison != 0)
+                            {
+                                return comparison;
+                            }
+
+                            comparison = string.Compare(left.Path, right.Path, StringComparison.Ordinal);
                             return comparison != 0
                                 ? comparison
-                                : string.Compare(left.Path, right.Path, StringComparison.Ordinal);
+                                : left.FromCache.CompareTo(right.FromCache);
                         });
                     taskRegistrations = CreateSortedSnapshot(_taskRegistrations);
                     sideEffects = CreateSortedSnapshot(_sideEffects);
@@ -2732,15 +2598,6 @@ namespace Microsoft.Build.Evaluation.Context
                 case EvaluationObservationReason.EvaluationSideEffect:
                     MarkCategory(EvaluationObservationCategory.VolatileOrSideEffect, EvaluationObservationCategoryState.Unsupported);
                     break;
-                case EvaluationObservationReason.CustomSdkResolver:
-                    MarkCategory(EvaluationObservationCategory.SdkResolution, EvaluationObservationCategoryState.Unsupported);
-                    break;
-                case EvaluationObservationReason.SdkResolverDependencyManifestUnavailable:
-                case EvaluationObservationReason.SdkResolverDiscoveryProvenanceUnavailable:
-                case EvaluationObservationReason.OutOfProcSdkResolver:
-                case EvaluationObservationReason.UnversionedSdkResolverCache:
-                    MarkCategory(EvaluationObservationCategory.SdkResolution, EvaluationObservationCategoryState.Incomplete);
-                    break;
                 case EvaluationObservationReason.UnversionedToolsetInputs:
                 case EvaluationObservationReason.UnversionedToolLocationHelperCache:
                     MarkCategory(EvaluationObservationCategory.Toolset, EvaluationObservationCategoryState.Incomplete);
@@ -2991,29 +2848,6 @@ namespace Microsoft.Build.Evaluation.Context
         {
             internal int Version = -1;
             internal string ContentHash;
-        }
-
-        private sealed class SdkResolverIdentityCache
-        {
-            internal SdkResolverIdentityCache(
-                string name,
-                string typeName,
-                string assemblyName,
-                string assemblyLocation,
-                int priority)
-            {
-                Name = name;
-                TypeName = typeName;
-                AssemblyName = assemblyName;
-                AssemblyLocation = assemblyLocation;
-                Priority = priority;
-            }
-
-            internal string Name { get; }
-            internal string TypeName { get; }
-            internal string AssemblyName { get; }
-            internal string AssemblyLocation { get; }
-            internal int Priority { get; }
         }
 
         private sealed class CurrentScope : IDisposable

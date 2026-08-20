@@ -62,8 +62,7 @@ The intended supported set is:
 - disk-backed sources and MSBuild-owned in-memory sources with content identity;
 - standard filesystem operations routed through observable providers;
 - members in the closed property-function classification;
-- the in-box SDK resolver and explicitly supported Microsoft resolvers after they expose
-  dependency manifests;
+- SDK resolution treated as an opaque cache-owned request/result operation;
 - standard shared caches after their consumed semantic result and required provenance can
   be replayed.
 
@@ -71,14 +70,11 @@ The following always block future reuse:
 
 - `EnableAllPropertyFunctions` or its legacy environment escape hatch;
 - an invoked property-function member that is not in the closed classification;
-- any SDK resolver outside the explicitly supported resolver set, even if it returns no
-  result;
 - an opaque external operation whose consumed result was not captured;
 - an evaluation-time side effect that cannot be replayed safely.
 
-MSBuild Server and worker-node evaluation are supported only after SDK resolver
-dependencies can cross the main-node/worker-node boundary. Until then, an evaluation that
-uses out-of-process SDK resolution is non-cacheable.
+MSBuild Server and worker-node evaluation reuse the SDK result returned by their existing
+SDK caches. The observation layer does not validate resolver-internal dependencies.
 
 A custom filesystem, directory cache, or source provider can be observed when its exact
 returned value reaches the native boundary. It remains non-cacheable unless the provider
@@ -125,7 +121,7 @@ independently interpreted as additional dependencies.
 | Glob result | `GlobObservation` | Enumerations, probes, `FileMatcher` cache result |
 | Upward/import/fallback selection | `SearchObservation` | Ordered path probes; selected `ProjectSourceObservation` |
 | Selected toolset | `ToolsetObservation` | Registry/config reads and environment inputs |
-| SDK resolution | `SdkResolutionObservation` | Resolver discovery, provider reads, generated SDK-result source |
+| SDK resolution | `SdkResolutionObservation` | SDK request record and generated SDK-result source |
 | Effective `UsingTask` registration | `TaskRegistrationObservation` | Project source, property/item expansion, assembly-path probes |
 | VS project-cache plugin registration | `EvaluationSideEffectObservation` | Evaluated item, normalized path, descriptor metadata |
 | Imported environment property read | `ImportedEnvironmentObservation` | Evaluation property lookup and imported-environment snapshot |
@@ -410,7 +406,7 @@ they are not equivalent to live `System.Environment` calls.
 | Present `$(NAME)` whose winning value came from the imported environment | an always-on observation wrapper around evaluator property lookup | Name, source, present state, exact effective value |
 | Undefined `$(NAME)` | the same exact property lookup path plus imported-environment table membership | Name and absent state in the imported environment snapshot |
 | Environment value overwritten before it is read | property predecessor/source tracking | Record the actual winning source; do not record an unused original environment value |
-| SDK-injected environment/property value | SDK result application plus later property read | Resolver result owns provenance; environment record notes whether the injected value was consumed |
+| SDK-injected environment/property value | SDK result application plus later property read | SDK result owns the injected value; environment record notes whether it was consumed |
 
 Do not depend on `PropertyTrackingEvaluatorDataWrapper.TrackPropertyRead`, because event
 emission is trait/logging gated. Reuse or extend the wrapper's unconditional `GetProperty`
@@ -452,7 +448,7 @@ Raw environment values remain internal and must not be emitted in diagnostics.
 | `$(Registry:...)` | `PropertyExpander.ExpandRegistryValue` | Original request, hive/view/key/value, exact returned string, proven failure |
 | `[MSBuild]::GetRegistryValue` | property-function dispatcher / `IntrinsicFunctions` | Key/value/default and exact typed result |
 | `[MSBuild]::GetRegistryValueFromView` | same | Ordered views and exact typed result |
-| Registry reads inside an explicitly supported helper/resolver | typed Registry provider/dependency contract | Exact request and typed returned value |
+| Registry reads inside an explicitly supported helper | typed Registry provider/dependency contract | Exact request and typed returned value |
 | Registry subkey/value enumeration | typed Registry provider | Ordered request and returned names/values |
 
 Current APIs may not distinguish a missing key from a missing value, or a stored value
@@ -482,40 +478,29 @@ when it occurs and attach the effective toolset snapshot at evaluation start.
 Registry-backed toolset discovery is platform/runtime specific; do not require Registry
 records on paths where MSBuild did not use Registry.
 
-### 15. SDK resolver discovery and resolution
+### 15. SDK request and result
 
-`SdkResolutionObservation` owns both resolver selection and the exact result supplied to
-evaluation.
+`SdkResolutionObservation` treats SDK resolution as an opaque request-keyed cache.
+Resolver discovery, manifests, assemblies, file probes, and internal dependencies are not
+observed.
 
 | Input | Observation seam | Required record |
 | --- | --- | --- |
-| Resolver discovery folders and toggles | `SdkResolverLoader`, `BuildEnvironmentHelper`, `MSBUILDINCLUDEDEFAULTSDKRESOLVER`, `MSBUILDADDITIONALSDKRESOLVERSFOLDER*` | Ordered folders/toggles and exact values |
-| Resolver manifests and assemblies | resolver loader | Manifest sources, loaded assembly identity/version, resolver type/priority |
-| Programmatically registered resolvers | `SdkResolver.RegisteredResolvers` | Ordered resolver identity set |
-| SDK request | `ISdkResolverService.ResolveSdk` | Name, requested/minimum version, project/solution paths, interactive value, effective `IsRunningInVisualStudio`, and failure mode |
-| Resolver attempt | per-resolver `Resolve` boundary | Resolver identity and exact success/null/failure result |
-| Selected SDK result | `SdkResult` | Success/failure, path/version, properties/items, warnings/errors that affect evaluation |
-| In-box `DefaultSdkResolver` inputs | resolver implementation | Effective SDKs path, directory probes, selected path |
-| Supported Microsoft .NET/NuGet/workload resolver | cross-repository dependency contract | Exact file/environment/Registry/provider manifest |
+| SDK request | evaluator / `ISdkResolverService.ResolveSdk` | Name, requested/minimum version, project/solution paths, interactive value, effective `IsRunningInVisualStudio`, and failure mode |
+| SDK cache lookup | `CachingSdkResolverService`, `OutOfProcNodeSdkResolverService` | Request record and cache hit/miss |
+| Selected SDK result | `SdkResult` | Success/failure, path/version, additional paths, properties/items/environment additions, warnings, and errors |
 | SDK-result synthetic XML | `CreateProjectForSdkResult` | Generated source linked to the selected SDK result |
 | SDK-result host-path compatibility probe | evaluator `dotnet.exe` probe before `DOTNET_HOST_PATH` injection | Candidate path, positive/negative default-filesystem result, and injected value if any |
-| SDK cache hit | `CachingSdkResolverService`, `SdkResolverCachingWrapper` | Full request, selected result, resolver identity, and original dependency manifest |
-| Worker-node SDK result | `OutOfProcNodeSdkResolverService` protocol | Main-node resolver dependency manifest transferred with the result |
 | SDK-injected properties/items/environment values | evaluator data | Exact values and whether evaluation later consumed them |
 
-Any discovered or invoked resolver outside the explicitly supported resolver set adds
-`CustomSdkResolver` and blocks future reuse, even when it returns null. Signing or
-Microsoft ownership alone is not a dependency contract.
+The SDK result cache owns reuse validity. MSBuild returns the stored `SdkResult` for the
+same cache key until that cache is cleared; the evaluation observer does not independently
+detect SDK installation, workload, NuGet, resolver, or manifest changes.
 
-Several common Microsoft resolvers are plugin assemblies outside the MSBuild repository.
-Normal SDK projects become cacheable only after those components return dependency
-manifests with their `SdkResult`.
-
-The current in-process, wrapper, and out-of-process SDK caches can reuse a result by SDK
-name while omitting request fields such as version, project path, solution path, and
-interactive/Visual Studio mode from the lookup key. Observation must retain the full
-request and exact cached result that evaluation consumed; it must not infer that omitted
-fields were considered by the cache.
+The current caches key primarily by SDK name. A complete request key and explicit cache
+lifetime/epoch are required before extending this reuse beyond the existing cache scope.
+The observation records omitted request fields but must not imply that the current cache
+used those fields when selecting the result.
 
 ### 16. Shared caches and provider provenance
 
@@ -532,15 +517,16 @@ can still be a future reuse blocker.
 | Host `IDirectoryCache` | Exact returned members, provider/cache identity, optional generation | Observed but non-cacheable without stable identity |
 | `ProjectRootElementCache` | PRE object/version and load-time `ProjectSourceStamp` | Object observed; disk reuse blocked without source stamp |
 | `Evaluator._fallbackSearchPathsCache` | Expanded extension root and memoized default-filesystem directory-existence Boolean | Incomplete when the process-static probe bypasses observation |
-| `CachingSdkResolverService` / `SdkResolverCachingWrapper` | Full SDK request, exact cached `SdkResult`, and resolver/dependency manifest | Non-cacheable without manifest; preserve name-only cache behavior in the observation |
-| `OutOfProcNodeSdkResolverService` response cache | Full request/result plus main-node manifest | Non-cacheable without cross-node manifest |
+| `CachingSdkResolverService` | Full SDK request, exact cached `SdkResult`, and hit/miss | Existing cache lifetime owns validity |
+| `OutOfProcNodeSdkResolverService` response cache | Full request/result and hit/miss | Existing cross-node cache lifetime owns validity |
 | Toolset/configuration caches | Effective toolset plus source records/generation | Non-cacheable without source provenance |
 | `ToolLocationHelper` static caches | Exact helper result plus underlying dependency manifest | Non-cacheable until instrumented |
 | Imported-environment snapshot/cache | Snapshot identity and exact property reads | Non-cacheable if the actual snapshot cannot be identified |
 
 Shared `EvaluationContext` use, including `ProjectGraph`, must not suppress observations.
 Cache hits either replay the original semantic record or let the owning boundary record
-the final result and attach an appropriate reuse blocker.
+the final result and attach an appropriate reuse blocker. SDK result caches are the
+exception: their existing cache lifetime owns validity.
 
 ### 17. Custom hosts and providers
 
@@ -588,7 +574,7 @@ The report records both observer trustworthiness and future-reuse blockers.
 | Dropped/truncated record | Counter plus `ObservationIncomplete` |
 | Conflicting primary observation | Dependency identity and `ConflictingObservation` |
 | Partial enumeration/stream | Completion state and typed issue |
-| Unsupported resolver/provider/function | Typed reason |
+| Unsupported provider/function | Typed reason |
 | Known bypass exercised without observation | Typed bypass ID |
 
 Coverage counters and differential-test failures are internal diagnostics, not
@@ -612,7 +598,7 @@ This is an implementation checklist, not a second set of dependency categories.
 | `Expander.ItemExpander.Transforms` direct `FileOrDirectoryExists` | Path probe |
 | `Evaluator._fallbackSearchPathsCache` process-static directory memo | Path probe supporting import search |
 | `ParserIgnoreConfiguration` default-filesystem probes and raw config reads | Parser-config search / project source |
-| `DefaultSdkResolver`, resolver loader, OOP SDK service | SDK resolution |
+| SDK request/result cache boundaries | SDK resolution |
 | Evaluator `dotnet.exe` probe used to inject `DOTNET_HOST_PATH` | SDK resolution / path probe |
 | `TaskRegistry` task-factory assembly redirection probes | Task registration / path probe |
 | `Evaluator.CollectProjectCachePlugins` process-global registration | Evaluation side effect |
@@ -623,7 +609,7 @@ This is an implementation checklist, not a second set of dependency categories.
 ## Current prototype coverage
 
 The native prototype implements the closed observation model, while provider provenance
-and cross-process resolver contracts remain intentionally fail-closed.
+remains intentionally fail-closed.
 
 | Category | Current coverage |
 | --- | --- |
@@ -640,7 +626,7 @@ and cross-process resolver contracts remain intentionally fail-closed.
 | `UsingTask` / project-cache registrations | Effective task registrations and VS project-cache registration side effects are recorded |
 | Environment and Registry | Imported/live/missing environment reads and both Registry expression/function paths are recorded; raw values remain internal |
 | Toolset | Effective toolset and properties are recorded; pre-session Registry/config provenance remains an explicit reuse blocker |
-| SDK | Discovery, manifests, resolver attempts, full result payload, cache hits, custom resolver policy, and OOP blockers are recorded |
+| SDK | Request, final result payload, and cache hit/miss are recorded; resolver internals are opaque |
 | Shared caches/providers | Final consumed values are recorded; caches/providers without replayable provenance or stable identity block reuse |
 | Property-function classification | Per-member fail-closed classifier records external effects, volatile values, side effects, and unknown members; pure calls are omitted |
 | Unsupported/coverage reporting | Schema/classification versions, per-category coverage/state, typed reasons, conflicts, partial operations, and atomic completion are present |
@@ -675,10 +661,9 @@ This order closes the largest native gaps while keeping each step measurable:
 7. Generate the closed per-member property-function classification and instrument
    filesystem, live-environment, ambient, volatile, and side-effect members.
 8. Add Registry expressions/functions and toolset Registry/configuration provenance.
-9. Add SDK resolver discovery, request/attempt/result observation, in-box resolver inputs,
-   synthetic SDK sources, and cross-node manifest transport.
-10. Add dependency contracts for the supported Microsoft .NET/NuGet/workload resolvers.
-11. Add shared-cache provenance for PRE, filesystem, glob, search, directory, SDK,
+9. Add SDK request/result/cache-hit observation and synthetic SDK sources.
+10. Define the complete SDK request key and cache lifetime/epoch.
+11. Add shared-cache provenance for PRE, filesystem, glob, search, directory,
     toolset, environment, and `ToolLocationHelper` caches.
 12. Add custom-provider contracts where custom-host support is required.
 13. Enforce the closed taxonomy with static checks, mutation tests, internal coverage

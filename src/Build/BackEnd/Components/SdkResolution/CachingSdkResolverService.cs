@@ -67,12 +67,8 @@ namespace Microsoft.Build.BackEnd.SdkResolution
                 }
                 else
                 {
-                    EvaluationObservationSession observationSession = EvaluationObservationSession.Current;
                     var candidate = new Lazy<SdkResult>(() =>
-                    {
-                        using IDisposable observationScope = observationSession?.Enter();
-                        return base.ResolveSdk(submissionId, sdk, loggingContext, sdkReferenceLocation, solutionPath, projectPath, interactive, isRunningInVisualStudio, failOnUnresolvedSdk);
-                    });
+                        base.ResolveSdk(submissionId, sdk, loggingContext, sdkReferenceLocation, solutionPath, projectPath, interactive, isRunningInVisualStudio, failOnUnresolvedSdk));
                     resultLazy = cached.GetOrAdd(sdk.Name, candidate);
                     wasResultCached = !ReferenceEquals(resultLazy, candidate);
                 }
@@ -89,15 +85,10 @@ namespace Microsoft.Build.BackEnd.SdkResolution
                 loggingContext.LogWarning(null, new BuildEventFileInfo(sdkReferenceLocation), "ReferencingMultipleVersionsOfTheSameSdk", sdk.Name, result.Version, result.ElementLocation, sdk.Version);
             }
 
-            if (wasResultCached)
-            {
-                EvaluationObservationSession.Current?.RecordSdkResolution(
-                    sdk,
-                    resolver: null,
-                    result,
-                    fromCache: true);
-                EvaluationObservationSession.Current?.MarkReason(EvaluationObservationReason.UnversionedSdkResolverCache);
-            }
+            EvaluationObservationSession.Current?.RecordSdkResolution(
+                sdk,
+                result,
+                wasResultCached);
 
             MSBuildEventSource.Log.CachedSdkResolverServiceResolveSdkStop(sdk.Name, solutionPath ?? string.Empty, projectPath ?? string.Empty, result.Success, wasResultCached);
 

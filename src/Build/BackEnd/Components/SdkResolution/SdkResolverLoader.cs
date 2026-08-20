@@ -9,7 +9,6 @@ using System.Linq;
 using System.Reflection;
 using System.Xml;
 using Microsoft.Build.Construction;
-using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -49,11 +48,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             IReadOnlyList<SdkResolver> registeredResolvers = SdkResolver.RegisteredResolvers;
             if (registeredResolvers.Count > 0)
             {
-                foreach (SdkResolver resolver in registeredResolvers)
-                {
-                    EvaluationObservationSession.Current?.RecordDiscoveredSdkResolver(resolver);
-                }
-
                 resolvers.AddRange(registeredResolvers);
                 resolvers.Sort((left, right) => left.Priority.CompareTo(right.Priority));
             }
@@ -158,40 +152,18 @@ namespace Microsoft.Build.BackEnd.SdkResolution
         {
             DirectoryInfo[] subfolders = null;
             bool rootExists = !string.IsNullOrEmpty(rootFolder) && FileUtilities.DirectoryExistsNoThrow(rootFolder);
-            EvaluationObservationSession.Current?.RecordProbe(
-                rootFolder,
-                EvaluationPathKind.Directory,
-                rootExists);
             if (rootExists)
             {
                 subfolders = new DirectoryInfo(rootFolder).GetDirectories();
-                EvaluationObservationSession.Current?.RecordEnumeration(
-                    rootFolder,
-                    "*",
-                    SearchOption.TopDirectoryOnly,
-                    EvaluationEnumerationKind.Directories,
-                    subfolders.Select(static directory => directory.FullName).ToArray(),
-                    EvaluationEnumerationCompletion.Complete);
             }
 
             if (additionalResolversFolder != null)
             {
                 var resolversDirInfo = new DirectoryInfo(additionalResolversFolder);
                 bool additionalExists = resolversDirInfo.Exists;
-                EvaluationObservationSession.Current?.RecordProbe(
-                    additionalResolversFolder,
-                    EvaluationPathKind.Directory,
-                    additionalExists);
                 if (additionalExists)
                 {
                     DirectoryInfo[] additionalDirectories = resolversDirInfo.GetDirectories();
-                    EvaluationObservationSession.Current?.RecordEnumeration(
-                        additionalResolversFolder,
-                        "*",
-                        SearchOption.TopDirectoryOnly,
-                        EvaluationEnumerationKind.Directories,
-                        additionalDirectories.Select(static directory => directory.FullName).ToArray(),
-                        EvaluationEnumerationCompletion.Complete);
                     HashSet<DirectoryInfo> overrideFolders = additionalDirectories.ToHashSet(new DirInfoNameComparer());
                     if (subfolders != null)
                     {
@@ -220,10 +192,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
         private bool TryAddAssemblyManifestFromXml(string pathToManifest, string manifestFolder, List<SdkResolverManifest> manifestsList, ElementLocation location)
         {
             bool manifestExists = !string.IsNullOrEmpty(pathToManifest) && FileUtilities.FileExistsNoThrow(pathToManifest);
-            EvaluationObservationSession.Current?.RecordProbe(
-                pathToManifest,
-                EvaluationPathKind.File,
-                manifestExists);
             if (!manifestExists)
             {
                 return false;
@@ -255,15 +223,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             }
 
             manifestsList.Add(manifest);
-            EvaluationObservationSession.Current?.RecordExternalInput(
-                EvaluationExternalInputKind.Sdk,
-                "SdkResolverManifest",
-                pathToManifest,
-                manifest.Path);
-            EvaluationObservationSession.Current?.RecordFileRead(
-                pathToManifest,
-                contentHash: null,
-                isVerifiable: false);
 
             return true;
         }
@@ -271,10 +230,6 @@ namespace Microsoft.Build.BackEnd.SdkResolution
         private bool TryAddAssemblyManifestFromDll(string assemblyPath, List<SdkResolverManifest> manifestsList)
         {
             bool assemblyExists = !string.IsNullOrEmpty(assemblyPath) && FileUtilities.FileExistsNoThrow(assemblyPath);
-            EvaluationObservationSession.Current?.RecordProbe(
-                assemblyPath,
-                EvaluationPathKind.File,
-                assemblyExists);
             if (!assemblyExists)
             {
                 return false;

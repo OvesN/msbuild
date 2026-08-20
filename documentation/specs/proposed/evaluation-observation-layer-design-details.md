@@ -116,7 +116,7 @@ Later pull requests add:
 - root and import source identity;
 - complete filesystem call-site routing;
 - environment and Registry observation;
-- SDK, toolset, and host-source provenance;
+- SDK request/result cache semantics, toolset provenance, and host-source identity;
 - validation and an in-memory MSBuild Server cache;
 - live invalidation and persistence.
 
@@ -131,7 +131,8 @@ The initial observation work does not provide:
 - a public dependency-reporting API for third-party extensions;
 - transparent sandboxing of arbitrary managed code.
 
-Until a public extension contract is designed, opaque third-party code is non-cacheable.
+Until a public extension contract is designed, opaque property-function and host
+extension code is non-cacheable. SDK resolvers follow the separate cache-owned policy.
 
 ## Technical reference
 
@@ -179,7 +180,7 @@ Examples:
 - a partial stream read without an authoritative content token;
 - a Boolean probe that cannot distinguish failure from missing;
 - unclassified property functions;
-- opaque third-party resolver or extension execution;
+- opaque extension execution outside the SDK result-cache boundary;
 - time, random, network, or arbitrary host callbacks without a stable token;
 - shared-cache results without replayable provenance.
 
@@ -365,11 +366,11 @@ not create a second independently validated dependency for the same consumed val
 | Observed | Classic Registry expression | `PropertyExpander.ExpandRegistryValue` | Exact request and returned string/outcome |
 | Observed | Registry intrinsic | `Expander.Function` and `IntrinsicFunctions` | Exact request and typed returned value/outcome |
 | Observed | Built-in Registry discovery | Typed Registry provider | Value or enumeration result |
-| Observed | SDK resolution | SDK service decorator | Canonical request/result and provenance |
+| Observed | SDK resolution | SDK service decorator | Request, final result, and cache hit/miss |
 | Observed | Toolset discovery | Toolset provider | Selected result and source generation |
 | Observed | Stable ambient value | Property-function/host observer | Typed value |
 | Observed | Unsaved IDE/object-model source | Host source provider | Document identity and monotonic version |
-| Non-cacheable | Opaque third-party resolver/extension | SDK/property-function boundary | `OpaqueManagedCode` |
+| Non-cacheable | Opaque extension execution | Property-function/host boundary | `OpaqueManagedCode` |
 | Non-cacheable | Unclassified property function | `Expander.Function` | `UnclassifiedPropertyFunction` |
 | Non-cacheable | Time, random, network, arbitrary callback | Function/host boundary | Category-specific reason |
 | Non-cacheable | Unversioned shared-cache hit | Cache boundary | `UnversionedSharedCache` |
@@ -554,7 +555,6 @@ Reads that affect evaluation should move behind an owning provider or request sn
 including:
 
 - toolset selection;
-- SDK resolver loading/search paths;
 - evaluator feature and trait choices;
 - node/build environment state;
 - evaluator-specific escape hatches.
@@ -567,14 +567,13 @@ The record contains the named value or the authoritative provider generation.
 
 Record:
 
-- resolver identity;
 - variable name and injected value;
 - whether evaluation later read that property;
 - conflict with an imported value.
 
 ### Opaque extension code
 
-Arbitrary managed resolver or property-function code can read:
+Arbitrary managed property-function or host extension code can read:
 
 - live environment;
 - files;
@@ -585,8 +584,9 @@ Arbitrary managed resolver or property-function code can read:
 A whole-environment snapshot does not cover those other inputs and cannot prove the exact
 value consumed during concurrent mutation.
 
-Therefore opaque third-party code is non-cacheable until a separate dependency-reporting
-contract exists.
+Therefore opaque property-function and host extension code is non-cacheable until a
+separate dependency-reporting contract exists. SDK resolvers are exempt because the SDK
+result cache owns their reuse validity.
 
 Built-in extensions become cacheable only after their ambient reads are routed through
 observable providers and covered by tests.
@@ -687,31 +687,28 @@ SdkResolutionObservation
   complete SdkReference
   project/solution context
   interactive and Visual Studio mode
-  resolver identity/version
   success/failure
   resolved paths/version
   returned properties/items
-  provider generation or dependency replay token
+  cache hit/miss
 ```
 
-### SDK cache provenance
+### SDK cache ownership
 
-The current SDK cache can return a result without rerunning the resolver.
+Resolver discovery, manifests, assemblies, file probes, and internal dependencies are not
+observed. The SDK cache owns reuse validity.
 
-A cache hit is observable only if it:
+The observer records:
 
-- replays the original dependency set into the current session; or
-- supplies an authoritative generation token that covers those dependencies.
+- the complete SDK request record;
+- the final `SdkResult`; and
+- whether the existing SDK cache returned the result.
 
-Returning only `SdkResult` is insufficient.
+The current cache is primarily keyed by SDK name within its existing scope. Defining a
+complete request key and explicit cache lifetime/epoch is separate work.
 
-Until provenance replay exists, shared SDK-cache hits keep SDK coverage partial or make
-the evaluation non-cacheable.
-
-### Third-party resolvers
-
-Third-party resolvers are non-cacheable in the initial design. A public dependency
-contract is a separate proposal.
+In-process, custom, and out-of-process resolver internals are treated identically as
+opaque implementations behind this cache boundary.
 
 ## Shared cache provenance
 
@@ -730,11 +727,11 @@ This applies to:
 - `FileMatcher` expansion caches;
 - host directory caches;
 - loaded-project/PRE caches;
-- SDK resolver caches;
 - toolset/configuration caches.
 
-Any non-`Isolated` sharing policy, and any process-global cache used under any policy,
-remains non-cacheable until every reused cache satisfies this contract.
+Any sharing policy or process-global cache that reuses one of those caches remains
+non-cacheable until that cache satisfies this contract. SDK result caches follow the
+separate cache-owned policy above.
 
 ## Validation and invalidation
 
@@ -755,7 +752,8 @@ Validation on lookup is sufficient for correctness:
 | Full environment enumeration | Compare canonical snapshots. |
 | Stable ambient value | Repeat the same ambient read, including live current directory. |
 | Registry value/enumeration | Repeat the same operation and compare typed result. |
-| SDK/toolset | Compare provider generation or replayed dependencies. |
+| SDK | Reissue the request through the same SDK cache scope and compare the returned `SdkResult`. |
+| Toolset | Compare provider generation or replayed dependencies. |
 | Host document | Compare host document version. |
 
 ### Validate-to-materialize race
@@ -790,7 +788,8 @@ search/glob root -> entries
 environment property name -> entries
 Registry key/value/view -> entries
 source document -> entries
-resolver/toolset generation -> entries
+SDK request/cache epoch -> entries
+toolset generation -> entries
 ```
 
 Event overflow, loss, unsupported roots, or backend failure invalidates the affected root
@@ -819,7 +818,7 @@ The disabled path must preserve logging and evaluation semantics exactly.
 | Glob/directory enumeration | Membership fingerprint; optional diagnostic members |
 | Property function | Classification plus typed record or non-cacheable reason |
 | Registry value | Copy request and typed result |
-| SDK/toolset | Canonicalize request/result and replay provenance |
+| SDK/toolset | Record SDK request/result/hit and canonicalize toolset provenance |
 | Completion | Freeze records, calculate counters, create diagnostic projection |
 
 ### Primary cost risks
@@ -909,7 +908,7 @@ Add focused tests for:
 - overwritten environment properties;
 - SDK-injected environment properties;
 - live environment named read and enumeration;
-- opaque resolver becoming non-cacheable;
+- SDK request/result and cache-hit recording;
 - both Registry syntaxes;
 - Registry default-value ambiguity;
 - property-function filesystem access;
@@ -917,7 +916,7 @@ Add focused tests for:
 - glob expansion-cache hits;
 - upward/fallback search dependencies;
 - PRE reload-enabled and reload-disabled policies;
-- SDK same-name/different-version and cached-result provenance;
+- SDK same-name/different-version and cached-result behavior;
 - observation failure and dropped-record handling.
 
 ### Process-level verification
@@ -966,11 +965,10 @@ Portable coverage tests should also assert or detect evaluation-affecting direct
 ### Phase 4: SDK, toolset, and hosts
 
 - SDK resolver decorator.
-- Built-in resolver instrumentation.
-- Shared SDK provenance replay.
+- Request/result/cache-hit recording.
+- Complete SDK request-key and cache-lifetime definition.
 - Toolset source generations.
 - Host document versions.
-- Third-party resolver remains non-cacheable.
 
 ### Phase 5: performance and eligibility
 
