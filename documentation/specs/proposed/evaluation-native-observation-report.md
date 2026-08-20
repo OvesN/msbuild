@@ -81,7 +81,8 @@ Removing sorting reduced report-finalization allocation from 259 KB to 44 KB per
 evaluation (-83%, -215 KB).
 
 See [evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md)
-for per-activity CPU-time attribution and optimization priorities.
+for per-activity CPU-time attribution, self-overhead controls, rejected noisy
+subtractive measurements, and optimization priorities.
 
 ## Improvement Areas
 
