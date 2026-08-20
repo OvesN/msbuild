@@ -403,8 +403,13 @@ namespace Microsoft.Build.Evaluation
                     property.EvaluatedValue,
                     "GlobalProperty");
             }
+            Array.Sort(
+                globalProperties,
+                static (left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+
             string[] commandLineProperties = new string[_propertiesFromCommandLine?.Count ?? 0];
             _propertiesFromCommandLine?.CopyTo(commandLineProperties, 0);
+            Array.Sort(commandLineProperties, StringComparer.OrdinalIgnoreCase);
 
             BuildEnvironment buildEnvironment = BuildEnvironmentHelper.Instance;
             EscapeHatches escapeHatches = Traits.Instance.EscapeHatches;

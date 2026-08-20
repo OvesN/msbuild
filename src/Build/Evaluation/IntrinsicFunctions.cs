@@ -737,10 +737,21 @@ namespace Microsoft.Build.Evaluation
             LoggingContext loggingContext)
         {
             pathToAssembly = FileUtilities.GetFullPathNoThrow(pathToAssembly);
-            bool exists = fileSystem.FileExists(pathToAssembly);
+            bool exists = FileUtilities.FileExistsNoThrow(pathToAssembly, fileSystem);
             if (exists)
             {
-                _ = fileSystem.ReadFileAllBytes(pathToAssembly);
+                EvaluationObservationSession observationSession = EvaluationObservationSession.Current;
+                if (observationSession is not null)
+                {
+                    try
+                    {
+                        _ = fileSystem.ReadFileAllBytes(pathToAssembly);
+                    }
+                    catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                    {
+                        observationSession.MarkReason(EvaluationObservationReason.ObservationIncomplete);
+                    }
+                }
 
                 loggingContext.LogBuildEvent(new BuildCheckAcquisitionEventArgs(pathToAssembly, projectPath));
                 EvaluationObservationSession.Current?.RecordSideEffect(
