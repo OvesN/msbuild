@@ -636,7 +636,7 @@ namespace Microsoft.Build.UnitTests.Definition
 
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
-            report.DirectoryEnumerations.Length.ShouldBe(2);
+            report.DirectoryEnumerations.Count.ShouldBe(2);
             report.DirectoryEnumerations.ShouldContain(
                 observation => observation.SearchOption == SearchOption.TopDirectoryOnly);
             report.DirectoryEnumerations.ShouldContain(
@@ -725,7 +725,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(5);
+            report.SchemaVersion.ShouldBe(6);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -1381,9 +1381,75 @@ namespace Microsoft.Build.UnitTests.Definition
             innerFileSystem.EntriesProduced.ShouldBe(1);
             report.DirectoryEnumerations.ShouldHaveSingleItem()
                 .Completion.ShouldBe(EvaluationEnumerationCompletion.Partial);
-            report.DirectoryEnumerations[0].Entries.ShouldBe(["first.cs"]);
+            report.DirectoryEnumerations.Single().Entries.ShouldBe(["first.cs"]);
             (report.Reasons & EvaluationObservationReason.PartialEnumeration)
                 .ShouldBe(EvaluationObservationReason.PartialEnumeration);
+        }
+
+        [Fact]
+        public void EvaluationObservationReportOwnsStableCollectionsAfterCompletion()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordRequest(new EvaluationRequestObservation { ProjectPath = "before" });
+            session.RecordProbe("probe", EvaluationPathKind.File, exists: true);
+            session.RecordMetadata("metadata", EvaluationMetadataKind.LastWriteTimeUtc, value: 1);
+            session.RecordFileRead(
+                "content",
+                "hash",
+                isVerifiable: true,
+                EvaluationContentHashKind.RawBytes);
+            session.RecordEnvironment(
+                "before",
+                EvaluationEnvironmentSource.Imported,
+                present: true,
+                value: "value");
+            session.RecordEnumeration(
+                "enumeration",
+                "*.cs",
+                SearchOption.TopDirectoryOnly,
+                EvaluationEnumerationKind.Files,
+                ["before.cs"],
+                EvaluationEnumerationCompletion.Complete);
+            var recordingFileSystem = new RecordingFileSystem(new PartialEnumerationFileSystem(), session);
+            IEnumerator<string> lateEnumerator = recordingFileSystem.EnumerateFiles("late-enumeration").GetEnumerator();
+            lateEnumerator.MoveNext().ShouldBeTrue();
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            session.TestOnlyRetainedObservationCount.ShouldBe(0);
+            session.TestOnlyObservationCollectionsDetached.ShouldBeTrue();
+            lateEnumerator.Dispose();
+            session.RecordRequest(new EvaluationRequestObservation { ProjectPath = "late" });
+            session.RecordProbe("late", EvaluationPathKind.File, exists: false);
+            session.RecordMetadata("late", EvaluationMetadataKind.LastWriteTimeUtc, value: 2);
+            session.RecordFileRead(
+                "late",
+                "late-hash",
+                isVerifiable: true,
+                EvaluationContentHashKind.RawBytes);
+            session.RecordEnumeration(
+                "late",
+                "*.cs",
+                SearchOption.TopDirectoryOnly,
+                EvaluationEnumerationKind.Files,
+                ["late.cs"],
+                EvaluationEnumerationCompletion.Complete);
+            session.RecordEnvironment(
+                "late",
+                EvaluationEnvironmentSource.Imported,
+                present: true,
+                value: "late-value");
+
+            report.Request.ProjectPath.ShouldBe("before");
+            report.PathProbes.ShouldHaveSingleItem().Path.ShouldEndWith("probe");
+            report.MetadataReads.ShouldHaveSingleItem().Path.ShouldEndWith("metadata");
+            report.FileReads.ShouldHaveSingleItem().Path.ShouldEndWith("content");
+            report.DirectoryEnumerations.ShouldHaveSingleItem().Path.ShouldEndWith("enumeration");
+            report.Environment.ShouldHaveSingleItem().Name.ShouldBe("before");
+            (session.TestOnlyReasons & EvaluationObservationReason.ObservationIncomplete)
+                .ShouldBe(EvaluationObservationReason.None);
+            session.TestOnlyRetainedObservationCount.ShouldBe(0);
+            session.TestOnlyObservationCollectionsDetached.ShouldBeTrue();
         }
 
         [Fact]
@@ -1466,7 +1532,7 @@ namespace Microsoft.Build.UnitTests.Definition
 
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
-            report.MetadataReads.Length.ShouldBe(2);
+            report.MetadataReads.Count.ShouldBe(2);
             (report.Reasons & EvaluationObservationReason.ConflictingObservation)
                 .ShouldBe(EvaluationObservationReason.None);
         }
@@ -1505,7 +1571,7 @@ namespace Microsoft.Build.UnitTests.Definition
 
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
-            report.PropertyFunctions.Length.ShouldBe(4);
+            report.PropertyFunctions.Count.ShouldBe(4);
             (report.Reasons & EvaluationObservationReason.ConflictingObservation)
                 .ShouldBe(EvaluationObservationReason.None);
             (report.Reasons & EvaluationObservationReason.UnsupportedVolatileInput)

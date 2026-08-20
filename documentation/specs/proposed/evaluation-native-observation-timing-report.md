@@ -6,10 +6,15 @@
 - Project: `src/OrchardCore/OrchardCore/OrchardCore.csproj`
 - Framework: `net10.0`
 - Command: warm external `dotnet build --no-restore`
-- Observer overhead across three independent runs: **+3.7%, +3.8%, and +5.2%**
-- Aggregate means: 4.910 s -> 5.107 s (**approximately +4.0%, +197 ms**)
+- Before zero-copy report finalization: 4.910 s -> 5.107 s
+  (**approximately +4.0%, +197 ms**)
+- After zero-copy report finalization, two independent runs:
+  - 4.859 s -> 4.992 s (**+2.7%, +133 ms**)
+  - 4.889 s -> 4.980 s (**+1.9%, +91 ms**)
+- New aggregate means: 4.874 s -> 4.986 s
+  (**approximately +2.3%, +112 ms**)
 
-## Method
+## Method for the pre-zero-copy attribution
 
 Temporary `Stopwatch.GetTimestamp()` scopes recorded inclusive and exclusive CPU time.
 Five no-op builds produced 65 evaluation reports across 30 MSBuild processes. CPU time is
@@ -36,7 +41,7 @@ These marginal wall-time effects are below the external-process/VM noise floor a
 timings: evaluation runs across several parallel MSBuild processes, while the subtractive
 test measures one noisy end-to-end wall clock.
 
-## Exclusive Time
+## Pre-zero-copy Exclusive Time
 
 | Activity | ms/evaluation | Calls/evaluation | Share of instrumented CPU |
 | --- | ---: | ---: | ---: |
@@ -54,15 +59,18 @@ test measures one noisy end-to-end wall clock.
 | Property lookup | 0.82 | 703 | 2.2% |
 | Task registration | 0.82 | 79 | 2.2% |
 | Other | 0.38 | - | 1.0% |
-| **Total instrumented CPU** | **37.62** | **2,069** | **100%** |
+| **Total instrumented CPU** | **37.62** | **2,922** | **100%** |
 
 At 13 evaluations per build this is approximately 489 ms of observer CPU work. Parallel
-evaluation reduces its observed wall-clock contribution to about 180 ms.
+evaluation reduced its pre-zero-copy observed wall-clock contribution to about 180 ms.
 
 ## Findings
 
-1. **Report finalization remains the largest single cost.** Sorting is gone; the remaining
-   cost is array creation, collection copying, category projection, and report construction.
+1. **Report finalization was the largest measured cost in this telemetry snapshot.**
+   Collection array creation/copying has since been removed by transferring ownership to
+   the report. The post-change overhead range is +1.9% to +2.7%, versus +3.7% to +5.2%
+   before the change. Activity attribution should be remeasured before choosing the next
+   optimization.
 2. **Filesystem recording is the largest repeated-record cost.** Path normalization,
    locking, key hashing, and dictionary updates occur about 243 times per evaluation.
 3. **The request snapshot repeats mostly process-static work.** Runtime, OS, architecture,
@@ -76,25 +84,23 @@ evaluation reduces its observed wall-clock contribution to about 180 ms.
 
 ## Improvement Priority
 
-1. Transfer collection ownership to the report or materialize arrays only when storing a
-   cache entry.
-2. Cache the process-static portion of the request snapshot and record only per-evaluation
+1. Cache the process-static portion of the request snapshot and record only per-evaluation
    values.
-3. Reduce low-level filesystem records under semantic owners and batch keyed updates.
-4. Reuse authoritative PRE/source hashes and avoid hashing the same source more than once.
-5. Cache property-function classifications and bypass observer dispatch for known-pure calls.
-6. Lazily allocate category dictionaries and short-circuit environment recording before
+2. Reduce low-level filesystem records under semantic owners and batch keyed updates.
+3. Reuse authoritative PRE/source hashes and avoid hashing the same source more than once.
+4. Cache property-function classifications and bypass observer dispatch for known-pure calls.
+5. Lazily allocate category dictionaries and short-circuit environment recording before
    normalization/locking.
 
-The first target should be report finalization plus request snapshotting. Together they
-consume about 12 ms of exclusive CPU per evaluation and require no loss of dependency
-coverage.
+Zero-copy report finalization is complete. The request snapshot is the next candidate,
+but it should not be started until a fresh attribution run confirms the new ranking.
 
 ## Confidence
 
 The report publishes only:
 
-- whole-build overhead reproduced in three independent BenchmarkDotNet runs;
+- pre-change whole-build overhead reproduced in three independent BenchmarkDotNet runs;
+- post-change whole-build overhead reproduced in two independent BenchmarkDotNet runs;
 - exclusive activity CPU time stable across five runs, 65 evaluations, and 30 processes;
 - allocation attribution collected across all MSBuild processes.
 

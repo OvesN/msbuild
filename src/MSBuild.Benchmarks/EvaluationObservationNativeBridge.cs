@@ -19,21 +19,21 @@ internal static class EvaluationObservationNativeBridge
                 : report =>
                 {
                     metrics.Reports++;
-                    metrics.PathProbes += report.PathProbes.Length;
-                    metrics.Enumerations += report.DirectoryEnumerations.Length;
-                    metrics.MetadataReads += report.MetadataReads.Length;
-                    metrics.FileReads += report.FileReads.Length;
+                    metrics.PathProbes += report.PathProbes.Count;
+                    metrics.Enumerations += report.DirectoryEnumerations.Count;
+                    metrics.MetadataReads += report.MetadataReads.Count;
+                    metrics.FileReads += report.FileReads.Count;
                     metrics.SemanticObservations +=
                         (report.Request is null ? 0 : 1) +
-                        report.ProjectSources.Length +
-                        report.Globs.Length +
-                        report.Searches.Length +
-                        report.Environment.Length +
-                        report.ExternalInputs.Length +
-                        report.PropertyFunctions.Length +
-                        report.SdkResolutions.Length +
-                        report.TaskRegistrations.Length +
-                        report.SideEffects.Length;
+                        report.ProjectSources.Count +
+                        report.Globs.Count +
+                        report.Searches.Count +
+                        report.Environment.Count +
+                        report.ExternalInputs.Count +
+                        report.PropertyFunctions.Count +
+                        report.SdkResolutions.Count +
+                        report.TaskRegistrations.Count +
+                        report.SideEffects.Count;
                     if (collectPaths && metrics.TryBeginPathSample())
                     {
                         foreach (EvaluationPathProbeObservation observation in report.PathProbes)
