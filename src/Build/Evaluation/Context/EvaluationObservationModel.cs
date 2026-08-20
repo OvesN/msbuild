@@ -2,6 +2,8 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 
 #nullable disable
@@ -675,19 +677,19 @@ namespace Microsoft.Build.Evaluation.Context
             int propertyFunctionClassificationVersion,
             EvaluationCategoryObservation[] categories,
             EvaluationRequestObservation request,
-            EvaluationProjectSourceObservation[] projectSources,
-            EvaluationPathProbeObservation[] pathProbes,
-            EvaluationDirectoryEnumerationObservation[] directoryEnumerations,
-            EvaluationMetadataObservation[] metadataReads,
-            EvaluationFileReadObservation[] fileReads,
-            EvaluationGlobObservation[] globs,
-            EvaluationSearchObservation[] searches,
-            EvaluationEnvironmentObservation[] environment,
-            EvaluationExternalInputObservation[] externalInputs,
-            EvaluationPropertyFunctionObservation[] propertyFunctions,
-            EvaluationSdkResolutionObservation[] sdkResolutions,
-            EvaluationTaskRegistrationObservation[] taskRegistrations,
-            EvaluationSideEffectObservation[] sideEffects)
+            IReadOnlyCollection<EvaluationProjectSourceObservation> projectSources,
+            IReadOnlyCollection<EvaluationPathProbeObservation> pathProbes,
+            IReadOnlyCollection<EvaluationDirectoryEnumerationObservation> directoryEnumerations,
+            IReadOnlyCollection<EvaluationMetadataObservation> metadataReads,
+            IReadOnlyCollection<EvaluationFileReadObservation> fileReads,
+            IReadOnlyCollection<EvaluationGlobObservation> globs,
+            IReadOnlyCollection<EvaluationSearchObservation> searches,
+            IReadOnlyCollection<EvaluationEnvironmentObservation> environment,
+            IReadOnlyCollection<EvaluationExternalInputObservation> externalInputs,
+            IReadOnlyCollection<EvaluationPropertyFunctionObservation> propertyFunctions,
+            IReadOnlyCollection<EvaluationSdkResolutionObservation> sdkResolutions,
+            IReadOnlyCollection<EvaluationTaskRegistrationObservation> taskRegistrations,
+            IReadOnlyCollection<EvaluationSideEffectObservation> sideEffects)
         {
             EvaluationId = evaluationId;
             ProjectPath = projectPath;
@@ -697,19 +699,19 @@ namespace Microsoft.Build.Evaluation.Context
             PropertyFunctionClassificationVersion = propertyFunctionClassificationVersion;
             Categories = categories;
             Request = request;
-            ProjectSources = projectSources;
-            PathProbes = pathProbes;
-            DirectoryEnumerations = directoryEnumerations;
-            MetadataReads = metadataReads;
-            FileReads = fileReads;
-            Globs = globs;
-            Searches = searches;
-            Environment = environment;
-            ExternalInputs = externalInputs;
-            PropertyFunctions = propertyFunctions;
-            SdkResolutions = sdkResolutions;
-            TaskRegistrations = taskRegistrations;
-            SideEffects = sideEffects;
+            ProjectSources = new EvaluationObservationCollection<EvaluationProjectSourceObservation>(projectSources);
+            PathProbes = new EvaluationObservationCollection<EvaluationPathProbeObservation>(pathProbes);
+            DirectoryEnumerations = new EvaluationObservationCollection<EvaluationDirectoryEnumerationObservation>(directoryEnumerations);
+            MetadataReads = new EvaluationObservationCollection<EvaluationMetadataObservation>(metadataReads);
+            FileReads = new EvaluationObservationCollection<EvaluationFileReadObservation>(fileReads);
+            Globs = new EvaluationObservationCollection<EvaluationGlobObservation>(globs);
+            Searches = new EvaluationObservationCollection<EvaluationSearchObservation>(searches);
+            Environment = new EvaluationObservationCollection<EvaluationEnvironmentObservation>(environment);
+            ExternalInputs = new EvaluationObservationCollection<EvaluationExternalInputObservation>(externalInputs);
+            PropertyFunctions = new EvaluationObservationCollection<EvaluationPropertyFunctionObservation>(propertyFunctions);
+            SdkResolutions = new EvaluationObservationCollection<EvaluationSdkResolutionObservation>(sdkResolutions);
+            TaskRegistrations = new EvaluationObservationCollection<EvaluationTaskRegistrationObservation>(taskRegistrations);
+            SideEffects = new EvaluationObservationCollection<EvaluationSideEffectObservation>(sideEffects);
         }
 
         internal int EvaluationId { get; }
@@ -720,19 +722,19 @@ namespace Microsoft.Build.Evaluation.Context
         internal int PropertyFunctionClassificationVersion { get; }
         internal EvaluationCategoryObservation[] Categories { get; }
         internal EvaluationRequestObservation Request { get; }
-        internal EvaluationProjectSourceObservation[] ProjectSources { get; }
-        internal EvaluationPathProbeObservation[] PathProbes { get; }
-        internal EvaluationDirectoryEnumerationObservation[] DirectoryEnumerations { get; }
-        internal EvaluationMetadataObservation[] MetadataReads { get; }
-        internal EvaluationFileReadObservation[] FileReads { get; }
-        internal EvaluationGlobObservation[] Globs { get; }
-        internal EvaluationSearchObservation[] Searches { get; }
-        internal EvaluationEnvironmentObservation[] Environment { get; }
-        internal EvaluationExternalInputObservation[] ExternalInputs { get; }
-        internal EvaluationPropertyFunctionObservation[] PropertyFunctions { get; }
-        internal EvaluationSdkResolutionObservation[] SdkResolutions { get; }
-        internal EvaluationTaskRegistrationObservation[] TaskRegistrations { get; }
-        internal EvaluationSideEffectObservation[] SideEffects { get; }
+        internal EvaluationObservationCollection<EvaluationProjectSourceObservation> ProjectSources { get; }
+        internal EvaluationObservationCollection<EvaluationPathProbeObservation> PathProbes { get; }
+        internal EvaluationObservationCollection<EvaluationDirectoryEnumerationObservation> DirectoryEnumerations { get; }
+        internal EvaluationObservationCollection<EvaluationMetadataObservation> MetadataReads { get; }
+        internal EvaluationObservationCollection<EvaluationFileReadObservation> FileReads { get; }
+        internal EvaluationObservationCollection<EvaluationGlobObservation> Globs { get; }
+        internal EvaluationObservationCollection<EvaluationSearchObservation> Searches { get; }
+        internal EvaluationObservationCollection<EvaluationEnvironmentObservation> Environment { get; }
+        internal EvaluationObservationCollection<EvaluationExternalInputObservation> ExternalInputs { get; }
+        internal EvaluationObservationCollection<EvaluationPropertyFunctionObservation> PropertyFunctions { get; }
+        internal EvaluationObservationCollection<EvaluationSdkResolutionObservation> SdkResolutions { get; }
+        internal EvaluationObservationCollection<EvaluationTaskRegistrationObservation> TaskRegistrations { get; }
+        internal EvaluationObservationCollection<EvaluationSideEffectObservation> SideEffects { get; }
 
         internal bool HasBlockingObservations
         {
@@ -754,6 +756,27 @@ namespace Microsoft.Build.Evaluation.Context
 
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Read-only view over a collection transferred from a completed observation session.
+        /// The source collection must never be mutated after transfer.
+        /// </summary>
+        internal readonly struct EvaluationObservationCollection<T> : IReadOnlyCollection<T>
+        {
+            private readonly IReadOnlyCollection<T> _items;
+
+            internal EvaluationObservationCollection(IReadOnlyCollection<T> items)
+            {
+                _items = items;
+            }
+
+            public int Count => _items?.Count ?? 0;
+
+            public IEnumerator<T> GetEnumerator() =>
+                (_items ?? Array.Empty<T>()).GetEnumerator();
+
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
         }
     }
 }

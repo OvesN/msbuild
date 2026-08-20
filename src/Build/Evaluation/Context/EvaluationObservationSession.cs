@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -25,7 +24,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 5;
+        private const int ObservationSchemaVersion = 6;
         private const int PropertyFunctionClassificationVersion = 1;
 
         [ThreadStatic]
@@ -136,20 +135,20 @@ namespace Microsoft.Build.Evaluation.Context
         private readonly string _projectPath;
         private readonly bool _allPropertyFunctionsEnabled;
         private readonly bool _retainDetails;
-        private readonly ConcurrentDictionary<PathProbeKey, bool> _pathProbes = new();
-        private readonly ConcurrentDictionary<EnumerationKey, EvaluationDirectoryEnumerationObservation> _directoryEnumerations = new();
-        private readonly ConcurrentDictionary<MetadataKey, EvaluationMetadataObservation> _metadataReads = new();
-        private readonly ConcurrentDictionary<FileReadKey, EvaluationFileReadObservation> _fileReads = new();
+        private Dictionary<PathProbeKey, EvaluationPathProbeObservation> _pathProbes = new();
+        private Dictionary<EnumerationKey, EvaluationDirectoryEnumerationObservation> _directoryEnumerations = new();
+        private Dictionary<MetadataKey, EvaluationMetadataObservation> _metadataReads = new();
+        private Dictionary<FileReadKey, EvaluationFileReadObservation> _fileReads = new();
         private EvaluationRequestObservation _request;
-        private readonly Dictionary<string, EvaluationProjectSourceObservation> _projectSources = new(FileUtilities.PathComparer);
-        private readonly Dictionary<string, EvaluationGlobObservation> _globs = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, EvaluationSearchObservation> _searches = new(StringComparer.Ordinal);
-        private readonly Dictionary<EnvironmentKey, EvaluationEnvironmentObservation> _environment = new();
-        private readonly Dictionary<string, EvaluationExternalInputObservation> _externalInputs = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, EvaluationPropertyFunctionObservation> _propertyFunctions = new(StringComparer.Ordinal);
-        private readonly List<EvaluationSdkResolutionObservation> _sdkResolutions = [];
-        private readonly Dictionary<string, EvaluationTaskRegistrationObservation> _taskRegistrations = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, EvaluationSideEffectObservation> _sideEffects = new(StringComparer.Ordinal);
+        private Dictionary<string, EvaluationProjectSourceObservation> _projectSources = new(FileUtilities.PathComparer);
+        private Dictionary<string, EvaluationGlobObservation> _globs = new(StringComparer.Ordinal);
+        private Dictionary<string, EvaluationSearchObservation> _searches = new(StringComparer.Ordinal);
+        private Dictionary<EnvironmentKey, EvaluationEnvironmentObservation> _environment = new();
+        private Dictionary<string, EvaluationExternalInputObservation> _externalInputs = new(StringComparer.Ordinal);
+        private Dictionary<string, EvaluationPropertyFunctionObservation> _propertyFunctions = new(StringComparer.Ordinal);
+        private List<EvaluationSdkResolutionObservation> _sdkResolutions = [];
+        private Dictionary<string, EvaluationTaskRegistrationObservation> _taskRegistrations = new(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, EvaluationSideEffectObservation> _sideEffects = new(StringComparer.Ordinal);
         private readonly object _observationLock = new();
 
         private long _reasons;
@@ -358,20 +357,47 @@ namespace Microsoft.Build.Evaluation.Context
             {
                 lock (_observationLock)
                 {
-                    return _pathProbes.Count +
-                        _directoryEnumerations.Count +
-                        _metadataReads.Count +
-                        _fileReads.Count +
+                    return (_pathProbes?.Count ?? 0) +
+                        (_directoryEnumerations?.Count ?? 0) +
+                        (_metadataReads?.Count ?? 0) +
+                        (_fileReads?.Count ?? 0) +
                         (_request is null ? 0 : 1) +
-                        _projectSources.Count +
-                        _globs.Count +
-                        _searches.Count +
-                        _environment.Count +
-                        _externalInputs.Count +
-                        _propertyFunctions.Count +
-                        _sdkResolutions.Count +
-                        _taskRegistrations.Count +
-                        _sideEffects.Count;
+                        (_projectSources?.Count ?? 0) +
+                        (_globs?.Count ?? 0) +
+                        (_searches?.Count ?? 0) +
+                        (_environment?.Count ?? 0) +
+                        (_externalInputs?.Count ?? 0) +
+                        (_propertyFunctions?.Count ?? 0) +
+                        (_sdkResolutions?.Count ?? 0) +
+                        (_taskRegistrations?.Count ?? 0) +
+                        (_sideEffects?.Count ?? 0);
+                }
+            }
+        }
+
+        internal EvaluationObservationReason TestOnlyReasons =>
+            (EvaluationObservationReason)Volatile.Read(ref _reasons);
+
+        internal bool TestOnlyObservationCollectionsDetached
+        {
+            get
+            {
+                lock (_observationLock)
+                {
+                    return _pathProbes is null &&
+                        _directoryEnumerations is null &&
+                        _metadataReads is null &&
+                        _fileReads is null &&
+                        _request is null &&
+                        _projectSources is null &&
+                        _globs is null &&
+                        _searches is null &&
+                        _environment is null &&
+                        _externalInputs is null &&
+                        _propertyFunctions is null &&
+                        _sdkResolutions is null &&
+                        _taskRegistrations is null &&
+                        _sideEffects is null;
                 }
             }
         }
@@ -974,11 +1000,21 @@ namespace Microsoft.Build.Evaluation.Context
                         NormalizePath(path),
                         kind,
                         provider ?? s_defaultFileSystemProvider);
-                    if (!_pathProbes.TryAdd(key, exists) &&
-                        _pathProbes.TryGetValue(key, out bool priorResult) &&
-                        priorResult != exists)
+                    var observation = new EvaluationPathProbeObservation(
+                        key.Path,
+                        key.Kind,
+                        exists,
+                        key.Provider);
+                    if (_pathProbes.TryGetValue(key, out EvaluationPathProbeObservation priorObservation))
                     {
-                        AddReason(EvaluationObservationReason.ConflictingObservation);
+                        if (priorObservation.Exists != exists)
+                        {
+                            AddReason(EvaluationObservationReason.ConflictingObservation);
+                        }
+                    }
+                    else
+                    {
+                        _pathProbes.Add(key, observation);
                     }
                 }
             }
@@ -1079,11 +1115,16 @@ namespace Microsoft.Build.Evaluation.Context
                         key.Provider,
                         completion);
 
-                    if (!_directoryEnumerations.TryAdd(key, observation) &&
-                        _directoryEnumerations.TryGetValue(key, out EvaluationDirectoryEnumerationObservation priorObservation) &&
-                        !EnumerationResultsEqual(priorObservation, observation))
+                    if (_directoryEnumerations.TryGetValue(key, out EvaluationDirectoryEnumerationObservation priorObservation))
                     {
-                        AddReason(EvaluationObservationReason.ConflictingObservation);
+                        if (!EnumerationResultsEqual(priorObservation, observation))
+                        {
+                            AddReason(EvaluationObservationReason.ConflictingObservation);
+                        }
+                    }
+                    else
+                    {
+                        _directoryEnumerations.Add(key, observation);
                     }
 
                     if (completion != EvaluationEnumerationCompletion.Complete)
@@ -1188,13 +1229,18 @@ namespace Microsoft.Build.Evaluation.Context
                         observation.Operation,
                         observation.BaseDirectory,
                         observation.Provider);
-                    if (!_metadataReads.TryAdd(key, observation) &&
-                        _metadataReads.TryGetValue(key, out EvaluationMetadataObservation priorValue) &&
-                        (priorValue.Value != observation.Value ||
-                         !string.Equals(priorValue.TextValue, observation.TextValue, StringComparison.Ordinal) ||
-                         !FileUtilities.PathComparer.Equals(priorValue.BaseDirectory, observation.BaseDirectory)))
+                    if (_metadataReads.TryGetValue(key, out EvaluationMetadataObservation priorValue))
                     {
-                        AddReason(EvaluationObservationReason.ConflictingObservation);
+                        if (priorValue.Value != observation.Value ||
+                            !string.Equals(priorValue.TextValue, observation.TextValue, StringComparison.Ordinal) ||
+                            !FileUtilities.PathComparer.Equals(priorValue.BaseDirectory, observation.BaseDirectory))
+                        {
+                            AddReason(EvaluationObservationReason.ConflictingObservation);
+                        }
+                    }
+                    else
+                    {
+                        _metadataReads.Add(key, observation);
                     }
                 }
             }
@@ -1240,8 +1286,7 @@ namespace Microsoft.Build.Evaluation.Context
                         hashKind,
                         actualProvider);
 
-                    if (!_fileReads.TryAdd(key, observation) &&
-                        _fileReads.TryGetValue(key, out EvaluationFileReadObservation priorObservation))
+                    if (_fileReads.TryGetValue(key, out EvaluationFileReadObservation priorObservation))
                     {
                         if (priorObservation.IsVerifiable && observation.IsVerifiable)
                         {
@@ -1254,6 +1299,10 @@ namespace Microsoft.Build.Evaluation.Context
                         {
                             _fileReads[key] = observation;
                         }
+                    }
+                    else
+                    {
+                        _fileReads.Add(key, observation);
                     }
 
                     if (!isVerifiable)
@@ -1295,102 +1344,79 @@ namespace Microsoft.Build.Evaluation.Context
                 Volatile.Write(ref _completed, 1);
                 try
                 {
-                    EvaluationCategoryObservation[] categories;
-                    EvaluationRequestObservation request;
-                    EvaluationProjectSourceObservation[] projectSources;
-                    EvaluationPathProbeObservation[] pathProbes;
-                    EvaluationDirectoryEnumerationObservation[] directoryEnumerations;
-                    EvaluationMetadataObservation[] metadataReads;
-                    EvaluationFileReadObservation[] fileReads;
-                    EvaluationGlobObservation[] globs;
-                    EvaluationSearchObservation[] searches;
-                    EvaluationEnvironmentObservation[] environment;
-                    EvaluationExternalInputObservation[] externalInputs;
-                    EvaluationPropertyFunctionObservation[] propertyFunctions;
-                    EvaluationSdkResolutionObservation[] sdkResolutions;
-                    EvaluationTaskRegistrationObservation[] taskRegistrations;
-                    EvaluationSideEffectObservation[] sideEffects;
-                    categories = CreateCategorySnapshot();
-                    request = _request;
-                    projectSources = CreateSnapshot(_projectSources.Values);
-                    pathProbes = CreatePathProbeSnapshot();
-                    directoryEnumerations = CreateSnapshot(_directoryEnumerations.Values);
-                    metadataReads = CreateSnapshot(_metadataReads.Values);
-                    fileReads = CreateSnapshot(_fileReads.Values);
-                    globs = CreateSnapshot(_globs.Values);
-                    searches = CreateSnapshot(_searches.Values);
-                    environment = CreateSnapshot(_environment.Values);
-                    externalInputs = CreateSnapshot(_externalInputs.Values);
-                    propertyFunctions = CreateSnapshot(_propertyFunctions.Values);
-                    sdkResolutions = _sdkResolutions.ToArray();
-                    taskRegistrations = CreateSnapshot(_taskRegistrations.Values);
-                    sideEffects = CreateSnapshot(_sideEffects.Values);
-
-                    report = new EvaluationObservationReport(
-                        _evaluationId,
-                        _projectPath,
-                        evaluationSucceeded,
-                        (EvaluationObservationReason)Volatile.Read(ref _reasons),
-                        ObservationSchemaVersion,
-                        PropertyFunctionClassificationVersion,
-                        categories,
-                        request,
-                        projectSources,
-                        pathProbes,
-                        directoryEnumerations,
-                        metadataReads,
-                        fileReads,
-                        globs,
-                        searches,
-                        environment,
-                        externalInputs,
-                        propertyFunctions,
-                        sdkResolutions,
-                        taskRegistrations,
-                        sideEffects);
+                    try
+                    {
+                        report = new EvaluationObservationReport(
+                            _evaluationId,
+                            _projectPath,
+                            evaluationSucceeded,
+                            (EvaluationObservationReason)Volatile.Read(ref _reasons),
+                            ObservationSchemaVersion,
+                            PropertyFunctionClassificationVersion,
+                            CreateCategorySnapshot(),
+                            _request,
+                            _projectSources.Values,
+                            _pathProbes.Values,
+                            _directoryEnumerations.Values,
+                            _metadataReads.Values,
+                            _fileReads.Values,
+                            _globs.Values,
+                            _searches.Values,
+                            _environment.Values,
+                            _externalInputs.Values,
+                            _propertyFunctions.Values,
+                            _sdkResolutions,
+                            _taskRegistrations.Values,
+                            _sideEffects.Values);
+                    }
+                    catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                    {
+                        report = new EvaluationObservationReport(
+                            _evaluationId,
+                            _projectPath,
+                            evaluationSucceeded,
+                            (EvaluationObservationReason)Volatile.Read(ref _reasons) |
+                                EvaluationObservationReason.ObservationIncomplete,
+                            ObservationSchemaVersion,
+                            PropertyFunctionClassificationVersion,
+                            CreateCategorySnapshot(),
+                            null,
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            [],
+                            []);
+                    }
                 }
-                catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                finally
                 {
-                    report = new EvaluationObservationReport(
-                        _evaluationId,
-                        _projectPath,
-                        evaluationSucceeded,
-                        (EvaluationObservationReason)Volatile.Read(ref _reasons) |
-                            EvaluationObservationReason.ObservationIncomplete,
-                        ObservationSchemaVersion,
-                        PropertyFunctionClassificationVersion,
-                        CreateCategorySnapshot(),
-                        null,
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        [],
-                        []);
+                    // Successful reports own the populated collections. On fallback, the
+                    // collections are discarded. In both cases the completed session must
+                    // release them because evaluator objects can retain the session.
+                    _pathProbes = null;
+                    _directoryEnumerations = null;
+                    _metadataReads = null;
+                    _fileReads = null;
+                    _request = null;
+                    _projectSources = null;
+                    _globs = null;
+                    _searches = null;
+                    _environment = null;
+                    _externalInputs = null;
+                    _propertyFunctions = null;
+                    _sdkResolutions = null;
+                    _taskRegistrations = null;
+                    _sideEffects = null;
+                    testConfiguration = Interlocked.Exchange(ref _testConfiguration, null);
                 }
-
-                _pathProbes.Clear();
-                _directoryEnumerations.Clear();
-                _metadataReads.Clear();
-                _fileReads.Clear();
-                _request = null;
-                _projectSources.Clear();
-                _globs.Clear();
-                _searches.Clear();
-                _environment.Clear();
-                _externalInputs.Clear();
-                _propertyFunctions.Clear();
-                _sdkResolutions.Clear();
-                _taskRegistrations.Clear();
-                _sideEffects.Clear();
-                testConfiguration = Interlocked.Exchange(ref _testConfiguration, null);
             }
 
             try
@@ -1461,22 +1487,6 @@ namespace Microsoft.Build.Evaluation.Context
                 string.Equals(left.EntriesHash, right.EntriesHash, StringComparison.Ordinal);
         }
 
-        private EvaluationPathProbeObservation[] CreatePathProbeSnapshot()
-        {
-            var snapshot = new EvaluationPathProbeObservation[_pathProbes.Count];
-            int index = 0;
-            foreach (KeyValuePair<PathProbeKey, bool> observation in _pathProbes)
-            {
-                snapshot[index++] = new EvaluationPathProbeObservation(
-                    observation.Key.Path,
-                    observation.Key.Kind,
-                    observation.Value,
-                    observation.Key.Provider);
-            }
-
-            return snapshot;
-        }
-
         private void Record(Action action)
         {
             try
@@ -1493,18 +1503,6 @@ namespace Microsoft.Build.Evaluation.Context
             {
                 AddReason(EvaluationObservationReason.ObservationIncomplete);
             }
-        }
-
-        private static T[] CreateSnapshot<T>(ICollection<T> observations)
-        {
-            if (observations.Count == 0)
-            {
-                return [];
-            }
-
-            T[] snapshot = new T[observations.Count];
-            observations.CopyTo(snapshot, 0);
-            return snapshot;
         }
 
         private static StringComparer GetEnvironmentNameComparer(EvaluationEnvironmentSource source)

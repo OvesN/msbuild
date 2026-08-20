@@ -1,52 +1,57 @@
 # Native Evaluation Observation Report
 
-## Coverage and Tracking
+## Session lifecycle
 
-- **Request configuration**
-  - Tracks global properties, load settings, runtime/OS/culture, feature switches, escape hatches, and provider identities.
-  - Captured once when evaluation starts.
+1. `Evaluator` calls `EvaluationObservationSession.TryCreate`. When the feature is
+   disabled it returns `null`, so the normal evaluator path is unchanged.
+2. The session is passed to `PropertyTrackingEvaluatorDataWrapper`. The active evaluation
+   `IFileSystem`, including any directory-cache wrapper, is wrapped by
+   `RecordingFileSystem`.
+3. `RecordInitialObservationSnapshot` records the root source and effective request state
+   once. It reuses existing evaluator, toolset, environment, trait, and PRE data.
+4. `EvaluationObservationSession.Enter` makes the session available through the
+   thread-static `Current` property and the Framework `EvaluationInputObserver` scope while
+   `Evaluator.Evaluate` runs.
+5. Recorders add typed observations to per-session keyed collections. One lock protects
+   mutation and completion. Repeated identical facts are deduplicated; conflicting facts,
+   unsupported operations, partial results, and failures add typed reasons.
+6. `Evaluator` calls `Complete` from `finally`, including failed evaluations. Completion
+   closes the session under the lock and creates one read-only
+   `EvaluationObservationReport`.
+7. Report finalization transfers the populated dictionaries/lists to read-only report
+   views without array copies. The completed session detaches its references because it
+   can remain reachable through evaluator objects. Late callbacks see completion and
+   cannot change the report.
 
-- **Project and import content**
-  - Tracks root, imported, linked, generated, and in-memory project sources.
-  - Disk XML is SHA-256 hashed while read; PRE/link versions are reused when authoritative.
+## What is collected and where
 
-- **Filesystem**
-  - Tracks positive and negative probes, file reads, timestamps, lengths, and providers.
-  - Recorded through the filesystem wrapper and direct hooks for paths that bypass it.
-
-- **Globs, enumerations, and searches**
-  - Tracks patterns, excludes, ordered results/candidates, selected paths, misses, and failures.
-  - Recorded at `FileMatcher`, `EngineFileUtilities`, and `FileUtilities` semantic seams using counts and 128-bit fingerprints.
-
-- **Environment**
-  - Tracks imported variables, missing imported variables, SDK-injected variables, and live process reads.
-  - Property reads are captured by `PropertyTrackingEvaluatorDataWrapper`; calls such as `Environment.GetEnvironmentVariable` are captured by property-function interception.
-
-- **Registry**
-  - Tracks registry expressions, intrinsic registry functions, property-function calls, requests, results, and failures.
-  - Recorded in the evaluator expansion and intrinsic-function paths.
-
-- **Property functions**
-  - Tracks filesystem, environment, Registry, ambient, volatile, and side-effecting calls.
-  - Recorded after execution in `Expander`; pure calls are omitted and unknown/unsafe calls fail closed.
-
-- **SDK resolution**
-  - Tracks the complete SDK request record, cache hit/miss, and returned `SdkResult`.
-  - Resolver dependencies are not observed; the SDK result cache owns reuse until it is cleared.
-
-- **Toolsets, tasks, providers, and caches**
-  - Tracks selected toolsets, effective `UsingTask` registrations, provider identity, and cache mode.
-  - Recorded at evaluator initialization, task registration, and cache/provider boundaries.
-
-- **Failures and side effects**
-  - Tracks partial operations, exceptions, conflicting results, volatile values, and mutations.
-  - Missing, opaque, custom, or unversioned inputs are marked incomplete or unsupported.
+| Category | What is recorded | Observation seam | Existing data reused |
+| --- | --- | --- | --- |
+| Request | Global properties, load/evaluation settings, toolset, runtime/OS/culture, feature switches, escape hatches, working directories, provider/cache modes | `Evaluator.RecordInitialObservationSnapshot` | Effective evaluator state, `BuildEnvironmentHelper`, `Traits`, toolset provider, global-property dictionary |
+| Project/import sources | Root, imported, linked, generated, and in-memory sources; path/provider, PRE version, content identity | `Evaluator` root/import processing and `ProjectRootElement` load paths | PRE/link versions and cached source hashes; bytes already consumed by XML loading |
+| File probes and reads | Positive/negative file and directory probes, content hashes, failures, provider identity | `RecordingFileSystem` over the active evaluation `IFileSystem`; direct evaluator/intrinsic hooks only where no filesystem call exists | Existing filesystem result and provider; no validation-time reprobe |
+| Metadata | Times, lengths, attributes, built-in path metadata, returned value/failure | `RecordingFileSystem`, `ItemSpecModifiers`, and classified property functions | Existing metadata result used by evaluation |
+| Enumerations and globs | Request pattern, excludes, completion, count, ordered result fingerprint, optional retained details | `RecordingFileSystem` and `EngineFileUtilities`/`FileMatcher` semantic completion | The enumeration/glob result already produced for evaluation; no second enumeration |
+| Searches | Ordered candidates, candidate fingerprint, selected path or miss | `FileUtilities` through `IEvaluationInputObserver`, plus evaluator import/toolset searches | Existing candidate sequence and selected result |
+| Environment | Imported, missing imported, SDK-injected, and live process values | `PropertyTrackingEvaluatorDataWrapper`; `Environment` property-function interception | Existing property lookup or property-function result |
+| Registry and ambient inputs | Registry requests/results/failures, culture/time/runtime/tool-location values, volatile values | Intrinsic expansion and post-execution property-function interception | Actual returned value consumed by expansion |
+| Property functions | Receiver/member, classified effect, arguments/result or failure | `Expander.Function` after dispatch | Existing invocation result; known-pure calls are omitted |
+| SDK resolution | SDK request, cache hit/miss, and returned `SdkResult` | `CachingSdkResolverService` and out-of-proc SDK service | Existing SDK cache result; resolver-internal files are intentionally opaque |
+| Tasks and toolsets | Effective `UsingTask` registration and selected toolset/provider identity | `TaskRegistry` and evaluator initialization | Resolved task registration and toolset already selected |
+| Side effects and issues | Mutations, partial operations, exceptions, conflicts, unsupported or unverifiable inputs | Evaluator, intrinsic/property-function hooks, and recorder conflict handling | Existing operation outcome; evaluation behavior is not changed |
 
 ## Reuse
 
-The implementation reuses PRE versions/cache data, filesystem abstractions, `FileMatcher`, property tracking, and SDK resolver/cache seams. It does not yet implement persistent evaluated-result storage or invalidation.
+The observer attaches to existing semantic owners instead of re-running operations. It
+reuses PRE versions and source hashes, the active `IFileSystem`, directory/file caches,
+`FileMatcher` results, property lookups, property-function return values, toolset/task
+selection, and SDK cache results.
 
-SDK resolver dependencies are not observed. The current SDK cache returns the stored `SdkResult` for the same SDK name within its cache scope until that cache is cleared.
+SDK resolver dependencies are not observed. The current SDK cache returns the stored
+`SdkResult` for the same SDK name within its cache scope until that cache is cleared.
+
+The implementation does not yet persist evaluated projects, validate reports, or perform
+cache lookup/invalidation.
 
 ## Orchard Core Measurements
 
@@ -55,17 +60,27 @@ Measured with `OrchardCoreNoOpBuildBenchmark` against
 Release build run before measurement; each sample is an external
 `dotnet build --no-restore` with unchanged inputs.
 
-Three independent 12-iteration runs measured **+3.7%, +3.8%, and +5.2%**. Their
-aggregate means are 4.910 s baseline and 5.107 s with observation:
-**approximately +4.0% / +197 ms**. Per-run median deltas ranged from 180 ms to 251 ms.
+Before zero-copy report finalization, three independent 12-iteration runs measured
+**+3.7%, +3.8%, and +5.2%**. Their aggregate means were 4.910 s baseline and
+5.107 s with observation: **approximately +4.0% / +197 ms**.
 
-Removing report sorting reduced allocation substantially, but its wall-time effect was
-within VM noise.
+After transferring completed collections directly to the report, two independent
+12-iteration runs measured:
+
+| Run | Observation disabled | Observation enabled | Delta |
+| --- | ---: | ---: | ---: |
+| 1 | 4.859 s | 4.992 s | +133 ms / +2.7% |
+| 2 | 4.889 s | 4.980 s | +91 ms / +1.9% |
+| **Aggregate means** | **4.874 s** | **4.986 s** | **+112 ms / +2.3%** |
+
+The aggregate delta is **85 ms / 43% lower**, while the stronger signal is that the
+post-change range (**+1.9% to +2.7%**) does not overlap the earlier range
+(**+3.7% to +5.2%**). These are unpaired Hyper-V VM runs, not exact attribution.
 
 ### Observer Allocation Attribution
 
-Measured with temporary child-process counters across 6 MSBuild processes and 13 project
-evaluations. Scopes are inclusive, overlap, and are not additive.
+The earlier per-activity allocation telemetry was measured before zero-copy finalization.
+Scopes are inclusive, overlap, and are not additive.
 
 | Activity | Per evaluation |
 | --- | ---: |
@@ -78,7 +93,24 @@ evaluations. Scopes are inclusive, overlap, and are not additive.
 | Report finalization | 44 KB |
 
 Removing sorting reduced report-finalization allocation from 259 KB to 44 KB per
-evaluation (-83%, -215 KB).
+evaluation (-83%, -215 KB). Zero-copy finalization then removed the remaining collection
+array projections.
+
+The separate synthetic child-process benchmark compares observation disabled and enabled
+across 50 evaluations:
+
+| Scenario | Disabled allocation | Enabled allocation | Added per evaluation | Post-GC retained delta |
+| --- | ---: | ---: | ---: | ---: |
+| Typical | 17.73 MB | 18.59 MB | 16.7 KiB | 5.7 KiB/process |
+| Glob-heavy | 78.99 MB | 79.66 MB | 13.1 KiB | 7.6 KiB/process |
+| Ambient/SDK | 21.54 MB | 23.08 MB | 30.1 KiB | 2.2 KiB/process |
+
+Per-evaluation deltas use the unrounded byte counters; this table is not directly
+comparable with the earlier inclusive Orchard activity scopes.
+
+Reports are consumed and discarded in this benchmark. The small post-GC deltas confirm
+bounded process retention and are consistent with the regression test that completed
+sessions detach their populated collections.
 
 See [evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md)
 for per-activity CPU-time attribution, self-overhead controls, rejected noisy
@@ -89,6 +121,6 @@ subtractive measurements, and optimization priorities.
 - Reduce allocation in property lookup and environment records.
 - Reuse normalized project-source identities and source records.
 - Compact task-registration, property-function, and filesystem records.
-- Defer report array creation until a cache entry is stored.
+- Materialize compact arrays only when a report is persisted in a cache entry.
 - Lazily create request and category data.
 - Define the complete SDK request key and cache lifetime.
