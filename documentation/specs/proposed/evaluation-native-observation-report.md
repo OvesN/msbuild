@@ -50,30 +50,40 @@ SDK resolver dependencies are not observed. The current SDK cache returns the st
 
 ## Orchard Core Measurements
 
-Measured with the existing [Orchard Core command-line evaluation benchmark](https://github.com/dotnet/msbuild/pull/14634), normalized per evaluation.
+Measured with `OrchardCoreNoOpBuildBenchmark` against
+`src/OrchardCore/OrchardCore/OrchardCore.csproj` (`net10.0`). Restore and the initial
+Release build run before measurement; each sample is an external
+`dotnet build --no-restore` with unchanged inputs.
 
-| Query | Baseline | Observer | Time overhead | Allocation |
-| --- | ---: | ---: | ---: | ---: |
-| `GetProperty` | 55.08 ms | 60.67 ms | +10.1% | 3.99 MB -> 4.32 MB |
-| `GetItems` | 64.19 ms | 67.83 ms | +5.7% | 4.56 MB -> 4.89 MB |
+| Baseline median | Observer median | Time overhead |
+| ---: | ---: | ---: |
+| 4.911 s | 5.091 s | +3.7% / 180 ms |
+
+Removing report sorting changed the measured overhead from 189 ms to 180 ms. The 9 ms
+difference is within VM noise.
 
 ### Observer Allocation Attribution
 
 Inclusive scopes; rows overlap and are not additive.
 
-| Activity | `GetProperty` | `GetItems` |
-| --- | ---: | ---: |
-| Report finalization | 103 KB | 105 KB |
-| Project-source records | 70 KB | 74 KB |
-| Environment records | 62 KB | 64 KB |
-| Filesystem records | 31 KB | 40 KB |
-| Initial request snapshot | 11 KB | 13 KB |
-| Property-function records | 7.6 KB | 7.7 KB |
+| Activity | Per evaluation |
+| --- | ---: |
+| Property lookup | 144 KB |
+| Environment records | 112 KB |
+| Task registration | 93 KB |
+| Project-source records | 87 KB |
+| Property-function records | 84 KB |
+| Filesystem records | 75 KB |
+| Report finalization | 44 KB |
+
+Removing sorting reduced report-finalization allocation from 259 KB to 44 KB per
+evaluation (-83%, -215 KB).
 
 ## Improvement Areas
 
-- Defer report array creation and sorting until a cache entry is stored.
+- Reduce allocation in property lookup and environment records.
 - Reuse normalized project-source identities and source records.
-- Compact environment and filesystem records.
+- Compact task-registration, property-function, and filesystem records.
+- Defer report array creation until a cache entry is stored.
 - Lazily create request and category data.
 - Define the complete SDK request key and cache lifetime.

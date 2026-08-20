@@ -730,33 +730,17 @@ namespace Microsoft.Build.Evaluation
 
         public static bool IsRunningFromVisualStudio() => BuildEnvironmentHelper.Instance.Mode == BuildEnvironmentMode.VisualStudio;
 
-        public static bool RegisterBuildCheck(string projectPath, string pathToAssembly, LoggingContext loggingContext)
+        public static bool RegisterBuildCheck(
+            string projectPath,
+            string pathToAssembly,
+            IFileSystem fileSystem,
+            LoggingContext loggingContext)
         {
             pathToAssembly = FileUtilities.GetFullPathNoThrow(pathToAssembly);
-            bool exists = FileSystems.Default.FileExists(pathToAssembly);
-            EvaluationObservationSession.Current?.RecordProbe(
-                pathToAssembly,
-                EvaluationPathKind.File,
-                exists);
+            bool exists = fileSystem.FileExists(pathToAssembly);
             if (exists)
             {
-                EvaluationObservationSession observationSession = EvaluationObservationSession.Current;
-                if (observationSession is not null)
-                {
-                    try
-                    {
-                        byte[] assemblyContent = FileSystems.Default.ReadFileAllBytes(pathToAssembly);
-                        observationSession.RecordFileRead(
-                            pathToAssembly,
-                            EvaluationObservationSession.ComputeBytesHash(assemblyContent),
-                            isVerifiable: true,
-                            hashKind: EvaluationContentHashKind.RawBytes);
-                    }
-                    catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
-                    {
-                        observationSession.MarkReason(EvaluationObservationReason.ObservationIncomplete);
-                    }
-                }
+                _ = fileSystem.ReadFileAllBytes(pathToAssembly);
 
                 loggingContext.LogBuildEvent(new BuildCheckAcquisitionEventArgs(pathToAssembly, projectPath));
                 EvaluationObservationSession.Current?.RecordSideEffect(

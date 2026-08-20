@@ -616,7 +616,7 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
-        public void EvaluationObservationEnumerationOrderingIncludesSearchOption()
+        public void EvaluationObservationRetainsDistinctEnumerationSearchOptions()
         {
             EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
             session.RecordEnumeration(
@@ -636,11 +636,11 @@ namespace Microsoft.Build.UnitTests.Definition
 
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
-            report.DirectoryEnumerations.Select(observation => observation.SearchOption).ShouldBe(
-            [
-                SearchOption.TopDirectoryOnly,
-                SearchOption.AllDirectories,
-            ]);
+            report.DirectoryEnumerations.Length.ShouldBe(2);
+            report.DirectoryEnumerations.ShouldContain(
+                observation => observation.SearchOption == SearchOption.TopDirectoryOnly);
+            report.DirectoryEnumerations.ShouldContain(
+                observation => observation.SearchOption == SearchOption.AllDirectories);
         }
 
         [Fact]
@@ -725,7 +725,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(4);
+            report.SchemaVersion.ShouldBe(5);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -1066,6 +1066,54 @@ namespace Microsoft.Build.UnitTests.Definition
                 observation.Kind == EvaluationExternalInputKind.Registry &&
                 observation.Operation == "GetRegistryValue" &&
                 string.IsNullOrEmpty(observation.Result));
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsBuildCheckThroughEvaluationFileSystem()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            TransientTestFile assemblyFile = _env.CreateFile(
+                "observed-build-check.dll",
+                "assembly-content");
+            string projectFile = _env.CreateFile(
+                "observed-build-check.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Registered>$([MSBuild]::RegisterBuildCheck('{assemblyFile.Path}'))</Registered>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+            var fileSystem = new Helpers.LoggingFileSystem();
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+                EvaluationContext = EvaluationContext.Create(
+                    EvaluationContext.SharingPolicy.Shared,
+                    fileSystem),
+            });
+
+            project.GetPropertyValue("Registered").ShouldBe(Boolean.TrueString);
+            report.ShouldNotBeNull();
+            fileSystem.ExistenceChecks[assemblyFile.Path].ShouldBe(1);
+            report.PathProbes.Count(observation =>
+                FileUtilities.PathsEqual(observation.Path, assemblyFile.Path) &&
+                observation.Kind == EvaluationPathKind.File &&
+                observation.Exists &&
+                observation.Provider.Contains(nameof(Helpers.LoggingFileSystem))).ShouldBe(1);
+            report.FileReads.Count(observation =>
+                FileUtilities.PathsEqual(observation.Path, assemblyFile.Path) &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.IsVerifiable &&
+                observation.Provider.Contains(nameof(Helpers.LoggingFileSystem))).ShouldBe(1);
+            report.SideEffects.ShouldContain(observation =>
+                observation.Kind == "RegisterBuildCheck" &&
+                FileUtilities.PathsEqual(observation.Identity, assemblyFile.Path));
         }
 
         [Fact]
