@@ -7,6 +7,7 @@ using System.Threading;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -92,6 +93,14 @@ namespace Microsoft.Build.BackEnd.SdkResolution
                 // MSB4240: Multiple versions of the same SDK "{0}" cannot be specified. The SDK version "{1}" already specified by "{2}" will be used and the version "{3}" will be ignored.
                 loggingContext.LogWarning(null, new BuildEventFileInfo(sdkReferenceLocation), "ReferencingMultipleVersionsOfTheSameSdk", sdk.Name, sdkResult.Version, sdkResult.ElementLocation, sdk.Version);
             }
+
+            EvaluationObservationSession.Current?.RecordSdkResolution(
+                sdk,
+                resolver: null,
+                sdkResult,
+                wasResultCached);
+            EvaluationObservationSession.Current?.MarkReason(EvaluationObservationReason.OutOfProcSdkResolver);
+            EvaluationObservationSession.Current?.MarkReason(EvaluationObservationReason.SdkResolverDependencyManifestUnavailable);
 
             MSBuildEventSource.Log.OutOfProcSdkResolverServiceRequestSdkPathFromMainNodeStop(submissionId, sdk.Name, solutionPath, projectPath, _lastResponse.Success, wasResultCached);
 

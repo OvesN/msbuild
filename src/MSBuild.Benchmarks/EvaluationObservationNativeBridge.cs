@@ -23,7 +23,17 @@ internal static class EvaluationObservationNativeBridge
                     metrics.Enumerations += report.DirectoryEnumerations.Length;
                     metrics.MetadataReads += report.MetadataReads.Length;
                     metrics.FileReads += report.FileReads.Length;
-
+                    metrics.SemanticObservations +=
+                        (report.Request is null ? 0 : 1) +
+                        report.ProjectSources.Length +
+                        report.Globs.Length +
+                        report.Searches.Length +
+                        report.Environment.Length +
+                        report.ExternalInputs.Length +
+                        report.PropertyFunctions.Length +
+                        report.SdkResolutions.Length +
+                        report.TaskRegistrations.Length +
+                        report.SideEffects.Length;
                     if (collectPaths && metrics.TryBeginPathSample())
                     {
                         foreach (EvaluationPathProbeObservation observation in report.PathProbes)
@@ -33,6 +43,7 @@ internal static class EvaluationObservationNativeBridge
 
                         foreach (EvaluationDirectoryEnumerationObservation observation in report.DirectoryEnumerations)
                         {
+                            metrics.AddEnumeration(observation);
                             metrics.AddPath(observation.Path);
                             foreach (string entry in observation.Entries)
                             {
@@ -49,7 +60,42 @@ internal static class EvaluationObservationNativeBridge
                         {
                             metrics.AddPath(observation.Path);
                         }
+
+                        foreach (EvaluationProjectSourceObservation observation in report.ProjectSources)
+                        {
+                            metrics.AddPath(observation.Path);
+                        }
+
+                        foreach (EvaluationGlobObservation observation in report.Globs)
+                        {
+                            metrics.AddPath(observation.Directory);
+                            foreach (string result in observation.Results)
+                            {
+                                metrics.AddPath(result);
+                            }
+                        }
+
+                        foreach (EvaluationSearchObservation observation in report.Searches)
+                        {
+                            foreach (string candidate in observation.Candidates)
+                            {
+                                metrics.AddPath(candidate);
+                            }
+
+                            metrics.AddPath(observation.Selected);
+                        }
+
+                        foreach (EvaluationSdkResolutionObservation observation in report.SdkResolutions)
+                        {
+                            metrics.AddPath(observation.Path);
+                        }
+
+                        foreach (EvaluationTaskRegistrationObservation observation in report.TaskRegistrations)
+                        {
+                            metrics.AddPath(observation.AssemblyFile);
+                        }
                     }
-                });
+                },
+            retainDetails: collectPaths);
     }
 }

@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using Microsoft.Build.BackEnd;
 using Microsoft.Build.BackEnd.Components.Logging;
@@ -260,9 +261,6 @@ namespace Microsoft.Build.Evaluation
                 buildEventContext,
                 string.IsNullOrEmpty(projectRootElement.ProjectFileLocation.File) ? "(null)" : projectRootElement.ProjectFileLocation.File);
 
-            // Wrap the IEvaluatorData<> object passed in.
-            data = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(data, _evaluationLoggingContext, Traits.Instance.LogPropertyTracking);
-
             // If the host wishes to provide a directory cache for this evaluation, create a new EvaluationContext with the right file system.
             IDirectoryCache directoryCache = directoryCacheFactory?.GetDirectoryCacheForEvaluation(_evaluationLoggingContext.BuildEventContext.EvaluationId);
             IFileSystem fileSystem = evaluationContext.FileSystem;
@@ -280,6 +278,13 @@ namespace Microsoft.Build.Evaluation
 
             try
             {
+                // Wrap the IEvaluatorData<> object passed in.
+                data = new PropertyTrackingEvaluatorDataWrapper<P, I, M, D>(
+                    data,
+                    _evaluationLoggingContext,
+                    Traits.Instance.LogPropertyTracking,
+                    _observationSession);
+
                 if (_observationSession is not null)
                 {
                     fileSystem = new RecordingFileSystem(fileSystem, _observationSession);
@@ -319,6 +324,18 @@ namespace Microsoft.Build.Evaluation
                 // In 16.0 we added the /interactive command-line argument so the line below keeps back-compat
                 _interactive = interactive || string.Equals("true", _data.GlobalPropertiesDictionary.GetProperty("NuGetInteractive")?.EvaluatedValue, StringComparison.OrdinalIgnoreCase);
 
+                if (_observationSession is not null)
+                {
+                    RecordInitialObservationSnapshot(
+                        projectRootElement,
+                        loadSettings,
+                        maxNodeCount,
+                        evaluationContext,
+                        interactive,
+                        directoryCache,
+                        toolsetProvider);
+                }
+
                 // The last modified project is the project itself unless its an in-memory project
                 if (projectRootElement.FullPath != null)
                 {
@@ -333,6 +350,253 @@ namespace Microsoft.Build.Evaluation
             {
                 _observationSession?.Complete(evaluationSucceeded: false);
                 throw;
+            }
+        }
+
+        private void RecordInitialObservationSnapshot(
+            ProjectRootElement projectRootElement,
+            ProjectLoadSettings loadSettings,
+            int maxNodeCount,
+            EvaluationContext evaluationContext,
+            bool requestedInteractive,
+            IDirectoryCache directoryCache,
+            IToolsetProvider toolsetProvider)
+        {
+            if (_observationSession is null)
+            {
+                return;
+            }
+
+            try
+            {
+                RecordInitialObservationSnapshotCore(
+                    projectRootElement,
+                    loadSettings,
+                    maxNodeCount,
+                    evaluationContext,
+                    requestedInteractive,
+                    directoryCache,
+                    toolsetProvider);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                _observationSession.MarkReason(EvaluationObservationReason.ObservationIncomplete);
+            }
+        }
+
+        private void RecordInitialObservationSnapshotCore(
+            ProjectRootElement projectRootElement,
+            ProjectLoadSettings loadSettings,
+            int maxNodeCount,
+            EvaluationContext evaluationContext,
+            bool requestedInteractive,
+            IDirectoryCache directoryCache,
+            IToolsetProvider toolsetProvider)
+        {
+            _observationSession.RecordProjectSource(projectRootElement, EvaluationProjectSourceRole.Root);
+            var globalProperties = new EvaluationNamedValueObservation[_data.GlobalPropertiesDictionary.Count];
+            int globalPropertyIndex = 0;
+            foreach (ProjectPropertyInstance property in _data.GlobalPropertiesDictionary)
+            {
+                globalProperties[globalPropertyIndex++] = new EvaluationNamedValueObservation(
+                    property.Name,
+                    property.EvaluatedValue,
+                    "GlobalProperty");
+            }
+            Array.Sort(
+                globalProperties,
+                static (left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+
+            string[] commandLineProperties = new string[_propertiesFromCommandLine?.Count ?? 0];
+            _propertiesFromCommandLine?.CopyTo(commandLineProperties, 0);
+            Array.Sort(commandLineProperties, StringComparer.OrdinalIgnoreCase);
+
+            BuildEnvironment buildEnvironment = BuildEnvironmentHelper.Instance;
+            EscapeHatches escapeHatches = Traits.Instance.EscapeHatches;
+            Assembly engineAssembly = typeof(Project).Assembly;
+            _observationSession.RecordRequest(new EvaluationRequestObservation
+            {
+                EngineVersion =
+                    engineAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
+                    FileVersionInfo.GetVersionInfo(engineAssembly.Location).FileVersion,
+                EngineAssemblyVersion = engineAssembly.GetName().Version?.ToString(),
+                HostMode = buildEnvironment.Mode.ToString(),
+                ProjectPath = projectRootElement.FullPath,
+                ProjectLoadSettings = (int)loadSettings,
+                EvaluationStage = (int)_evaluationStage,
+                SharingPolicy = (int)evaluationContext.Policy,
+                ExplicitToolsVersion = _data.ExplicitToolsVersion,
+                SubToolsetVersion = _data.SubToolsetVersion,
+                LoadProjectsReadOnly = _projectRootElementCache.LoadProjectsReadOnly,
+                AutoReloadProjectsFromDisk =
+                    _projectRootElementCache is ProjectRootElementCache cache && cache.AutoReloadFromDisk,
+                PreserveFormatting = projectRootElement.PreserveFormatting,
+                MaxNodeCount = maxNodeCount,
+                InteractiveRequested = requestedInteractive,
+                InteractiveEffective = _interactive,
+                BuildingInsideVisualStudio = _isRunningInVisualStudio,
+                RunningInVisualStudio = buildEnvironment.RunningInVisualStudio,
+                StartupDirectory = BuildParameters.StartupDirectory,
+                ProcessCurrentDirectory = Directory.GetCurrentDirectory(),
+                ThreadWorkingDirectory = FileUtilities.CurrentThreadWorkingDirectory,
+                CurrentCulture = CultureInfo.CurrentCulture.Name,
+                CurrentUICulture = CultureInfo.CurrentUICulture.Name,
+                LocalTimeZone = TimeZoneInfo.Local.Id,
+                Runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+                OperatingSystem = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+                ProcessArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+                PathComparison = FileUtilities.PathComparison.ToString(),
+                EnableAllPropertyFunctions = FeatureSwitches.EnableAllPropertyFunctions,
+                RestrictPropertyFunctionReceivers = FeatureSwitches.RestrictPropertyFunctionReceivers,
+                EnableCustomPluginProbing = FeatureSwitches.EnableCustomPluginProbing,
+                EnableSdkResolverDynamicLoading = FeatureSwitches.EnableSdkResolverDynamicLoading,
+                EnableConfigurationFileToolsets = FeatureSwitches.EnableConfigurationFileToolsets,
+                CacheFileExistence = Traits.Instance.CacheFileExistence,
+                CacheFileEnumerations = Traits.Instance.MSBuildCacheFileEnumerations,
+                UseLazyWildcardEvaluation = Traits.Instance.UseLazyWildCardEvaluation,
+                ForceEvaluateAsFullFramework = Traits.Instance.ForceEvaluateAsFullFramework,
+                DisabledChangeWave = ChangeWaves.DisabledWave?.ToString(),
+                ChangeWaveConversionState = ChangeWaves.ConversionState.ToString(),
+                DoNotExpandQualifiedMetadataInUpdateOperation =
+                    escapeHatches.DoNotExpandQualifiedMetadataInUpdateOperation,
+                EvaluateElementsWithFalseCondition =
+                    escapeHatches.EvaluateElementsWithFalseConditionInProjectEvaluation,
+                DoNotTruncateConditions = escapeHatches.DoNotTruncateConditions,
+                AlwaysEvaluateDangerousGlobs = escapeHatches.AlwaysEvaluateDangerousGlobs,
+                DisableParseConfig = escapeHatches.DisableParseConfig,
+                IgnoreEmptyImports = escapeHatches.IgnoreEmptyImports,
+                IgnoreTreatAsLocalProperty = escapeHatches.IgnoreTreatAsLocalProperty,
+                UseCaseSensitiveItemNames = escapeHatches.UseCaseSensitiveItemNames,
+                DisableSdkResolutionCache = escapeHatches.DisableSdkResolutionCache,
+                SdkReferencePropertyExpansion = escapeHatches.SdkReferencePropertyExpansion?.ToString(),
+                AlwaysDoImmutableFilesUpToDateCheck = escapeHatches.AlwaysDoImmutableFilesUpToDateCheck,
+                AlwaysUseContentTimestamp = escapeHatches.AlwaysUseContentTimestamp,
+                UseSymlinkTimeInsteadOfTargetTime = escapeHatches.UseSymlinkTimeInsteadOfTargetTime,
+                DisableLongPaths = escapeHatches.DisableLongPaths,
+                FileSystemProvider = evaluationContext.FileSystem.GetType().AssemblyQualifiedName,
+                DirectoryCacheProvider = directoryCache?.GetType().AssemblyQualifiedName,
+                ToolsetProvider = toolsetProvider?.GetType().AssemblyQualifiedName,
+                ImportedEnvironmentCount = _environmentProperties?.Count ?? 0,
+                ToolsetDefinitionLocations =
+                    toolsetProvider is ProjectCollection projectCollection
+                        ? projectCollection.ToolsetLocations.ToString()
+                        : null,
+                MSBuildToolsDirectory = buildEnvironment.CurrentMSBuildToolsDirectory,
+                MSBuildSdksPath = buildEnvironment.MSBuildSDKsPath,
+                MSBuildExtensionsPath = buildEnvironment.MSBuildExtensionsPath,
+                VisualStudioInstallRoot = buildEnvironment.VisualStudioInstallRootDirectory,
+                GlobalProperties = globalProperties,
+                CommandLineProperties = commandLineProperties,
+            });
+
+            string[] engineEnvironmentInputs =
+            [
+                "MSBUILDINCLUDEDEFAULTSDKRESOLVER",
+                "MSBUILDADDITIONALSDKRESOLVERSFOLDER",
+                "MSBuildSDKsPath",
+                "MSBUILDENABLEALLPROPERTYFUNCTIONS",
+                ParserIgnoreConfiguration.EnvironmentVariableName,
+            ];
+            foreach (string environmentName in engineEnvironmentInputs)
+            {
+                string environmentValue = Environment.GetEnvironmentVariable(environmentName);
+                _observationSession.RecordEnvironment(
+                    environmentName,
+                    EvaluationEnvironmentSource.LiveProcess,
+                    environmentValue is not null,
+                    environmentValue);
+            }
+
+            Toolset toolset = _data.Toolset;
+            if (toolset is not null)
+            {
+                _observationSession.RecordExternalInput(
+                    EvaluationExternalInputKind.Toolset,
+                    "SelectedToolset",
+                    toolset.ToolsVersion,
+                    toolset.ToolsPath);
+                var toolsetProperties = new Dictionary<string, string>(
+                    toolset.Properties.Count,
+                    MSBuildNameIgnoreCaseComparer.Default);
+                foreach (KeyValuePair<string, ProjectPropertyInstance> property in toolset.Properties)
+                {
+                    toolsetProperties[property.Key] = property.Value.EvaluatedValue;
+                }
+                _observationSession.RecordExternalInput(
+                    EvaluationExternalInputKind.Toolset,
+                    "ToolsetProperties",
+                    toolset.ToolsVersion,
+                    toolsetProperties);
+
+                _observationSession.MarkReason(EvaluationObservationReason.UnversionedToolsetInputs);
+            }
+
+            ParserIgnoreConfiguration parserConfiguration = _projectRootElementCache.ParserIgnoreConfiguration;
+            if (parserConfiguration is not null)
+            {
+                List<string> parserCandidates = [];
+                string parserSearchStart = null;
+                string selectedParserConfig = null;
+                foreach (ParserIgnoreConfiguration.Observation observation in parserConfiguration.Observations)
+                {
+                    switch (observation.Kind)
+                    {
+                        case "Environment":
+                            _observationSession.RecordEnvironment(
+                                observation.Request,
+                                EvaluationEnvironmentSource.LiveProcess,
+                                observation.Result is not null,
+                                observation.Result);
+                            break;
+                        case "FileProbe":
+                            _observationSession.RecordProbe(
+                                observation.Request,
+                                EvaluationPathKind.File,
+                                bool.TryParse(observation.Result, out bool exists) && exists);
+                            break;
+                        case "ContentHash":
+                            _observationSession.RecordFileRead(
+                                observation.Request,
+                                observation.Result,
+                                isVerifiable: false,
+                                hashKind: EvaluationContentHashKind.ParsedXml);
+                            break;
+                        case "UpwardSearchCandidate":
+                            parserCandidates.Add(observation.Request);
+                            if (bool.TryParse(observation.Result, out bool selected) && selected)
+                            {
+                                selectedParserConfig = observation.Request;
+                            }
+                            break;
+                        case "UpwardSearchStart":
+                            parserSearchStart = observation.Request;
+                            selectedParserConfig = observation.Result;
+                            break;
+                    }
+                }
+
+                if (parserCandidates.Count > 0)
+                {
+                    _observationSession.RecordSearch(
+                        "Directory.Parse.config",
+                        parserSearchStart,
+                        parserCandidates,
+                        selectedParserConfig,
+                        complete: true);
+                }
+                else if (parserConfiguration.Observations.Count == 0)
+                {
+                    _observationSession.MarkReason(EvaluationObservationReason.ParserConfigurationProvenanceUnavailable);
+                }
+            }
+            else if (!escapeHatches.DisableParseConfig)
+            {
+                _observationSession.MarkReason(EvaluationObservationReason.ParserConfigurationProvenanceUnavailable);
+            }
+
+            if (evaluationContext.FileSystem.GetType() != typeof(CachingFileSystemWrapper))
+            {
+                _observationSession.MarkReason(EvaluationObservationReason.UnversionedCustomProvider);
             }
         }
 
@@ -399,6 +663,7 @@ namespace Microsoft.Build.Evaluation
                 loggingService,
                 buildEventContext,
                 evaluationStage);
+            using IDisposable observationScope = evaluator._observationSession?.Enter();
 
             bool evaluationSucceeded = false;
             try
@@ -976,6 +1241,10 @@ namespace Microsoft.Build.Evaluation
                 var pluginSettings = item.Metadata.ToDictionary(m => m.Key, m => m.EscapedValue);
                 var projectCacheItem = ProjectCacheDescriptor.FromAssemblyPath(pluginPath, pluginSettings);
                 BuildManager.ProjectCacheDescriptors.TryAdd(projectCacheItem, projectCacheItem);
+                _observationSession?.RecordSideEffect(
+                    "ProjectCachePluginRegistration",
+                    pluginPath,
+                    pluginSettings);
             }
         }
 
@@ -986,6 +1255,16 @@ namespace Microsoft.Build.Evaluation
         /// </summary>
         private void PerformDepthFirstPass(ProjectRootElement currentProjectOrImport)
         {
+            _observationSession?.RecordProjectSource(
+                currentProjectOrImport,
+                ReferenceEquals(currentProjectOrImport, _projectRootElement)
+                    ? EvaluationProjectSourceRole.Root
+                    : currentProjectOrImport.IsEphemeral
+                        ? EvaluationProjectSourceRole.Generated
+                        : currentProjectOrImport.FullPath is null
+                            ? EvaluationProjectSourceRole.InMemory
+                            : EvaluationProjectSourceRole.Import);
+
             using (_evaluationProfiler.TrackFile(currentProjectOrImport.FullPath))
             {
                 // We accumulate InitialTargets from the project and each import
@@ -1703,8 +1982,46 @@ namespace Microsoft.Build.Evaluation
             // If there are wildcards in the Import, a list of all the matches from all import search
             // paths will be returned (union of all files that match).
             var allProjects = new List<ProjectRootElement>();
+            List<string> fallbackCandidates = _observationSession is null ? null : [];
+            string selectedFallbackPath = null;
             bool containsWildcards = FileMatcher.HasWildcards(importElement.Project);
             bool missingDirectoryDespiteTrueCondition = false;
+
+            void RecordFallbackSearch(IReadOnlyList<ProjectRootElement> selectedProjects)
+            {
+                if (_observationSession is null)
+                {
+                    return;
+                }
+
+                string selected = null;
+                if (selectedProjects is { Count: > 0 })
+                {
+                    var selectedBuilder = new StringBuilder();
+                    for (int i = 0; i < selectedProjects.Count; i++)
+                    {
+                        if (i > 0)
+                        {
+                            selectedBuilder.Append(';');
+                        }
+
+                        selectedBuilder.Append(selectedProjects[i].FullPath);
+                    }
+
+                    selected = selectedBuilder.ToString();
+                }
+                else
+                {
+                    selected = selectedFallbackPath;
+                }
+
+                _observationSession.RecordSearch(
+                    "ImportFallback",
+                    importElement.Project,
+                    fallbackCandidates,
+                    selected,
+                    complete: true);
+            }
 
             // Try every extension search path, till we get a Hit:
             // 1. 1 or more project files loaded
@@ -1727,16 +2044,51 @@ namespace Microsoft.Build.Evaluation
                     continue;
                 }
 
+                string newExpandedImportPath = null;
+                if (_observationSession is not null)
+                {
+                    newExpandedImportPath = importElement.Project.Replace(
+                        extensionPropertyRefAsString,
+                        extensionPathExpanded,
+                        StringComparison.OrdinalIgnoreCase);
+                    fallbackCandidates.Add(newExpandedImportPath);
+                }
+
                 // If the whole fallback folder doesn't exist, short-circuit and don't
                 // bother constructing an exact file path.
-                if (!_fallbackSearchPathsCache.DirectoryExists(extensionPathExpanded))
+                bool fallbackRootCacheHit = false;
+                bool fallbackRootExists = _observationSession is null
+                    ? _fallbackSearchPathsCache.DirectoryExists(extensionPathExpanded)
+                    : _fallbackSearchPathsCache.DirectoryExists(
+                        extensionPathExpanded,
+                        out fallbackRootCacheHit);
+                _observationSession?.RecordExternalInput(
+                    EvaluationExternalInputKind.Search,
+                    "FallbackSearchRootProbe",
+                    extensionPathExpanded,
+                    string.Concat(
+                        "Exists=", fallbackRootExists.ToString(CultureInfo.InvariantCulture),
+                        ";CacheHit=", fallbackRootCacheHit.ToString(CultureInfo.InvariantCulture)));
+                _observationSession?.RecordProbe(
+                    extensionPathExpanded,
+                    EvaluationPathKind.Directory,
+                    fallbackRootExists);
+                if (fallbackRootCacheHit)
+                {
+                    _observationSession?.MarkReason(EvaluationObservationReason.UnversionedFileExistenceCache);
+                }
+
+                if (!fallbackRootExists)
                 {
                     // Set to log an error only if the change wave is enabled.
                     missingDirectoryDespiteTrueCondition = !containsWildcards;
                     continue;
                 }
 
-                var newExpandedImportPath = importElement.Project.Replace(extensionPropertyRefAsString, extensionPathExpanded, StringComparison.OrdinalIgnoreCase);
+                newExpandedImportPath ??= importElement.Project.Replace(
+                    extensionPropertyRefAsString,
+                    extensionPathExpanded,
+                    StringComparison.OrdinalIgnoreCase);
                 _evaluationLoggingContext.LogComment(MessageImportance.Low, "TryingExtensionsPath", newExpandedImportPath, extensionPathExpanded);
 
                 List<ProjectRootElement> projects;
@@ -1744,9 +2096,11 @@ namespace Microsoft.Build.Evaluation
 
                 if (result == LoadImportsResult.ProjectsImported)
                 {
+                    selectedFallbackPath = newExpandedImportPath;
                     // If we don't have a wildcard and we had a match, we're done.
                     if (!containsWildcards)
                     {
+                        RecordFallbackSearch(projects);
                         return projects;
                     }
 
@@ -1758,6 +2112,7 @@ namespace Microsoft.Build.Evaluation
 
                 if (result == LoadImportsResult.FoundFilesToImportButIgnored)
                 {
+                    selectedFallbackPath = newExpandedImportPath;
                     // Circular, Self import cases are usually ignored
                     // Since we have a semi-success here, we stop looking at
                     // other paths
@@ -1765,6 +2120,7 @@ namespace Microsoft.Build.Evaluation
                     // If we don't have a wildcard and we had a match, we're done.
                     if (!containsWildcards)
                     {
+                        RecordFallbackSearch(projects);
                         return projects;
                     }
 
@@ -1788,9 +2144,11 @@ namespace Microsoft.Build.Evaluation
                 (atleastOneExactFilePathWasLookedAtAndNotFound || missingDirectoryDespiteTrueCondition) &&
                 (_loadSettings & ProjectLoadSettings.IgnoreMissingImports) == 0)
             {
+                RecordFallbackSearch(allProjects);
                 ThrowForImportedProjectWithSearchPathsNotFound(fallbackSearchPathMatch, importElement);
             }
 
+            RecordFallbackSearch(allProjects);
             return allProjects;
         }
 
@@ -1920,6 +2278,18 @@ namespace Microsoft.Build.Evaluation
                 // Combine SDK path with the "project" relative path
                 try
                 {
+                    _observationSession?.RecordSdkRequest(
+                        sdkReference,
+                        projectPath,
+                        solutionPath,
+                        _interactive,
+                        _isRunningInVisualStudio);
+
+                    if (_sdkResolverService is OutOfProcNodeSdkResolverService)
+                    {
+                        _observationSession?.MarkReason(EvaluationObservationReason.OutOfProcSdkResolver);
+                    }
+
                     using var assemblyLoadsTracker = AssemblyLoadsTracker.StartTracking(_evaluationLoggingContext, AssemblyLoadingContext.SdkResolution, _sdkResolverService.GetType());
 
                     sdkResult = _sdkResolverService.ResolveSdk(
@@ -2017,7 +2387,9 @@ namespace Microsoft.Build.Evaluation
                     // "S:\sdk\.dotnet\sdk\10.0.100-preview.6.25315.102\Sdks\Microsoft.NET.Sdk\Sdk"
                     //                  ^5              ^4               ^3          ^2        ^1
                     string dotnetExe = Path.Combine(FileUtilities.GetFolderAbove(sdkResult.Path, 5), Constants.DotnetProcessName);
-                    if (FileSystems.Default.FileExists(dotnetExe))
+                    bool dotnetHostExists = FileSystems.Default.FileExists(dotnetExe);
+                    _observationSession?.RecordProbe(dotnetExe, EvaluationPathKind.File, dotnetHostExists);
+                    if (dotnetHostExists)
                     {
                         _data.AddSdkResolvedEnvironmentVariable(Constants.DotnetHostPathEnvVarName, dotnetExe);
                     }
@@ -2372,7 +2744,12 @@ namespace Microsoft.Build.Evaluation
                         // Perhaps the import tag has a typo in, for example.
 
                         // There's a specific message for file not existing
-                        if (!FileSystems.Default.FileExists(importFileUnescaped))
+                        bool importExists = FileSystems.Default.FileExists(importFileUnescaped);
+                        _observationSession?.RecordProbe(
+                            importFileUnescaped,
+                            EvaluationPathKind.File,
+                            importExists);
+                        if (!importExists)
                         {
                             if ((_loadSettings & ProjectLoadSettings.IgnoreMissingImports) != 0)
                             {

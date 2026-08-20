@@ -740,7 +740,9 @@ namespace Microsoft.Build.Framework
 
             // Find the part of the name we want to check, that is remove quotes, if present
             bool shouldAdjust = newValue.IndexOf('/') != -1 && LooksLikeUnixFilePath(RemoveQuotes(newValue), baseDirectory);
-            return shouldAdjust ? newValue.ToString() : value;
+            string result = shouldAdjust ? newValue.ToString() : value;
+            EvaluationInputObserver.Current?.RecordPathAdjustment(value, baseDirectory, result);
+            return result;
         }
 
         /// <summary>
@@ -772,7 +774,12 @@ namespace Microsoft.Build.Framework
 
             // Find the part of the name we want to check, that is remove quotes, if present
             bool shouldAdjust = newValue.IndexOf('/') != -1 && LooksLikeUnixFilePath(RemoveQuotes(newValue), baseDirectory);
-            return shouldAdjust ? newValue.ToString().AsMemory() : value;
+            ReadOnlyMemory<char> result = shouldAdjust ? newValue.ToString().AsMemory() : value;
+            EvaluationInputObserver.Current?.RecordPathAdjustment(
+                value.ToString(),
+                baseDirectory,
+                result.ToString());
+            return result;
         }
 
         private static Span<char> ConvertToUnixSlashes(Span<char> path)
@@ -850,8 +857,23 @@ namespace Microsoft.Build.Framework
             bool shouldCheckFileOrDirectory = !shouldCheckDirectory && value.Length > 0 && value[0] == '/';
             ReadOnlySpan<char> directory = value.Slice(0, directoryLength);
 
-            return (shouldCheckDirectory && DefaultFileSystem.DirectoryExists(Path.Combine(baseDirectory, directory.ToString())))
-                || (shouldCheckFileOrDirectory && DefaultFileSystem.FileOrDirectoryExists(value.ToString()));
+            if (shouldCheckDirectory)
+            {
+                string candidate = Path.Combine(baseDirectory, directory.ToString());
+                bool exists = DefaultFileSystem.DirectoryExists(candidate);
+                EvaluationInputObserver.Current?.RecordPathProbe(candidate, EvaluationPathProbeKind.Directory, exists);
+                return exists;
+            }
+
+            if (shouldCheckFileOrDirectory)
+            {
+                string candidate = value.ToString();
+                bool exists = DefaultFileSystem.FileOrDirectoryExists(candidate);
+                EvaluationInputObserver.Current?.RecordPathProbe(candidate, EvaluationPathProbeKind.FileOrDirectory, exists);
+                return exists;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -1170,6 +1192,7 @@ namespace Microsoft.Build.Framework
             }
             catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
             {
+                EvaluationInputObserver.Current?.RecordAmbiguousPathProbe(filePath, EvaluationPathProbeKind.File);
                 // Invalid or inaccessible path: treat as if nonexistent file, just as File.Exists does
                 return null;
             }
@@ -1206,6 +1229,7 @@ namespace Microsoft.Build.Framework
             }
             catch
             {
+                EvaluationInputObserver.Current?.RecordAmbiguousPathProbe(fullPath, EvaluationPathProbeKind.Directory);
                 return false;
             }
         }
@@ -1230,6 +1254,7 @@ namespace Microsoft.Build.Framework
             }
             catch
             {
+                EvaluationInputObserver.Current?.RecordAmbiguousPathProbe(fullPath, EvaluationPathProbeKind.File);
                 return false;
             }
         }
@@ -1254,6 +1279,7 @@ namespace Microsoft.Build.Framework
             }
             catch
             {
+                EvaluationInputObserver.Current?.RecordAmbiguousPathProbe(fullPath, EvaluationPathProbeKind.FileOrDirectory);
                 return false;
             }
         }
@@ -1633,8 +1659,28 @@ namespace Microsoft.Build.Framework
         /// directory structure above that directory.
         /// </summary>
         internal static string GetDirectoryNameOfFileAbove(string startingDirectory, string fileName, IFileSystem? fileSystem = null)
+            => GetDirectoryNameOfFileAbove(
+                startingDirectory,
+                fileName,
+                fileSystem,
+                "GetDirectoryNameOfFileAbove",
+                candidates: null);
+
+        private static string GetDirectoryNameOfFileAbove(
+            string startingDirectory,
+            string fileName,
+            IFileSystem? fileSystem,
+            string searchKind,
+            List<string>? candidates)
         {
             fileSystem ??= DefaultFileSystem;
+            IEvaluationInputObserver observer = EvaluationInputObserver.Current;
+            candidates ??= observer?.RetainDetails == true ? [] : null;
+            var candidatesFingerprint = new EvaluationInputFingerprintBuilder();
+            int candidateCount = 0;
+            string? searchRequest = observer is null
+                ? null
+                : string.Concat(fileName, "|", startingDirectory);
 
             // Canonicalize our starting location
             string? lookInDirectory = NewPath.GetFullPath(startingDirectory);
@@ -1643,12 +1689,27 @@ namespace Microsoft.Build.Framework
             {
                 // Construct the path that we will use to test against
                 string possibleFileDirectory = Path.Combine(lookInDirectory, fileName);
+                candidates?.Add(possibleFileDirectory);
+                if (observer is not null)
+                {
+                    candidateCount++;
+                    candidatesFingerprint.Add(possibleFileDirectory);
+                }
 
                 // If we successfully locate the file in the directory that we're
                 // looking in, simply return that location. Otherwise we'll
                 // keep moving up the tree.
                 if (fileSystem.FileExists(possibleFileDirectory))
                 {
+                    observer?.RecordSearch(
+                        searchKind,
+                        searchRequest!,
+                        candidates ?? [],
+                        candidateCount,
+                        candidatesFingerprint.Complete(),
+                        string.Equals(searchKind, "GetPathOfFileAbove", StringComparison.Ordinal)
+                            ? NormalizePath(lookInDirectory, fileName)
+                            : lookInDirectory);
                     // We've found the file, return the directory we found it in
                     return lookInDirectory;
                 }
@@ -1661,6 +1722,13 @@ namespace Microsoft.Build.Framework
             }
             while (lookInDirectory != null);
 
+            observer?.RecordSearch(
+                searchKind,
+                searchRequest!,
+                candidates ?? [],
+                candidateCount,
+                candidatesFingerprint.Complete(),
+                string.Empty);
             // When we didn't find the location, then return an empty string
             return string.Empty;
         }
@@ -1675,16 +1743,44 @@ namespace Microsoft.Build.Framework
         /// <returns>The full path of the file if it is found, otherwise an empty string.</returns>
         internal static string GetPathOfFileAbove(string file, string startingDirectory, IFileSystem? fileSystem = null)
         {
+            ValidateFileNameForGetPathOfFileAbove(file);
+            string directoryName = GetDirectoryNameOfFileAbove(
+                startingDirectory,
+                file,
+                fileSystem,
+                "GetPathOfFileAbove",
+                candidates: null);
+            return String.IsNullOrEmpty(directoryName) ? String.Empty : NormalizePath(directoryName, file);
+        }
+
+        internal static string GetPathOfFileAbove(
+            string file,
+            string startingDirectory,
+            out string[] candidates,
+            IFileSystem? fileSystem = null)
+        {
+            ValidateFileNameForGetPathOfFileAbove(file);
+
+            // Search for a directory that contains that file
+            List<string> observedCandidates = [];
+            string directoryName = GetDirectoryNameOfFileAbove(
+                startingDirectory,
+                file,
+                fileSystem,
+                "GetPathOfFileAbove",
+                observedCandidates);
+            candidates = observedCandidates.ToArray();
+
+            return String.IsNullOrEmpty(directoryName) ? String.Empty : NormalizePath(directoryName, file);
+        }
+
+        private static void ValidateFileNameForGetPathOfFileAbove(string file)
+        {
             // This method does not accept a path, only a file name
             if (file.Any(i => i.Equals(Path.DirectorySeparatorChar) || i.Equals(Path.AltDirectorySeparatorChar)))
             {
                 throw new ArgumentException(SR.FormatInvalidGetPathOfFileAboveParameter(file));
             }
-
-            // Search for a directory that contains that file
-            string directoryName = GetDirectoryNameOfFileAbove(startingDirectory, file, fileSystem);
-
-            return String.IsNullOrEmpty(directoryName) ? String.Empty : NormalizePath(directoryName, file);
         }
 
         internal static void EnsureDirectoryExists(string directoryPath)

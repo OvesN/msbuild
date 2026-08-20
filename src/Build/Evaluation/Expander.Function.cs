@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using Microsoft.Build.BackEnd.Logging;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Evaluation.Expander;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -518,6 +519,14 @@ internal partial class Expander<P, I>
                     catch (Exception ex)
                     {
                         string partiallyEvaluated = GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args);
+                        EvaluationObservationSession.Current?.RecordPropertyFunction(
+                            _receiverType,
+                            _methodMethodName,
+                            objectInstance,
+                            args,
+                            result: null,
+                            succeeded: false);
+                        EvaluationObservationSession.Current?.RecordOperationFailure();
                         if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
                         {
                             return partiallyEvaluated;
@@ -556,6 +565,13 @@ internal partial class Expander<P, I>
                     }
                 }
 
+                EvaluationObservationSession.Current?.RecordPropertyFunction(
+                    _receiverType,
+                    _methodMethodName,
+                    objectInstance,
+                    args,
+                    functionResult);
+
                 // If the result of the function call is a string, then we need to escape the result
                 // so that we maintain the "engine contains escaped data" state.
                 // The exception is that the user is explicitly calling MSBuild::Unescape, MSBuild::Escape, or ConvertFromBase64
@@ -587,6 +603,14 @@ internal partial class Expander<P, I>
             // Exceptions coming from the actual function called are wrapped in a TargetInvocationException
             catch (TargetInvocationException ex)
             {
+                EvaluationObservationSession.Current?.RecordPropertyFunction(
+                    _receiverType,
+                    _methodMethodName,
+                    objectInstance,
+                    args,
+                    result: null,
+                    succeeded: false);
+                EvaluationObservationSession.Current?.RecordOperationFailure();
                 // We ended up with something other than a function expression
                 string partiallyEvaluated = GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args);
                 if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
@@ -601,6 +625,14 @@ internal partial class Expander<P, I>
             // Any other exception was thrown by trying to call it
             catch (Exception ex) when (!ExceptionHandling.NotExpectedFunctionException(ex))
             {
+                EvaluationObservationSession.Current?.RecordPropertyFunction(
+                    _receiverType,
+                    _methodMethodName,
+                    objectInstance,
+                    args,
+                    result: null,
+                    succeeded: false);
+                EvaluationObservationSession.Current?.RecordOperationFailure();
                 // If there's a :: in the expression, they were probably trying for a static function
                 // invocation. Give them some more relevant info in that case
                 if (s_invariantCompareInfo.IndexOf(_expression, "::", CompareOptions.OrdinalIgnoreCase) > -1)

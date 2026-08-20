@@ -46,6 +46,9 @@ internal static class EvaluationObservationBenchmarkHost
         GC.Collect();
 
         long managedMemoryBefore = GC.GetTotalMemory(forceFullCollection: false);
+#if !NETFRAMEWORK
+        long allocatedBytesBefore = GC.GetTotalAllocatedBytes(precise: false);
+#endif
         int gen0Before = GC.CollectionCount(0);
         int gen1Before = GC.CollectionCount(1);
         int gen2Before = GC.CollectionCount(2);
@@ -69,12 +72,18 @@ internal static class EvaluationObservationBenchmarkHost
         _ = File.Exists(Path.Combine(projectDirectory, EvaluationObservationBenchmarkProtocol.MeasurementStopMarker));
 
         long managedMemoryAfter = GC.GetTotalMemory(forceFullCollection: true);
+#if NETFRAMEWORK
+        long allocatedManagedBytes = 0;
+#else
+        long allocatedManagedBytes = GC.GetTotalAllocatedBytes(precise: false) - allocatedBytesBefore;
+#endif
         using Process process = Process.GetCurrentProcess();
         process.Refresh();
 
         EvaluationObservationBenchmarkResult result = new()
         {
             EvaluationTicks = stopwatch.ElapsedTicks,
+            AllocatedManagedBytes = allocatedManagedBytes,
             RetainedManagedBytes = Math.Max(0, managedMemoryAfter - managedMemoryBefore),
             PrivateBytes = process.PrivateMemorySize64,
             PeakWorkingSetBytes = process.PeakWorkingSet64,
@@ -86,6 +95,7 @@ internal static class EvaluationObservationBenchmarkHost
             NativeEnumerations = nativeMetrics.Enumerations,
             NativeMetadataReads = nativeMetrics.MetadataReads,
             NativeFileReads = nativeMetrics.FileReads,
+            NativeSemanticObservations = nativeMetrics.SemanticObservations,
             NativeUniquePaths = nativeMetrics.UniquePathCount,
         };
 
@@ -125,6 +135,16 @@ internal static class EvaluationObservationBenchmarkHost
             project.GetItems("Compile").Count == 0)
         {
             throw new InvalidOperationException("Evaluation benchmark project produced unexpected state.");
+        }
+
+        string importedEnvironment = project.GetPropertyValue("ImportedEnvironment");
+        if (importedEnvironment.Length != 0 &&
+            (importedEnvironment != "benchmark-environment-value" ||
+             project.GetPropertyValue("LiveEnvironment") != importedEnvironment ||
+             project.GetPropertyValue("Settings") != "settings-value" ||
+             string.IsNullOrEmpty(project.GetPropertyValue("Above"))))
+        {
+            throw new InvalidOperationException("Ambient evaluation benchmark project produced unexpected state.");
         }
     }
 

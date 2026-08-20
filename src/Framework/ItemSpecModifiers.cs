@@ -416,10 +416,18 @@ internal static class ItemSpecModifiers
             switch (modifier)
             {
                 case ItemSpecModifierKind.FullPath:
-                    return cache.FullPath ??= ComputeFullPath(currentDirectory, itemSpec);
+                    return Observe(
+                        itemSpec,
+                        modifier,
+                        currentDirectory,
+                        cache.FullPath ??= ComputeFullPath(currentDirectory, itemSpec));
 
                 case ItemSpecModifierKind.RootDir:
-                    return ComputeRootDir(cache.FullPath ??= ComputeFullPath(currentDirectory, itemSpec));
+                    return Observe(
+                        itemSpec,
+                        modifier,
+                        currentDirectory,
+                        ComputeRootDir(cache.FullPath ??= ComputeFullPath(currentDirectory, itemSpec)));
 
                 case ItemSpecModifierKind.Filename:
                     return ComputeFilename(itemSpec);
@@ -428,10 +436,14 @@ internal static class ItemSpecModifiers
                     return ComputeExtension(itemSpec);
 
                 case ItemSpecModifierKind.RelativeDir:
-                    return ComputeRelativeDir(itemSpec);
+                    return Observe(itemSpec, modifier, currentDirectory, ComputeRelativeDir(itemSpec));
 
                 case ItemSpecModifierKind.Directory:
-                    return ComputeDirectory(cache.FullPath ??= ComputeFullPath(currentDirectory, itemSpec));
+                    return Observe(
+                        itemSpec,
+                        modifier,
+                        currentDirectory,
+                        ComputeDirectory(cache.FullPath ??= ComputeFullPath(currentDirectory, itemSpec)));
 
                 case ItemSpecModifierKind.RecursiveDir:
                     return string.Empty;
@@ -441,13 +453,13 @@ internal static class ItemSpecModifiers
 
                 // Time-based modifiers are NOT cached - they hit the file system.
                 case ItemSpecModifierKind.ModifiedTime:
-                    return ComputeModifiedTime(itemSpec);
+                    return Observe(itemSpec, modifier, currentDirectory, ComputeModifiedTime(itemSpec));
 
                 case ItemSpecModifierKind.CreatedTime:
-                    return ComputeCreatedTime(itemSpec);
+                    return Observe(itemSpec, modifier, currentDirectory, ComputeCreatedTime(itemSpec));
 
                 case ItemSpecModifierKind.AccessedTime:
-                    return ComputeAccessedTime(itemSpec);
+                    return Observe(itemSpec, modifier, currentDirectory, ComputeAccessedTime(itemSpec));
 
                 default:
                     break;
@@ -493,6 +505,32 @@ internal static class ItemSpecModifiers
         }
 
         return Assumed.Unreachable<string>($"\"{modifier}\" is not a valid item-spec modifier.");
+    }
+
+    private static string Observe(
+        string itemSpec,
+        ItemSpecModifierKind modifier,
+        string? currentDirectory,
+        string value)
+    {
+        IEvaluationInputObserver? observer = EvaluationInputObserver.Current;
+        if (observer is null)
+        {
+            return value;
+        }
+
+        string observedItemSpec = modifier is
+            ItemSpecModifierKind.ModifiedTime or
+            ItemSpecModifierKind.CreatedTime or
+            ItemSpecModifierKind.AccessedTime
+                ? EscapingUtilities.UnescapeAll(itemSpec)
+                : itemSpec;
+        observer.RecordItemMetadata(
+            observedItemSpec,
+            modifier.ToString(),
+            currentDirectory ?? FileUtilities.CurrentThreadWorkingDirectory ?? string.Empty,
+            value);
+        return value;
     }
 
     private static string ComputeFullPath(string? currentDirectory, string itemSpec)

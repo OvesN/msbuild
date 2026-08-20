@@ -6,15 +6,20 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
 using Microsoft.Build.BackEnd.SdkResolution;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Definition;
+using Microsoft.Build.Engine.UnitTests.InstanceFromRemote;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
+using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 using Microsoft.Build.Unittest;
 using Shouldly;
@@ -49,6 +54,46 @@ namespace Microsoft.Build.UnitTests.Definition
 
         private readonly SdkUtilities.ConfigurableMockSdkResolver _resolver;
         private readonly TestEnvironment _env;
+
+        private sealed class TransientAppContextSwitch : TransientTestState
+        {
+            private readonly bool _originalValue;
+            private readonly string _switchName;
+            private readonly bool _switchWasSet;
+
+            internal TransientAppContextSwitch(string switchName, bool value)
+            {
+                _switchName = switchName;
+                _switchWasSet = AppContext.TryGetSwitch(switchName, out _originalValue);
+                AppContext.SetSwitch(switchName, value);
+            }
+
+            public override void Revert()
+            {
+                if (_switchWasSet)
+                {
+                    AppContext.SetSwitch(_switchName, _originalValue);
+                    return;
+                }
+
+                foreach (FieldInfo field in typeof(AppContext).GetFields(BindingFlags.NonPublic | BindingFlags.Static))
+                {
+                    if (field.GetValue(null) is System.Collections.IDictionary switches)
+                    {
+                        lock (switches)
+                        {
+                            if (switches.Contains(_switchName))
+                            {
+                                switches.Remove(_switchName);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                throw new InvalidOperationException($"Could not restore unset AppContext switch '{_switchName}'.");
+            }
+        }
 
         private static void SetResolverForContext(EvaluationContext context, SdkResolver resolver)
         {
@@ -218,19 +263,106 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void EvaluationObservationFeatureSwitchRegistryIsExplicitlyClassified()
+        {
+            HashSet<string> actual = typeof(FeatureSwitches)
+                .GetProperties(BindingFlags.Static | BindingFlags.NonPublic)
+                .Where(property => property.PropertyType == typeof(bool))
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> classified =
+            [
+                nameof(FeatureSwitches.EnableCustomPluginProbing),
+                nameof(FeatureSwitches.EnableAllPropertyFunctions),
+                nameof(FeatureSwitches.RestrictPropertyFunctionReceivers),
+                nameof(FeatureSwitches.EnableSdkResolverDynamicLoading),
+                nameof(FeatureSwitches.EnableConfigurationFileToolsets),
+                // Execution-only switches are intentionally outside evaluation observation.
+                nameof(FeatureSwitches.EnableReflectiveTaskExecution),
+                nameof(FeatureSwitches.EnableReflectiveTaskParameterTypes),
+                nameof(FeatureSwitches.EnableReflectiveLoggerLoading),
+            ];
+
+            actual.SetEquals(classified).ShouldBeTrue(
+                $"Feature switches must be explicitly added to the evaluation request or classified execution-only. Actual: {string.Join(", ", actual.OrderBy(static name => name))}");
+        }
+
+        [Fact]
+        public void EvaluationObservationEscapeHatchRegistryIsExplicitlyClassified()
+        {
+            HashSet<string> actual = typeof(EscapeHatches)
+                .GetFields(BindingFlags.Instance | BindingFlags.Public)
+                .Select(field => field.Name)
+                .Concat(
+                    typeof(EscapeHatches)
+                        .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                        .Select(property => property.Name))
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> classified =
+            [
+                // Evaluation-result-affecting values captured in EvaluationRequestObservation.
+                nameof(EscapeHatches.AlwaysDoImmutableFilesUpToDateCheck),
+                nameof(EscapeHatches.AlwaysEvaluateDangerousGlobs),
+                nameof(EscapeHatches.AlwaysUseContentTimestamp),
+                nameof(EscapeHatches.DisableLongPaths),
+                nameof(EscapeHatches.DisableParseConfig),
+                nameof(EscapeHatches.DisableSdkResolutionCache),
+                nameof(EscapeHatches.DoNotExpandQualifiedMetadataInUpdateOperation),
+                nameof(EscapeHatches.DoNotTruncateConditions),
+                nameof(EscapeHatches.EvaluateElementsWithFalseConditionInProjectEvaluation),
+                nameof(EscapeHatches.IgnoreEmptyImports),
+                nameof(EscapeHatches.IgnoreTreatAsLocalProperty),
+                nameof(EscapeHatches.SdkReferencePropertyExpansion),
+                nameof(EscapeHatches.UseCaseSensitiveItemNames),
+                nameof(EscapeHatches.UseSymlinkTimeInsteadOfTargetTime),
+
+                // Diagnostics, execution, task, IPC, or build-result behavior outside project evaluation.
+                nameof(EscapeHatches.AvoidUnicodeWhenWritingToolTaskBatch),
+                nameof(EscapeHatches.CacheAssemblyInformation),
+                nameof(EscapeHatches.CopyWithoutDelete),
+                nameof(EscapeHatches.DebugEvaluation),
+                nameof(EscapeHatches.DoNotLimitBuildCheckResultsNumber),
+                nameof(EscapeHatches.DoNotSendDeferredMessagesToBuildManager),
+                nameof(EscapeHatches.DoNotVersionBuildResult),
+                nameof(EscapeHatches.EnsureStdOutForChildNodesIsPrimaryStdout),
+                nameof(EscapeHatches.LogProjectImports),
+                nameof(EscapeHatches.LogPropertiesAndItemsAfterEvaluation),
+                nameof(EscapeHatches.LogTaskInputs),
+                nameof(EscapeHatches.ProjectInstanceTranslation),
+                nameof(EscapeHatches.ReuseTaskHostNodes),
+                nameof(EscapeHatches.TargetPathForRelatedFiles),
+                nameof(EscapeHatches.TruncateTaskInputs),
+                nameof(EscapeHatches.UseAutoRunWhenLaunchingProcessUnderCmd),
+                nameof(EscapeHatches.UseCustomLoadContextForDependenciesInToolsDirectory),
+                nameof(EscapeHatches.UseMinimalResxParsingInCoreScenarios),
+                nameof(EscapeHatches.UseSingleLoadContext),
+                nameof(EscapeHatches.WarnOnUninitializedProperty),
+            ];
+
+            actual.SetEquals(classified).ShouldBeTrue(
+                $"Escape hatches must be explicitly captured or classified outside evaluation. Actual: {string.Join(", ", actual.OrderBy(static name => name))}");
+        }
+
+        [Fact]
         public void EvaluationObservationDoesNotChangeEvaluatedState()
         {
+            _env.SetEnvironmentVariable("OBSERVATION_EQUIVALENCE_ENV", "equivalent");
             _env.CreateFile("state.marker", string.Empty);
             _env.CreateFile("State.cs", string.Empty);
+            _env.CreateFile("state.txt", "state-content");
             string projectFile = _env.CreateFile(
                 "state.proj",
                 """
                 <Project>
                   <PropertyGroup Condition="Exists('state.marker')">
                     <Observed>true</Observed>
+                    <Environment>$(OBSERVATION_EQUIVALENCE_ENV)</Environment>
+                    <Content>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)state.txt'))</Content>
                   </PropertyGroup>
                   <ItemGroup>
                     <Compile Include="*.cs" />
+                    <Input Include="state.txt" />
+                    <MetadataValue Include="@(Input->'%(ModifiedTime)')" />
                   </ItemGroup>
                 </Project>
                 """.Cleanup()).Path;
@@ -257,13 +389,63 @@ namespace Microsoft.Build.UnitTests.Definition
             }
 
             report.ShouldNotBeNull();
-            observed.GetPropertyValue("Observed").ShouldBe(baseline.GetPropertyValue("Observed"));
-            observed.GetItems("Compile").Select(item => item.EvaluatedInclude)
-                .ShouldBe(baseline.GetItems("Compile").Select(item => item.EvaluatedInclude));
+            observed.Properties
+                .Select(property => string.Concat(property.Name, "=", property.EvaluatedValue))
+                .OrderBy(static property => property, StringComparer.OrdinalIgnoreCase)
+                .ShouldBe(
+                    baseline.Properties
+                        .Select(property => string.Concat(property.Name, "=", property.EvaluatedValue))
+                        .OrderBy(static property => property, StringComparer.OrdinalIgnoreCase));
+            observed.Items
+                .Select(item => string.Concat(
+                    item.ItemType,
+                    "|",
+                    item.EvaluatedInclude,
+                    "|",
+                    string.Join(
+                        ";",
+                        item.Metadata
+                            .Select(metadata => string.Concat(metadata.Name, "=", metadata.EvaluatedValue))
+                            .OrderBy(static metadata => metadata, StringComparer.OrdinalIgnoreCase))))
+                .OrderBy(static item => item, StringComparer.OrdinalIgnoreCase)
+                .ShouldBe(
+                    baseline.Items
+                        .Select(item => string.Concat(
+                            item.ItemType,
+                            "|",
+                            item.EvaluatedInclude,
+                            "|",
+                            string.Join(
+                                ";",
+                                item.Metadata
+                                    .Select(metadata => string.Concat(metadata.Name, "=", metadata.EvaluatedValue))
+                                    .OrderBy(static metadata => metadata, StringComparer.OrdinalIgnoreCase))))
+                        .OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+        }
+
+        [WindowsFullFrameworkOnlyFact]
+        public void EvaluationObservationDoesNotRejectInvalidFileMetadataPath()
+        {
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(enabled: true);
+            string projectFile = _env.CreateFile(
+                "invalid-metadata-path.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <A Include="Name|Value" />
+                    <B Include="@(A->'%(ModifiedTime)')" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Should.NotThrow(() => Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            }));
         }
 
         [Fact]
-        public void EvaluationObservationRecordsProbesAndEnumerations()
+        public void EvaluationObservationRecordsProbesAndGlobs()
         {
             EvaluationObservationReport report = null;
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
@@ -271,10 +453,20 @@ namespace Microsoft.Build.UnitTests.Definition
                 createdReport => report = createdReport);
 
             _env.CreateFile("Observed.cs", string.Empty);
+            string importedProject = _env.CreateFile(
+                "observed.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ImportedValue>true</ImportedValue>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
             string projectFile = _env.CreateFile(
                 "observed.proj",
                 """
                 <Project>
+                  <Import Project="observed.props" />
                   <PropertyGroup Condition="Exists('missing.props')">
                     <Imported>true</Imported>
                   </PropertyGroup>
@@ -291,16 +483,21 @@ namespace Microsoft.Build.UnitTests.Definition
 
             report.ShouldNotBeNull();
             report.ProjectPath.ShouldBe(projectFile);
-            report.ReadyForCacheHits.ShouldBeFalse();
+            report.HasBlockingObservations.ShouldBeTrue();
             report.EvaluationSucceeded.ShouldBeTrue();
-            (report.Reasons & EvaluationObservationReason.PrototypeCategoriesIncomplete)
-                .ShouldBe(EvaluationObservationReason.PrototypeCategoriesIncomplete);
-            (report.Reasons & EvaluationObservationReason.ProjectXmlContentNotObserved)
-                .ShouldBe(EvaluationObservationReason.ProjectXmlContentNotObserved);
-            (report.Reasons & EvaluationObservationReason.UnversionedProjectRootElementCache)
-                .ShouldBe(EvaluationObservationReason.UnversionedProjectRootElementCache);
-            (report.Reasons & EvaluationObservationReason.AmbiguousNegativeProbe)
-                .ShouldBe(EvaluationObservationReason.AmbiguousNegativeProbe);
+            (report.Reasons & EvaluationObservationReason.ParsedProjectSourceOnly)
+                .ShouldBe(EvaluationObservationReason.None);
+            report.Request.ProjectPath.ShouldBe(projectFile);
+            report.Request.EngineVersion.ShouldNotBe(report.Request.EngineAssemblyVersion);
+            report.ProjectSources.ShouldContain(observation =>
+                observation.Role == EvaluationProjectSourceRole.Root &&
+                FileUtilities.PathsEqual(observation.Path, projectFile) &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.ContentHash == EvaluationObservationSession.ComputeBytesHash(File.ReadAllBytes(projectFile)));
+            report.ProjectSources.ShouldContain(observation =>
+                observation.Role == EvaluationProjectSourceRole.Import &&
+                FileUtilities.PathsEqual(observation.Path, importedProject) &&
+                observation.ContentHash == EvaluationObservationSession.ComputeBytesHash(File.ReadAllBytes(importedProject)));
 
             string missingPath = Path.Combine(_env.DefaultTestDirectory.Path, "missing.props");
             report.PathProbes.ShouldContain(observation =>
@@ -309,13 +506,605 @@ namespace Microsoft.Build.UnitTests.Definition
                 !observation.Exists);
 
             string observedFile = Path.Combine(_env.DefaultTestDirectory.Path, "Observed.cs");
-            report.DirectoryEnumerations.ShouldContain(observation =>
-                FileUtilities.PathsEqual(observation.Path, _env.DefaultTestDirectory.Path) &&
-                observation.Completion == EvaluationEnumerationCompletion.Complete &&
-                observation.Entries.Any(entry => FileUtilities.PathsEqual(entry, observedFile)));
+            report.Globs.ShouldContain(observation =>
+                observation.Include == "*.cs" &&
+                observation.Results.Any(entry => entry.EndsWith("Observed.cs", StringComparison.OrdinalIgnoreCase)));
+            report.DirectoryEnumerations.ShouldBeEmpty(
+                string.Join(
+                    Environment.NewLine,
+                    report.DirectoryEnumerations.Select(observation =>
+                        string.Concat(observation.Kind, "|", observation.Path, "|", observation.SearchPattern))));
 
             project.GetItems("Compile").ShouldContain(item =>
                 string.Equals(Path.GetFileName(item.EvaluatedInclude), "Observed.cs", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public void ProjectInstanceGlobDoesNotRetainSupportingEnumerations()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            TransientTestFolder sourceFolder = _env.CreateFolder(
+                Path.Combine(_env.DefaultTestDirectory.Path, "project-instance-src"));
+            _env.CreateFile(sourceFolder, "ProjectInstance.cs", string.Empty);
+            string projectFile = _env.CreateFile(
+                "project-instance-glob.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <Compile Include="project-instance-src/**/*.cs" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            ProjectInstance.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            report.Globs.ShouldHaveSingleItem();
+            report.DirectoryEnumerations.ShouldBeEmpty(
+                string.Join(
+                    Environment.NewLine,
+                    report.DirectoryEnumerations.Select(observation =>
+                        string.Concat(observation.Kind, "|", observation.Path, "|", observation.SearchPattern))));
+        }
+
+        [Fact]
+        public void EvaluationObservationSummaryModeRetainsFingerprintsWithoutMemberArrays()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport,
+                retainDetails: false);
+
+            TransientTestFolder sourceFolder = _env.CreateFolder(
+                Path.Combine(_env.DefaultTestDirectory.Path, "summary-src"));
+            _env.CreateFile(sourceFolder, "Summary.cs", string.Empty);
+            _env.CreateFile("summary.marker", string.Empty);
+            string projectFile = _env.CreateFile(
+                "summary.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Above>$([MSBuild]::GetPathOfFileAbove('summary.marker', '$(MSBuildThisFileDirectory)'))</Above>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Compile Include="summary-src/**/*.cs" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            EvaluationGlobObservation glob = report.Globs.ShouldHaveSingleItem();
+            glob.Results.ShouldBeEmpty();
+            glob.ResultCount.ShouldBe(1);
+            glob.ResultsFingerprint.ShouldNotBeNullOrEmpty();
+            EvaluationSearchObservation search = report.Searches.Single(
+                observation => observation.Kind == "GetPathOfFileAbove");
+            search.Candidates.ShouldBeEmpty();
+            search.CandidateCount.ShouldBeGreaterThan(0);
+            search.CandidatesFingerprint.ShouldNotBeNullOrEmpty();
+        }
+
+        [Fact]
+        public void EvaluationObservationUsesEffectiveEnvironmentNameCaseSemantics()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordEnvironment("Path", EvaluationEnvironmentSource.Imported, present: true, value: "value");
+            session.RecordEnvironment("PATH", EvaluationEnvironmentSource.Imported, present: true, value: "value");
+            session.RecordEnvironment("LiveName", EvaluationEnvironmentSource.LiveProcess, present: true, value: "value");
+            session.RecordEnvironment("LIVENAME", EvaluationEnvironmentSource.LiveProcess, present: true, value: "value");
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.Environment.Count(observation =>
+                observation.Source == EvaluationEnvironmentSource.Imported).ShouldBe(1);
+            report.Environment.Count(observation =>
+                observation.Source == EvaluationEnvironmentSource.LiveProcess).ShouldBe(
+                    NativeMethodsShared.IsWindows ? 1 : 2);
+        }
+
+        [Fact]
+        public void EvaluationObservationEnumerationOrderingIncludesSearchOption()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordEnumeration(
+                _env.DefaultTestDirectory.Path,
+                "*",
+                SearchOption.AllDirectories,
+                EvaluationEnumerationKind.Files,
+                [],
+                EvaluationEnumerationCompletion.Complete);
+            session.RecordEnumeration(
+                _env.DefaultTestDirectory.Path,
+                "*",
+                SearchOption.TopDirectoryOnly,
+                EvaluationEnumerationKind.Files,
+                [],
+                EvaluationEnumerationCompletion.Complete);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.DirectoryEnumerations.Select(observation => observation.SearchOption).ShouldBe(
+            [
+                SearchOption.TopDirectoryOnly,
+                SearchOption.AllDirectories,
+            ]);
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsEnvironmentAndPropertyFunctions()
+        {
+            _env.SetEnvironmentVariable("OBSERVED_ENVIRONMENT_INPUT", "environment-value");
+            _env.CreateFile("settings.txt", "settings-value");
+
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile(
+                "ambient.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Imported>$(OBSERVED_ENVIRONMENT_INPUT)</Imported>
+                    <Missing>$(OBSERVED_MISSING_ENVIRONMENT_INPUT)</Missing>
+                    <Live>$([System.Environment]::GetEnvironmentVariable('OBSERVED_ENVIRONMENT_INPUT'))</Live>
+                    <Settings>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)settings.txt'))</Settings>
+                    <Above>$([MSBuild]::GetPathOfFileAbove('settings.txt', '$(MSBuildThisFileDirectory)'))</Above>
+                    <Formatted>$([System.String]::Format('{0}', 'formatted'))</Formatted>
+                    <Volatile>$([System.DateTime]::utcnow)</Volatile>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Input Include="settings.txt" />
+                    <MetadataValue Include="@(Input->'%(ModifiedTime)')" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("Imported").ShouldBe("environment-value");
+            project.GetPropertyValue("Live").ShouldBe("environment-value");
+            project.GetPropertyValue("Settings").ShouldBe("settings-value");
+            report.ShouldNotBeNull();
+            report.Environment.ShouldContain(observation =>
+                observation.Name == "OBSERVED_ENVIRONMENT_INPUT" &&
+                observation.Source == EvaluationEnvironmentSource.Imported &&
+                observation.Value == "environment-value");
+            report.Environment.ShouldContain(observation =>
+                observation.Name == "OBSERVED_ENVIRONMENT_INPUT" &&
+                observation.Source == EvaluationEnvironmentSource.LiveProcess &&
+                observation.Value == "environment-value");
+            report.Environment.ShouldContain(observation =>
+                observation.Name == "OBSERVED_MISSING_ENVIRONMENT_INPUT" &&
+                observation.Source == EvaluationEnvironmentSource.MissingImported &&
+                !observation.Present);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(Environment).FullName &&
+                observation.Member == nameof(Environment.GetEnvironmentVariable) &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.Environment) != 0);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(DateTime).FullName &&
+                string.Equals(observation.Member, nameof(DateTime.UtcNow), StringComparison.OrdinalIgnoreCase) &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.Volatile) != 0);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(string).FullName &&
+                observation.Member == nameof(string.Format) &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.Ambient) != 0);
+            report.FileReads.ShouldContain(observation =>
+                observation.Path.EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase) &&
+                observation.IsVerifiable);
+            report.Searches.ShouldContain(observation =>
+                observation.Kind == "GetPathOfFileAbove" &&
+                observation.Candidates.Any(candidate =>
+                    candidate.EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase)) &&
+                observation.Selected.EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase));
+            report.MetadataReads.ShouldContain(observation =>
+                observation.Kind == EvaluationMetadataKind.ItemModifiedTime &&
+                observation.Path == "settings.txt");
+            (report.Reasons & EvaluationObservationReason.UnsupportedVolatileInput)
+                .ShouldBe(EvaluationObservationReason.UnsupportedVolatileInput);
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+            report.Categories.ShouldContain(observation =>
+                observation.Category == EvaluationObservationCategory.PropertyFunction &&
+                observation.State == EvaluationObservationCategoryState.Observed);
+            report.SchemaVersion.ShouldBe(3);
+            report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
+            report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
+        }
+
+        [Fact]
+        public void EvaluationObservationInvalidatesDiskSourceHashAfterInMemoryMutation()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile("mutated-source.proj", "<Project />").Path;
+            ProjectRootElement root = ProjectRootElement.Open(projectFile);
+            root.AddProperty("Mutated", "true");
+
+            Project.FromProjectRootElement(root, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => observation.Role == EvaluationProjectSourceRole.Root);
+            source.ContentHash.ShouldBe(EvaluationObservationSession.ComputeTextHash(root.RawXml));
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, projectFile) &&
+                observation.HashKind == EvaluationContentHashKind.ParsedXml &&
+                !observation.IsVerifiable);
+            (report.Reasons & EvaluationObservationReason.UnversionedProjectRootElementCache)
+                .ShouldBe(EvaluationObservationReason.UnversionedProjectRootElementCache);
+        }
+
+        [Fact]
+        public void EvaluationObservationKeepsCommittedSourceHashAfterFailedReload()
+        {
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(enabled: true);
+
+            string projectFile = _env.CreateFile("failed-reload-source.proj", "<Project />").Path;
+            ProjectRootElement root = ProjectRootElement.Open(projectFile);
+            string originalHash = root.EvaluationObservationSourceHash;
+            int originalVersion = root.Version;
+
+            File.WriteAllText(projectFile, "<Project><Target /></Project>");
+
+            Should.Throw<InvalidProjectFileException>(
+                () => root.Reload(throwIfUnsavedChanges: false));
+
+            root.Version.ShouldBe(originalVersion);
+            root.EvaluationObservationSourceHash.ShouldBe(originalHash);
+        }
+
+        [Fact]
+        public void EvaluationObservationUsesLinkedProjectVersionAsAuthoritativeIdentity()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string projectFile = Path.Combine(_env.DefaultTestDirectory.Path, "linked.proj");
+            var root = new ProjectRootElement(new FakeProjectRootElementLink(projectFile));
+
+            session.RecordProjectSource(root, EvaluationProjectSourceRole.Root);
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            EvaluationProjectSourceObservation source = report.ProjectSources.ShouldHaveSingleItem();
+            source.Version.ShouldBe(7);
+            source.ContentHash.ShouldBeNull();
+            source.Provider.ShouldContain(nameof(FakeProjectRootElementLink));
+            (report.Reasons & EvaluationObservationReason.ParsedProjectSourceOnly)
+                .ShouldBe(EvaluationObservationReason.None);
+            (report.Reasons & EvaluationObservationReason.UnversionedProjectRootElementCache)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationMarksXmlReaderSourceWithoutHostIdentityIncomplete()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            using var reader = XmlReader.Create(new StringReader("<Project />"));
+            ProjectRootElement root = ProjectRootElement.Create(
+                reader,
+                _env.CreateProjectCollection().Collection);
+
+            session.RecordProjectSource(root, EvaluationProjectSourceRole.Root);
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.ProjectSources.ShouldHaveSingleItem().Provider.ShouldBe("XmlReader");
+            (report.Reasons & EvaluationObservationReason.UnversionedSourceProvider)
+                .ShouldBe(EvaluationObservationReason.UnversionedSourceProvider);
+        }
+
+        [Fact]
+        public void EvaluationObservationMarksUnrestrictedFileSystemSideEffectsUnsupported()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            TransientTestFolder projectDirectory = _env.CreateFolder(
+                Path.Combine(_env.DefaultTestDirectory.Path, "side-effect-project"));
+            string projectFile = _env.CreateFile(
+                projectDirectory,
+                "side-effect.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Created>$([System.IO.Directory]::GetParent('$(MSBuildThisFileDirectory)').CreateSubdirectory('side-effect-created'))</Created>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            Directory.Exists(project.GetPropertyValue("Created")).ShouldBeTrue();
+            report.ShouldNotBeNull();
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.Member == "CreateSubdirectory" &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.SideEffect) != 0 &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.OpaqueUnsupported) != 0);
+            (report.Reasons & EvaluationObservationReason.EvaluationSideEffect)
+                .ShouldBe(EvaluationObservationReason.EvaluationSideEffect);
+            report.Categories.ShouldContain(observation =>
+                observation.Category == EvaluationObservationCategory.VolatileOrSideEffect &&
+                observation.State == EvaluationObservationCategoryState.Unsupported);
+        }
+
+        [Fact]
+        public void EvaluationObservationMarksEnableAllPropertyFunctionsUnsupported()
+        {
+            _env.WithTransientTestState(
+                new TransientAppContextSwitch("Microsoft.Build.EnableAllPropertyFunctions", value: true));
+
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile("enable-all.proj", "<Project />").Path;
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            (report.Reasons & EvaluationObservationReason.AllPropertyFunctionsEnabled)
+                .ShouldBe(EvaluationObservationReason.AllPropertyFunctionsEnabled);
+            report.Categories.ShouldContain(observation =>
+                observation.Category == EvaluationObservationCategory.PropertyFunction &&
+                observation.State == EvaluationObservationCategoryState.Unsupported);
+        }
+
+#if NET
+        [Fact]
+        public void EvaluationObservationFailsClosedForUnclassifiedKnownTypeMember()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile(
+                "unclassified-property-function.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Relative>$([System.IO.Path]::GetRelativePath('a', 'b'))</Relative>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(Path).FullName &&
+                observation.Member == nameof(Path.GetRelativePath) &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.OpaqueUnsupported) != 0);
+            (report.Reasons & EvaluationObservationReason.UnclassifiedPropertyFunction)
+                .ShouldBe(EvaluationObservationReason.UnclassifiedPropertyFunction);
+        }
+#endif
+
+        [Fact]
+        public void EvaluationObservationClassifiesFileReadAndEnumerationFamilies()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string root = _env.DefaultTestDirectory.Path;
+            string file = Path.Combine(root, "input.txt");
+
+            session.RecordPropertyFunction(
+                typeof(File),
+                "ReadAllLines",
+                instance: null,
+                arguments: [file],
+                result: new[] { "line" });
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                "GetFileSystemEntries",
+                instance: null,
+                arguments: [root],
+                result: new[] { file });
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.Member == "ReadAllLines" &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.FileContent) != 0);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.Member == "GetFileSystemEntries" &&
+                (observation.Effects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0);
+            report.FileReads.ShouldContain(observation =>
+                observation.Path == file &&
+                observation.HashKind == EvaluationContentHashKind.DecodedTextSequence);
+            report.DirectoryEnumerations.ShouldContain(observation =>
+                observation.Path == root &&
+                observation.Kind == EvaluationEnumerationKind.FilesAndDirectories);
+        }
+
+        [Fact]
+        public void EvaluationObservationDoesNotFabricateTypedRecordsForFailedFunctions()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string file = Path.Combine(_env.DefaultTestDirectory.Path, "missing.txt");
+
+            session.RecordPropertyFunction(
+                typeof(File),
+                nameof(File.ReadAllText),
+                instance: null,
+                arguments: [file],
+                result: null,
+                succeeded: false);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: false);
+
+            EvaluationPropertyFunctionObservation function = report.PropertyFunctions.ShouldHaveSingleItem();
+            function.Succeeded.ShouldBeFalse();
+            function.Result.ShouldBe("<failed>");
+            report.FileReads.ShouldBeEmpty();
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsParserConfigurationInputs()
+        {
+            string parserConfig = _env.CreateFile(
+                "Directory.Parse.config",
+                """
+                <ParseConfig />
+                """).Path;
+            _env.SetEnvironmentVariable(ParserIgnoreConfiguration.EnvironmentVariableName, parserConfig);
+
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile("parser.proj", "<Project />").Path;
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            report.Environment.ShouldContain(observation =>
+                observation.Name == ParserIgnoreConfiguration.EnvironmentVariableName &&
+                observation.Value == parserConfig);
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, parserConfig) &&
+                !observation.IsVerifiable &&
+                observation.HashKind == EvaluationContentHashKind.ParsedXml);
+            report.PathProbes.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, parserConfig) &&
+                observation.Kind == EvaluationPathKind.File &&
+                observation.Exists);
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsDisabledParserConfigurationRegime()
+        {
+            TransientTestState environmentVariable =
+                _env.SetEnvironmentVariable("MSBUILD_DISABLE_PARSE_CONFIG", "1");
+            Traits.UpdateFromEnvironment();
+            try
+            {
+                EvaluationObservationReport report = null;
+                using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                    enabled: true,
+                    createdReport => report = createdReport);
+
+                string projectFile = _env.CreateFile("parser-disabled.proj", "<Project />").Path;
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                });
+
+                report.ShouldNotBeNull();
+                report.Request.DisableParseConfig.ShouldBeTrue();
+                (report.Reasons & EvaluationObservationReason.ParserConfigurationProvenanceUnavailable)
+                    .ShouldBe(EvaluationObservationReason.None);
+            }
+            finally
+            {
+                environmentVariable.Revert();
+                Traits.UpdateFromEnvironment();
+            }
+        }
+
+        [WindowsOnlyFact]
+        public void EvaluationObservationRecordsRegistryFunctions()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile(
+                "registry.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <RegistryValue>$([MSBuild]::GetRegistryValue('HKEY_CURRENT_USER\Software\MSBuildObservationMissing', 'Value', 'fallback'))</RegistryValue>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("RegistryValue").ShouldBeEmpty();
+            report.ShouldNotBeNull();
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.Registry &&
+                observation.Operation == "GetRegistryValue" &&
+                string.IsNullOrEmpty(observation.Result));
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsSdkResolverAndUsingTask()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile(
+                "sdk-and-task.proj",
+                """
+                <Project Sdk="foo">
+                  <UsingTask TaskName="ObservedTask" AssemblyFile="observed-task.dll" />
+                </Project>
+                """.Cleanup()).Path;
+
+            EvaluationContext context = EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated);
+            SetResolverForContext(context, _resolver);
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+                EvaluationContext = context,
+                LoadSettings = ProjectLoadSettings.IgnoreMissingImports,
+            });
+
+            report.ShouldNotBeNull();
+            report.SdkResolutions.ShouldContain(observation =>
+                observation.SdkName == "foo" &&
+                observation.ResolverType == _resolver.GetType().FullName &&
+                observation.Success);
+            report.TaskRegistrations.ShouldContain(observation =>
+                observation.TaskName == "ObservedTask" &&
+                observation.AssemblyFile.EndsWith("observed-task.dll", StringComparison.OrdinalIgnoreCase));
+            (report.Reasons & EvaluationObservationReason.CustomSdkResolver)
+                .ShouldBe(EvaluationObservationReason.CustomSdkResolver);
+            (report.Reasons & EvaluationObservationReason.SdkResolverDependencyManifestUnavailable)
+                .ShouldBe(EvaluationObservationReason.SdkResolverDependencyManifestUnavailable);
         }
 
         [Fact]
@@ -348,6 +1137,39 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void EvaluationObservationRecordsCustomFileSystemProvider()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile(
+                "custom-filesystem.proj",
+                """
+                <Project>
+                  <PropertyGroup Condition="Exists('custom.marker')" />
+                </Project>
+                """.Cleanup()).Path;
+            var fileSystem = new Helpers.LoggingFileSystem();
+
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+                EvaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared, fileSystem),
+            });
+
+            report.ShouldNotBeNull();
+            report.Request.FileSystemProvider
+                .IndexOf(nameof(Helpers.LoggingFileSystem), StringComparison.Ordinal)
+                .ShouldBeGreaterThanOrEqualTo(0);
+            report.PathProbes.ShouldContain(observation =>
+                observation.Provider.IndexOf(nameof(Helpers.LoggingFileSystem), StringComparison.Ordinal) >= 0);
+            (report.Reasons & EvaluationObservationReason.UnversionedCustomProvider)
+                .ShouldBe(EvaluationObservationReason.UnversionedCustomProvider);
+        }
+
+        [Fact]
         public void EvaluationObservationMarksSharedSdkResolverCacheAsUnversioned()
         {
             EvaluationObservationReport report = null;
@@ -366,6 +1188,39 @@ namespace Microsoft.Build.UnitTests.Definition
             report.ShouldNotBeNull();
             (report.Reasons & EvaluationObservationReason.UnversionedSdkResolverCache)
                 .ShouldBe(EvaluationObservationReason.UnversionedSdkResolverCache);
+        }
+
+        [Fact]
+        public void EvaluationObservationReplaysCustomResolverIdentityOnSdkCacheHit()
+        {
+            var reports = new List<EvaluationObservationReport>();
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                reports.Add);
+
+            EvaluationContext context = EvaluationContext.Create(EvaluationContext.SharingPolicy.SharedSDKCache);
+            SetResolverForContext(context, _resolver);
+            string firstProject = _env.CreateFile("sdk-cache-first.proj", "<Project Sdk=\"foo\" />").Path;
+            string secondProject = _env.CreateFile("sdk-cache-second.proj", "<Project Sdk=\"foo\" />").Path;
+
+            foreach (string projectFile in new[] { firstProject, secondProject })
+            {
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                    EvaluationContext = context,
+                    LoadSettings = ProjectLoadSettings.IgnoreMissingImports,
+                });
+            }
+
+            reports.Count.ShouldBe(2);
+            EvaluationObservationReport cacheHitReport = reports.Last(report =>
+                report.SdkResolutions.Any(observation => observation.FromCache));
+            cacheHitReport.SdkResolutions.ShouldContain(observation =>
+                observation.FromCache &&
+                observation.ResolverType == _resolver.GetType().FullName);
+            (cacheHitReport.Reasons & EvaluationObservationReason.CustomSdkResolver)
+                .ShouldBe(EvaluationObservationReason.CustomSdkResolver);
         }
 
         [Fact]
@@ -530,8 +1385,6 @@ namespace Microsoft.Build.UnitTests.Definition
 
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
-            (report.Reasons & EvaluationObservationReason.AmbiguousNegativeProbe)
-                .ShouldBe(EvaluationObservationReason.AmbiguousNegativeProbe);
             (report.Reasons & EvaluationObservationReason.ConflictingObservation)
                 .ShouldBe(EvaluationObservationReason.ConflictingObservation);
         }
@@ -545,6 +1398,7 @@ namespace Microsoft.Build.UnitTests.Definition
             string readerPath = Path.Combine(_env.DefaultTestDirectory.Path, "reader.txt");
 
             recordingFileSystem.ReadFileAllText(textPath).ShouldBe("content");
+            recordingFileSystem.ReadFileAllBytes(textPath).ShouldBe(Encoding.UTF8.GetBytes("content"));
             recordingFileSystem.ReadFile(readerPath).ReadToEnd().ShouldBe("reader");
             recordingFileSystem.GetAttributes(textPath).ShouldBe(FileAttributes.ReadOnly);
             recordingFileSystem.GetLastWriteTimeUtc(textPath).ShouldBe(new DateTime(1234, DateTimeKind.Utc));
@@ -552,9 +1406,15 @@ namespace Microsoft.Build.UnitTests.Definition
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
             EvaluationFileReadObservation textRead = report.FileReads.Single(
-                observation => FileUtilities.PathsEqual(observation.Path, textPath));
+                observation =>
+                    FileUtilities.PathsEqual(observation.Path, textPath) &&
+                    observation.HashKind == EvaluationContentHashKind.DecodedText);
             textRead.IsVerifiable.ShouldBeTrue();
             textRead.ContentHash.ShouldNotBeNull();
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, textPath) &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.IsVerifiable);
 
             EvaluationFileReadObservation readerRead = report.FileReads.Single(
                 observation => FileUtilities.PathsEqual(observation.Path, readerPath));
@@ -564,6 +1424,65 @@ namespace Microsoft.Build.UnitTests.Definition
                 .ShouldBe(2);
             (report.Reasons & EvaluationObservationReason.UnverifiableFileRead)
                 .ShouldBe(EvaluationObservationReason.UnverifiableFileRead);
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationKeepsDistinctMetadataOperations()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string path = Path.Combine(_env.DefaultTestDirectory.Path, "metadata.txt");
+
+            session.RecordMetadata(path, EvaluationMetadataKind.PropertyFunction, "first", null, "GetCreationTime");
+            session.RecordMetadata(path, EvaluationMetadataKind.PropertyFunction, "second", null, "GetLastWriteTime");
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.MetadataReads.Length.ShouldBe(2);
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationDoesNotConflictVolatileOrDistinctInstances()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string firstPath = Path.Combine(_env.DefaultTestDirectory.Path, "first.txt");
+            string secondPath = Path.Combine(_env.DefaultTestDirectory.Path, "second.txt");
+
+            session.RecordPropertyFunction(
+                typeof(DateTime),
+                nameof(DateTime.UtcNow),
+                instance: null,
+                arguments: [],
+                result: DateTime.UtcNow);
+            session.RecordPropertyFunction(
+                typeof(DateTime),
+                nameof(DateTime.UtcNow),
+                instance: null,
+                arguments: [],
+                result: DateTime.UtcNow.AddTicks(1));
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                nameof(FileInfo.Length),
+                new FileInfo(firstPath),
+                arguments: [],
+                result: 1L);
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                nameof(FileInfo.Length),
+                new FileInfo(secondPath),
+                arguments: [],
+                result: 2L);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.PropertyFunctions.Length.ShouldBe(4);
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.None);
+            (report.Reasons & EvaluationObservationReason.UnsupportedVolatileInput)
+                .ShouldBe(EvaluationObservationReason.UnsupportedVolatileInput);
         }
 
         [Fact]
@@ -580,6 +1499,26 @@ namespace Microsoft.Build.UnitTests.Definition
             report.EvaluationSucceeded.ShouldBeFalse();
             (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
                 .ShouldBe(EvaluationObservationReason.ExternalOperationFailure);
+        }
+
+        [Fact]
+        public void EvaluationObservationMarksNoThrowProbeFailuresAmbiguous()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string path = Path.Combine(_env.DefaultTestDirectory.Path, "ambiguous.marker");
+
+            using (session.Enter())
+            {
+                FileUtilities.FileExistsNoThrow(path, new ThrowingProbeFileSystem()).ShouldBeFalse();
+            }
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            (report.Reasons & EvaluationObservationReason.AmbiguousNegativeProbe)
+                .ShouldBe(EvaluationObservationReason.AmbiguousNegativeProbe);
+            report.Categories.ShouldContain(observation =>
+                observation.Category == EvaluationObservationCategory.PathProbe &&
+                observation.State == EvaluationObservationCategoryState.Incomplete);
         }
 
         [Theory]
@@ -1441,6 +2380,7 @@ namespace Microsoft.Build.UnitTests.Definition
         {
             public override TextReader ReadFile(string path) => new StringReader("reader");
             public override string ReadFileAllText(string path) => "content";
+            public override byte[] ReadFileAllBytes(string path) => Encoding.UTF8.GetBytes("content");
             public override FileAttributes GetAttributes(string path) => FileAttributes.ReadOnly;
             public override DateTime GetLastWriteTimeUtc(string path) => new(1234, DateTimeKind.Utc);
         }
@@ -1449,6 +2389,11 @@ namespace Microsoft.Build.UnitTests.Definition
         {
             public override string ReadFileAllText(string path) => throw new IOException("Read failed.");
             public override FileAttributes GetAttributes(string path) => throw new IOException("Metadata failed.");
+        }
+
+        private sealed class ThrowingProbeFileSystem : TestFileSystemBase
+        {
+            public override bool FileExists(string path) => throw new IOException("Probe failed.");
         }
 
         private void EvaluateProjects(IEnumerable<string> projectContents, EvaluationContext context, Action<Project> afterEvaluationAction)

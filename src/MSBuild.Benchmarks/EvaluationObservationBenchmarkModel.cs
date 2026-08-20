@@ -3,6 +3,7 @@
 
 using System.Globalization;
 using System.Text;
+using Microsoft.Build.Evaluation.Context;
 
 namespace MSBuild.Benchmarks;
 
@@ -11,6 +12,7 @@ internal static class EvaluationObservationBenchmarkProtocol
     internal const string MeasurementStartMarker = ".evaluation-observer-measure-start";
     internal const string MeasurementStopMarker = ".evaluation-observer-measure-stop";
     internal const string NativePathPrefix = "EVALUATION_OBSERVATION_NATIVE_PATH|";
+    internal const string NativeEnumerationPrefix = "EVALUATION_OBSERVATION_NATIVE_ENUMERATION|";
 }
 
 [Flags]
@@ -26,6 +28,7 @@ public enum EvaluationObservationBenchmarkScenario
 {
     Typical,
     GlobHeavy,
+    AmbientAndSdk,
 }
 
 internal sealed class EvaluationObservationBenchmarkResult
@@ -33,6 +36,7 @@ internal sealed class EvaluationObservationBenchmarkResult
     private const string Prefix = "EVALUATION_OBSERVATION_BENCHMARK";
 
     internal long EvaluationTicks { get; init; }
+    internal long AllocatedManagedBytes { get; init; }
     internal long RetainedManagedBytes { get; init; }
     internal long PrivateBytes { get; init; }
     internal long PeakWorkingSetBytes { get; init; }
@@ -44,6 +48,7 @@ internal sealed class EvaluationObservationBenchmarkResult
     internal int NativeEnumerations { get; init; }
     internal int NativeMetadataReads { get; init; }
     internal int NativeFileReads { get; init; }
+    internal int NativeSemanticObservations { get; init; }
     internal int NativeUniquePaths { get; init; }
     internal int DetoursAccesses { get; init; }
     internal int DetoursUniquePaths { get; init; }
@@ -57,6 +62,7 @@ internal sealed class EvaluationObservationBenchmarkResult
             "|",
             Prefix,
             Pair(nameof(EvaluationTicks), EvaluationTicks),
+            Pair(nameof(AllocatedManagedBytes), AllocatedManagedBytes),
             Pair(nameof(RetainedManagedBytes), RetainedManagedBytes),
             Pair(nameof(PrivateBytes), PrivateBytes),
             Pair(nameof(PeakWorkingSetBytes), PeakWorkingSetBytes),
@@ -68,6 +74,7 @@ internal sealed class EvaluationObservationBenchmarkResult
             Pair(nameof(NativeEnumerations), NativeEnumerations),
             Pair(nameof(NativeMetadataReads), NativeMetadataReads),
             Pair(nameof(NativeFileReads), NativeFileReads),
+            Pair(nameof(NativeSemanticObservations), NativeSemanticObservations),
             Pair(nameof(NativeUniquePaths), NativeUniquePaths),
             Pair(nameof(DetoursAccesses), DetoursAccesses),
             Pair(nameof(DetoursUniquePaths), DetoursUniquePaths),
@@ -112,6 +119,7 @@ internal sealed class EvaluationObservationBenchmarkResult
         return new EvaluationObservationBenchmarkResult
         {
             EvaluationTicks = Get(nameof(EvaluationTicks)),
+            AllocatedManagedBytes = Get(nameof(AllocatedManagedBytes)),
             RetainedManagedBytes = Get(nameof(RetainedManagedBytes)),
             PrivateBytes = Get(nameof(PrivateBytes)),
             PeakWorkingSetBytes = Get(nameof(PeakWorkingSetBytes)),
@@ -123,6 +131,7 @@ internal sealed class EvaluationObservationBenchmarkResult
             NativeEnumerations = checked((int)Get(nameof(NativeEnumerations))),
             NativeMetadataReads = checked((int)Get(nameof(NativeMetadataReads))),
             NativeFileReads = checked((int)Get(nameof(NativeFileReads))),
+            NativeSemanticObservations = checked((int)Get(nameof(NativeSemanticObservations))),
             NativeUniquePaths = checked((int)Get(nameof(NativeUniquePaths))),
             DetoursAccesses = checked((int)Get(nameof(DetoursAccesses))),
             DetoursUniquePaths = checked((int)Get(nameof(DetoursUniquePaths))),
@@ -148,7 +157,9 @@ internal sealed class EvaluationObservationNativeMetrics
     internal int Enumerations = 0;
     internal int MetadataReads = 0;
     internal int FileReads = 0;
+    internal int SemanticObservations = 0;
     private readonly HashSet<string> _uniquePaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _enumerations = new(StringComparer.Ordinal);
     private bool _pathsSampled;
 
     internal int UniquePathCount => _uniquePaths.Count;
@@ -172,6 +183,18 @@ internal sealed class EvaluationObservationNativeMetrics
         }
     }
 
+    internal void AddEnumeration(EvaluationDirectoryEnumerationObservation observation)
+    {
+        _enumerations.Add(string.Join(
+            "|",
+            observation.Kind,
+            observation.Path,
+            observation.SearchPattern,
+            observation.SearchOption,
+            observation.EntryCount,
+            observation.Completion));
+    }
+
     internal string SerializePaths()
     {
         StringBuilder result = new();
@@ -179,6 +202,13 @@ internal sealed class EvaluationObservationNativeMetrics
         {
             result.Append(EvaluationObservationBenchmarkProtocol.NativePathPrefix);
             result.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(path)));
+            result.AppendLine();
+        }
+
+        foreach (string enumeration in _enumerations.OrderBy(static value => value, StringComparer.Ordinal))
+        {
+            result.Append(EvaluationObservationBenchmarkProtocol.NativeEnumerationPrefix);
+            result.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(enumeration)));
             result.AppendLine();
         }
 
