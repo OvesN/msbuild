@@ -1,19 +1,46 @@
 # Native Evaluation Observation Report
 
-## Coverage
+## Coverage and Tracking
 
-- Request options and global properties
-- Project and import content
-- File probes, reads, metadata, globs, and searches
-- Environment, Registry, and property functions
-- SDK request keys/results, toolset resolution, and task registration
-- Provider/cache identity, failures, and side effects
+- **Request configuration**
+  - Tracks global properties, load settings, runtime/OS/culture, feature switches, escape hatches, and provider identities.
+  - Captured once when evaluation starts.
 
-## Mechanism
+- **Project and import content**
+  - Tracks root, imported, linked, generated, and in-memory project sources.
+  - Disk XML is SHA-256 hashed while read; PRE/link versions are reused when authoritative.
 
-- Evaluator-native hooks produce one typed report per evaluation.
-- File content uses SHA-256; ordered results use schema-versioned 128-bit fingerprints.
-- Missing, opaque, custom, or unversioned inputs are marked incomplete or unsupported.
+- **Filesystem**
+  - Tracks positive and negative probes, file reads, timestamps, lengths, and providers.
+  - Recorded through the filesystem wrapper and direct hooks for paths that bypass it.
+
+- **Globs, enumerations, and searches**
+  - Tracks patterns, excludes, ordered results/candidates, selected paths, misses, and failures.
+  - Recorded at `FileMatcher`, `EngineFileUtilities`, and `FileUtilities` semantic seams using counts and 128-bit fingerprints.
+
+- **Environment**
+  - Tracks imported variables, missing imported variables, SDK-injected variables, and live process reads.
+  - Property reads are captured by `PropertyTrackingEvaluatorDataWrapper`; calls such as `Environment.GetEnvironmentVariable` are captured by property-function interception.
+
+- **Registry**
+  - Tracks registry expressions, intrinsic registry functions, property-function calls, requests, results, and failures.
+  - Recorded in the evaluator expansion and intrinsic-function paths.
+
+- **Property functions**
+  - Tracks filesystem, environment, Registry, ambient, volatile, and side-effecting calls.
+  - Recorded after execution in `Expander`; pure calls are omitted and unknown/unsafe calls fail closed.
+
+- **SDK resolution**
+  - Tracks the complete SDK request key, cache hit/miss, and returned `SdkResult`.
+  - Resolver dependencies are not observed; the SDK result cache owns reuse until it is cleared.
+
+- **Toolsets, tasks, providers, and caches**
+  - Tracks selected toolsets, effective `UsingTask` registrations, provider identity, and cache mode.
+  - Recorded at evaluator initialization, task registration, and cache/provider boundaries.
+
+- **Failures and side effects**
+  - Tracks partial operations, exceptions, conflicting results, volatile values, and mutations.
+  - Missing, opaque, custom, or unversioned inputs are marked incomplete or unsupported.
 
 ## Reuse
 
