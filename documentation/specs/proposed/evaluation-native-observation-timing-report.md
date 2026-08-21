@@ -115,3 +115,18 @@ The report publishes only:
 - allocation attribution collected across all MSBuild processes.
 
 Per-category subtractive wall-time estimates are retained only as a noise-floor check.
+
+## Rejected optimization experiments
+
+Each experiment was reviewed, tested on `net11.0` and `net472`, measured, and then
+reverted when it did not show a trustworthy improvement.
+
+| Candidate | Experiment | Result |
+| --- | --- | --- |
+| Filesystem records | Moved normalization/key construction outside the lock, cached key hashes, and used single-lookup dictionary insertion | No repeatable Orchard or in-process CPU improvement |
+| XML hashing | Tried symmetric/adaptive reader buffers and observer-only pooled SHA-256 batching | Reader buffering increased default-path allocation; adaptive/pooling lost the timing signal |
+| Session creation | Lazily allocated observation collections and removed capturing closures from environment/property-function recording | Glob-heavy allocation improved, but other scenarios were mixed and Orchard was unchanged |
+| Property-function classification | Added a bounded, versioned, successful-only process cache | Small allocation reduction; Orchard overhead worsened in both runs |
+
+No code from these experiments was retained. Further optimization should begin with fresh
+profiling rather than another speculative change.
