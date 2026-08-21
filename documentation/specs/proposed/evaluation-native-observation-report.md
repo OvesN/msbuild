@@ -77,6 +77,19 @@ The aggregate delta is **85 ms / 43% lower**, while the stronger signal is that 
 post-change range (**+1.9% to +2.7%**) does not overlap the earlier range
 (**+3.7% to +5.2%**). These are unpaired Hyper-V VM runs, not exact attribution.
 
+Caching process-constant request values and reading `Traits.Instance` once per evaluation
+then measured:
+
+| Run | Observation disabled | Observation enabled | Delta |
+| --- | ---: | ---: | ---: |
+| 1 | 5.018 s | 5.141 s | +123 ms / +2.4% |
+| 2 | 4.882 s | 4.956 s | +74 ms / +1.5% |
+| **Aggregate means** | **4.950 s** | **5.049 s** | **+99 ms / +2.0%** |
+
+The single fresh pre-change comparator measured 5.008 s -> 5.149 s
+(**+141 ms / +2.8%**). The post-change range overlaps the earlier post-zero-copy range,
+and the differences are below the VM noise floor. No wall-time improvement is claimed.
+
 ### Observer Allocation Attribution
 
 The earlier per-activity allocation telemetry was measured before zero-copy finalization.
@@ -101,12 +114,15 @@ across 50 evaluations:
 
 | Scenario | Disabled allocation | Enabled allocation | Added per evaluation | Post-GC retained delta |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 17.73 MB | 18.59 MB | 16.7 KiB | 5.7 KiB/process |
-| Glob-heavy | 78.99 MB | 79.66 MB | 13.1 KiB | 7.6 KiB/process |
-| Ambient/SDK | 21.54 MB | 23.08 MB | 30.1 KiB | 2.2 KiB/process |
+| Typical | 17.67 MB | 18.47 MB | 15.7 KiB | 0.0 KiB/process |
+| Glob-heavy | 78.95 MB | 79.66 MB | 14.0 KiB | 0.3 KiB/process |
+| Ambient/SDK | 21.37 MB | 22.73 MB | 26.7 KiB | -0.3 KiB/process |
 
 Per-evaluation deltas use the unrounded byte counters; this table is not directly
 comparable with the earlier inclusive Orchard activity scopes.
+Compared with the earlier run, Typical and Ambient/SDK decreased while Glob-heavy
+increased. These unpaired differences and the near-zero retained deltas are treated as
+run-to-run noise, not attributed to the request-snapshot change.
 
 Reports are consumed and discarded in this benchmark. The small post-GC deltas confirm
 bounded process retention and are consistent with the regression test that completed

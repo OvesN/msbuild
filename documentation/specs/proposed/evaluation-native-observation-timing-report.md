@@ -13,6 +13,13 @@
   - 4.889 s -> 4.980 s (**+1.9%, +91 ms**)
 - New aggregate means: 4.874 s -> 4.986 s
   (**approximately +2.3%, +112 ms**)
+- Before request-snapshot optimization: 5.008 s -> 5.149 s
+  (**+2.8%, +141 ms**)
+- After request-snapshot optimization, two isolated runs:
+  - 5.018 s -> 5.141 s (**+2.4%, +123 ms**)
+  - 4.882 s -> 4.956 s (**+1.5%, +74 ms**)
+- Post-change aggregate means: 4.950 s -> 5.049 s
+  (**approximately +2.0%, +99 ms**)
 
 ## Method for the pre-zero-copy attribution
 
@@ -73,8 +80,10 @@ evaluation reduced its pre-zero-copy observed wall-clock contribution to about 1
    optimization.
 2. **Filesystem recording is the largest repeated-record cost.** Path normalization,
    locking, key hashing, and dictionary updates occur about 243 times per evaluation.
-3. **The request snapshot repeats mostly process-static work.** Runtime, OS, architecture,
-   culture, feature-switch, provider, and toolset values are rebuilt for every evaluation.
+3. **The request snapshot mixes process constants and per-evaluation values.**
+   Engine/runtime/OS/architecture strings are now process-static, and one coherent
+   `Traits` snapshot is used per evaluation. SDK, toolset, provider, culture, directory,
+   feature-switch, and request values remain per evaluation.
 4. **Raw XML hashing is material.** The observer hashes project/import bytes across about
    834 stream reads per evaluation.
 5. **Property-function classification runs frequently.** Around 197 calls per evaluation
@@ -82,18 +91,17 @@ evaluation reduced its pre-zero-copy observed wall-clock contribution to about 1
 6. **Environment tracking is high-cardinality.** Environment recording and lookup paths
    are entered roughly 700 times per evaluation.
 
-## Improvement Priority
+## Remaining candidates from pre-zero-copy attribution
 
-1. Cache the process-static portion of the request snapshot and record only per-evaluation
-   values.
-2. Reduce low-level filesystem records under semantic owners and batch keyed updates.
-3. Reuse authoritative PRE/source hashes and avoid hashing the same source more than once.
-4. Cache property-function classifications and bypass observer dispatch for known-pure calls.
-5. Lazily allocate category dictionaries and short-circuit environment recording before
+1. Reduce low-level filesystem records under semantic owners and batch keyed updates.
+2. Reuse authoritative PRE/source hashes and avoid hashing the same source more than once.
+3. Cache property-function classifications and bypass observer dispatch for known-pure calls.
+4. Lazily allocate category dictionaries and short-circuit environment recording before
    normalization/locking.
 
-Zero-copy report finalization is complete. The request snapshot is the next candidate,
-but it should not be started until a fresh attribution run confirms the new ranking.
+Zero-copy report finalization and the narrow process-constant request optimization are
+complete. Filesystem recording was the next candidate in the old ranking, but fresh
+exclusive attribution is required before selecting another optimization.
 
 ## Confidence
 
@@ -101,6 +109,8 @@ The report publishes only:
 
 - pre-change whole-build overhead reproduced in three independent BenchmarkDotNet runs;
 - post-change whole-build overhead reproduced in two independent BenchmarkDotNet runs;
+- request-snapshot wall time measured in one pre-change and two isolated post-change
+  runs, with no improvement claimed above the VM noise floor;
 - exclusive activity CPU time stable across five runs, 65 evaluations, and 30 processes;
 - allocation attribution collected across all MSBuild processes.
 

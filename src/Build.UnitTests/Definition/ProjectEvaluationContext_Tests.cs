@@ -489,6 +489,18 @@ namespace Microsoft.Build.UnitTests.Definition
                 .ShouldBe(EvaluationObservationReason.None);
             report.Request.ProjectPath.ShouldBe(projectFile);
             report.Request.EngineVersion.ShouldNotBe(report.Request.EngineAssemblyVersion);
+            Assembly engineAssembly = typeof(Project).Assembly;
+            report.Request.EngineVersion.ShouldBe(
+                engineAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
+                System.Diagnostics.FileVersionInfo.GetVersionInfo(engineAssembly.Location).FileVersion);
+            report.Request.EngineAssemblyVersion.ShouldBe(engineAssembly.GetName().Version?.ToString());
+            report.Request.Runtime.ShouldBe(
+                System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);
+            report.Request.OperatingSystem.ShouldBe(
+                System.Runtime.InteropServices.RuntimeInformation.OSDescription);
+            report.Request.ProcessArchitecture.ShouldBe(
+                System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString());
+            report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
             report.ProjectSources.ShouldContain(observation =>
                 observation.Role == EvaluationProjectSourceRole.Root &&
                 FileUtilities.PathsEqual(observation.Path, projectFile) &&
@@ -1035,6 +1047,44 @@ namespace Microsoft.Build.UnitTests.Definition
                 environmentVariable.Revert();
                 Traits.UpdateFromEnvironment();
             }
+        }
+
+        [Fact]
+        public void EvaluationObservationReadsEngineEnvironmentInputsPerEvaluation()
+        {
+            const string EnvironmentName = "MSBUILDINCLUDEDEFAULTSDKRESOLVER";
+            var reports = new List<EvaluationObservationReport>();
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                reports.Add);
+            TransientTestState environment = _env.SetEnvironmentVariable(EnvironmentName, "first");
+            string projectFile = _env.CreateFile("engine-environment.proj", "<Project />").Path;
+
+            try
+            {
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                });
+
+                Environment.SetEnvironmentVariable(EnvironmentName, "second");
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                });
+            }
+            finally
+            {
+                environment.Revert();
+            }
+
+            reports.Count.ShouldBe(2);
+            reports[0].Environment.ShouldContain(observation =>
+                observation.Name == EnvironmentName &&
+                observation.Value == "first");
+            reports[1].Environment.ShouldContain(observation =>
+                observation.Name == EnvironmentName &&
+                observation.Value == "second");
         }
 
         [WindowsOnlyFact]

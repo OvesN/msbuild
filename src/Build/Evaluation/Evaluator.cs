@@ -4,6 +4,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -40,6 +41,33 @@ using SdkResult = Microsoft.Build.BackEnd.SdkResolution.SdkResult;
 
 namespace Microsoft.Build.Evaluation
 {
+    /// <summary>
+    /// Observation values that cannot change during the process lifetime.
+    /// Environment values, traits, toolsets, providers, and request-dependent values must not be added here.
+    /// </summary>
+    internal static class EvaluationObservationRequestProcessData
+    {
+        private static readonly Assembly s_engineAssembly = typeof(Project).Assembly;
+
+        internal static readonly string EngineVersion =
+            s_engineAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
+            FileVersionInfo.GetVersionInfo(s_engineAssembly.Location).FileVersion;
+        internal static readonly string EngineAssemblyVersion = s_engineAssembly.GetName().Version?.ToString();
+        internal static readonly string Runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription;
+        internal static readonly string OperatingSystem = System.Runtime.InteropServices.RuntimeInformation.OSDescription;
+        internal static readonly string ProcessArchitecture =
+            System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString();
+        internal static readonly string PathComparison = FileUtilities.PathComparison.ToString();
+        internal static readonly ImmutableArray<string> EngineEnvironmentInputs =
+        [
+            "MSBUILDINCLUDEDEFAULTSDKRESOLVER",
+            "MSBUILDADDITIONALSDKRESOLVERSFOLDER",
+            "MSBuildSDKsPath",
+            "MSBUILDENABLEALLPROPERTYFUNCTIONS",
+            ParserIgnoreConfiguration.EnvironmentVariableName,
+        ];
+    }
+
     /// <summary>
     /// Evaluates a ProjectRootElement, updating the fresh Project.Data passed in.
     /// Handles evaluating conditions, expanding expressions, and building up the
@@ -412,14 +440,12 @@ namespace Microsoft.Build.Evaluation
             Array.Sort(commandLineProperties, StringComparer.OrdinalIgnoreCase);
 
             BuildEnvironment buildEnvironment = BuildEnvironmentHelper.Instance;
-            EscapeHatches escapeHatches = Traits.Instance.EscapeHatches;
-            Assembly engineAssembly = typeof(Project).Assembly;
+            Traits traits = Traits.Instance;
+            EscapeHatches escapeHatches = traits.EscapeHatches;
             _observationSession.RecordRequest(new EvaluationRequestObservation
             {
-                EngineVersion =
-                    engineAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
-                    FileVersionInfo.GetVersionInfo(engineAssembly.Location).FileVersion,
-                EngineAssemblyVersion = engineAssembly.GetName().Version?.ToString(),
+                EngineVersion = EvaluationObservationRequestProcessData.EngineVersion,
+                EngineAssemblyVersion = EvaluationObservationRequestProcessData.EngineAssemblyVersion,
                 HostMode = buildEnvironment.Mode.ToString(),
                 ProjectPath = projectRootElement.FullPath,
                 ProjectLoadSettings = (int)loadSettings,
@@ -442,19 +468,19 @@ namespace Microsoft.Build.Evaluation
                 CurrentCulture = CultureInfo.CurrentCulture.Name,
                 CurrentUICulture = CultureInfo.CurrentUICulture.Name,
                 LocalTimeZone = TimeZoneInfo.Local.Id,
-                Runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
-                OperatingSystem = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
-                ProcessArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
-                PathComparison = FileUtilities.PathComparison.ToString(),
+                Runtime = EvaluationObservationRequestProcessData.Runtime,
+                OperatingSystem = EvaluationObservationRequestProcessData.OperatingSystem,
+                ProcessArchitecture = EvaluationObservationRequestProcessData.ProcessArchitecture,
+                PathComparison = EvaluationObservationRequestProcessData.PathComparison,
                 EnableAllPropertyFunctions = FeatureSwitches.EnableAllPropertyFunctions,
                 RestrictPropertyFunctionReceivers = FeatureSwitches.RestrictPropertyFunctionReceivers,
                 EnableCustomPluginProbing = FeatureSwitches.EnableCustomPluginProbing,
                 EnableSdkResolverDynamicLoading = FeatureSwitches.EnableSdkResolverDynamicLoading,
                 EnableConfigurationFileToolsets = FeatureSwitches.EnableConfigurationFileToolsets,
-                CacheFileExistence = Traits.Instance.CacheFileExistence,
-                CacheFileEnumerations = Traits.Instance.MSBuildCacheFileEnumerations,
-                UseLazyWildcardEvaluation = Traits.Instance.UseLazyWildCardEvaluation,
-                ForceEvaluateAsFullFramework = Traits.Instance.ForceEvaluateAsFullFramework,
+                CacheFileExistence = traits.CacheFileExistence,
+                CacheFileEnumerations = traits.MSBuildCacheFileEnumerations,
+                UseLazyWildcardEvaluation = traits.UseLazyWildCardEvaluation,
+                ForceEvaluateAsFullFramework = traits.ForceEvaluateAsFullFramework,
                 DisabledChangeWave = ChangeWaves.DisabledWave?.ToString(),
                 ChangeWaveConversionState = ChangeWaves.ConversionState.ToString(),
                 DoNotExpandQualifiedMetadataInUpdateOperation =
@@ -489,15 +515,7 @@ namespace Microsoft.Build.Evaluation
                 CommandLineProperties = commandLineProperties,
             });
 
-            string[] engineEnvironmentInputs =
-            [
-                "MSBUILDINCLUDEDEFAULTSDKRESOLVER",
-                "MSBUILDADDITIONALSDKRESOLVERSFOLDER",
-                "MSBuildSDKsPath",
-                "MSBUILDENABLEALLPROPERTYFUNCTIONS",
-                ParserIgnoreConfiguration.EnvironmentVariableName,
-            ];
-            foreach (string environmentName in engineEnvironmentInputs)
+            foreach (string environmentName in EvaluationObservationRequestProcessData.EngineEnvironmentInputs)
             {
                 string environmentValue = Environment.GetEnvironmentVariable(environmentName);
                 _observationSession.RecordEnvironment(
