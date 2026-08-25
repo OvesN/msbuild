@@ -927,11 +927,6 @@ namespace Microsoft.Build.BackEnd
         /// </summary>
         private static ITaskItem CreateTaskItemOfT(Type genericArgument, ITaskItem item)
         {
-            if (TryCreateKnownPathTaskItemOfT(genericArgument, item, out ITaskItem taskItem))
-            {
-                return taskItem;
-            }
-
             Func<ITaskItem, ITaskItem> factory = s_taskItemOfTFactories.GetOrAdd(genericArgument, static t =>
             {
 #if NET
@@ -956,30 +951,6 @@ namespace Microsoft.Build.BackEnd
             });
 
             return factory(item);
-        }
-
-        internal static bool TryCreateKnownPathTaskItemOfT(Type genericArgument, ITaskItem item, out ITaskItem taskItem)
-        {
-            if (genericArgument == typeof(AbsolutePath))
-            {
-                taskItem = new TaskItem<AbsolutePath>(item);
-                return true;
-            }
-
-            if (genericArgument == typeof(FileInfo))
-            {
-                taskItem = new TaskItem<FileInfo>(item);
-                return true;
-            }
-
-            if (genericArgument == typeof(DirectoryInfo))
-            {
-                taskItem = new TaskItem<DirectoryInfo>(item);
-                return true;
-            }
-
-            taskItem = null;
-            return false;
         }
 
 

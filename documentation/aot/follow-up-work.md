@@ -56,11 +56,11 @@ All work here still follows the strategy guide's rule: **fail observably, never 
 - **Expected shape:** inspect the SDK publish response file or equivalent output and confirm the `Microsoft.Build.*` feature settings are supplied without manual duplication.
 - **Deeper context:** [managing-trimming-and-aot.md §6.5](managing-trimming-and-aot.md#65-how-a-librarys-switch-reaches-a-consumer-transitivity-defaulting-override) and [sdk-msbuild-object-model-audit.md](sdk-msbuild-object-model-audit.md).
 
-### 7. Complete AOT-safe binding for non-path `TaskItem<T>` / `ITaskItem<T>` parameters
+### 7. Design an AOT-safe binding for typed `TaskItem<T>` / `ITaskItem<T>` parameters
 
-- **Strategy:** direct factories cover `AbsolutePath`, `FileInfo`, and `DirectoryInfo`; other supported type arguments still use an S3 feature check today (a `RuntimeFeature.IsDynamicCodeSupported` guard that fails observably).
+- **Strategy:** S3 feature check today (a `RuntimeFeature.IsDynamicCodeSupported` guard that fails observably); a durable strategy likely needs closed-world registration or a source-generated wrapper factory.
 - **Implementation surface:** `CreateTaskItemOfT` in [`TaskExecutionHost`](../../src/Build/BackEnd/TaskExecutionHost/TaskExecutionHost.cs).
-- **Why it remains:** the typed task-parameter feature (`TaskItem<T>` / `ITaskItem<T>`) was integrated from upstream after the initial AOT annotation work. The path types used by in-box task migrations have direct factories, but wrapping other supported type arguments still uses `Type.MakeGenericType` plus an expression-tree `Compile()`, both of which require runtime code generation (IL3050). That fallback is guarded with `RuntimeFeature.IsDynamicCodeSupported` and throws `NotSupportedException` under trimming / Native AOT.
+- **Why it remains:** the typed task-parameter feature (`TaskItem<T>` / `ITaskItem<T>`) was integrated from upstream after the initial AOT annotation work. Wrapping an `ITaskItem` into a closed-generic `TaskItem<T>` uses `Type.MakeGenericType` plus an expression-tree `Compile()`, both of which require runtime code generation (IL3050). To keep the AOT analyzers clean after the rebase, the wrapper is guarded with `RuntimeFeature.IsDynamicCodeSupported` and throws `NotSupportedException` under trimming / Native AOT — which fails observably but disables the feature in an AOT host.
 - **Expected shape:** keep JIT behavior unchanged; provide an AOT-safe path (for example a registered or source-generated `ITaskItem` → `TaskItem<T>` factory for the closed generic arguments a task actually declares) so typed task-item parameters can bind without `MakeGenericType` / expression compilation, replacing the observable-failure stopgap.
 - **Deeper context:** [managing-trimming-and-aot.md §5.3](managing-trimming-and-aot.md#53-dynamic-code-runtime-code-generation).
 
