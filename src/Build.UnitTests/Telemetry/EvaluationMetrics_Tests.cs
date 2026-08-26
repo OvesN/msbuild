@@ -124,10 +124,14 @@ public sealed class EvaluationMetrics_Tests
         using MetricCollector collector = new();
         using TestEnvironment env = TestEnvironment.Create(_output);
 
+        env.CreateFile("evaluation-metrics.cs", string.Empty);
         TransientTestFile buildProject = env.CreateFile(
             "evaluation-metrics.proj",
             """
             <Project>
+              <ItemGroup>
+                <Compile Include="*.cs" />
+              </ItemGroup>
               <Target Name="Build" />
             </Project>
             """);
@@ -157,6 +161,13 @@ public sealed class EvaluationMetrics_Tests
             measurement.HasTag(EvaluationMetrics.PassTagName, "targets") &&
             measurement.HasTag(EvaluationMetrics.StageTagName, "full") &&
             measurement.HasTag(EvaluationMetrics.OriginTagName, EvaluationMetrics.BuildSubmissionOrigin) &&
+            measurement.Tags[EvaluationMetrics.SubmissionIdTagName].ShouldBeOfType<int>() >= 0);
+
+        collector.Measurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobRequestCountName &&
+            measurement.Value == 1 &&
+            measurement.HasTag(EvaluationMetrics.OriginTagName, EvaluationMetrics.BuildSubmissionOrigin) &&
+            measurement.HasTag(EvaluationMetrics.RecursiveTagName, false) &&
             measurement.Tags[EvaluationMetrics.SubmissionIdTagName].ShouldBeOfType<int>() >= 0);
 
         int[] submissionIds = collector.Measurements
@@ -244,6 +255,68 @@ public sealed class EvaluationMetrics_Tests
     }
 
     [Fact]
+    public void EvaluationMetricsCaptureItemGlobShapeAndDuration()
+    {
+        using MetricCollector collector = new();
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        using ProjectCollection collection = new();
+
+        TransientTestFolder sourceDirectory = env.DefaultTestDirectory.CreateDirectory("src");
+        sourceDirectory.CreateFile("one.cs", string.Empty);
+        sourceDirectory.CreateFile("two.cs", string.Empty);
+        sourceDirectory.CreateDirectory("generated").CreateFile("generated.cs", string.Empty);
+        sourceDirectory.CreateDirectory("temp").CreateFile("temporary.cs", string.Empty);
+        TransientTestFile projectFile = env.CreateFile(
+            "evaluation-item-glob-metrics.proj",
+            """
+            <Project>
+              <ItemGroup>
+                <Compile Include="src/**/*.cs" Exclude="src/generated/**;src/temp/**" />
+                <None Include="literal.txt" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        ProjectInstance project = ProjectInstance.FromFile(
+            projectFile.Path,
+            new ProjectOptions { ProjectCollection = collection });
+
+        project.GetItems("Compile").Count.ShouldBe(2);
+
+        MetricMeasurement[] globMeasurements = collector.Measurements
+            .Where(measurement => measurement.InstrumentName is
+                EvaluationMetrics.ItemGlobRequestCountName or
+                EvaluationMetrics.ItemGlobDurationName or
+                EvaluationMetrics.ItemGlobFileCountName or
+                EvaluationMetrics.ItemGlobExcludeCountName or
+                EvaluationMetrics.ItemGlobConcurrencyName)
+            .ToArray();
+
+        globMeasurements.Length.ShouldBe(5);
+        globMeasurements.ShouldAllBe(measurement =>
+            measurement.HasTag(EvaluationMetrics.StageTagName, "full") &&
+            measurement.HasTag(EvaluationMetrics.OriginTagName, EvaluationMetrics.OutsideBuildSubmissionOrigin) &&
+            measurement.HasTag(EvaluationMetrics.SubmissionIdTagName, BuildEventContext.InvalidSubmissionId) &&
+            measurement.HasTag(EvaluationMetrics.RecursiveTagName, true));
+
+        globMeasurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobRequestCountName &&
+            measurement.Value == 1);
+        globMeasurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobDurationName &&
+            measurement.Value >= 0);
+        globMeasurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobFileCountName &&
+            measurement.Value == 2);
+        globMeasurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobExcludeCountName &&
+            measurement.Value == 2);
+        globMeasurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobConcurrencyName &&
+            measurement.Value == 1);
+    }
+
+    [Fact]
     public void EvaluationDurationDoesNotIncludeMetricsListenerTime()
     {
         using MeterListener listener = new();
@@ -283,6 +356,80 @@ public sealed class EvaluationMetrics_Tests
     }
 
     [Fact]
+    public void ItemGlobConcurrencyCapturesOverlappingExpansions()
+    {
+        using MetricCollector collector = new(EvaluationMetrics.ItemGlobConcurrencyName);
+
+        EvaluationMetrics.ItemGlobMetricState first = EvaluationMetrics.ItemGlobStart();
+        EvaluationMetrics.ItemGlobMetricState second = EvaluationMetrics.ItemGlobStart();
+
+        EvaluationMetrics.ItemGlobStop(
+            second,
+            ProjectEvaluationStage.Full,
+            BuildEventContext.InvalidSubmissionId,
+            recursive: true,
+            excludeCount: 0,
+            fileCount: 1);
+        EvaluationMetrics.ItemGlobStop(
+            first,
+            ProjectEvaluationStage.Full,
+            BuildEventContext.InvalidSubmissionId,
+            recursive: true,
+            excludeCount: 0,
+            fileCount: 1);
+
+        double[] concurrency = collector.Measurements
+            .Where(measurement => measurement.InstrumentName == EvaluationMetrics.ItemGlobConcurrencyName)
+            .Select(measurement => measurement.Value)
+            .OrderBy(value => value)
+            .ToArray();
+
+        concurrency.ShouldBe([1, 2]);
+    }
+
+    [Fact]
+    public void ItemGlobDurationCanBeEnabledIndependently()
+    {
+        using MetricCollector collector = new(EvaluationMetrics.ItemGlobDurationName);
+
+        EvaluationMetrics.ItemGlobMetricState state = EvaluationMetrics.ItemGlobStart();
+        EvaluationMetrics.ItemGlobStop(
+            state,
+            ProjectEvaluationStage.Full,
+            BuildEventContext.InvalidSubmissionId,
+            recursive: false,
+            excludeCount: 0,
+            fileCount: 1);
+
+        collector.Measurements.ShouldHaveSingleItem()
+            .InstrumentName.ShouldBe(EvaluationMetrics.ItemGlobDurationName);
+    }
+
+    [Fact]
+    public void CancelledItemGlobDoesNotEmitMeasurementsOrLeakConcurrency()
+    {
+        using MetricCollector collector = new();
+
+        EvaluationMetrics.ItemGlobMetricState cancelled = EvaluationMetrics.ItemGlobStart();
+        EvaluationMetrics.ItemGlobCancel(cancelled);
+
+        EvaluationMetrics.ItemGlobMetricState completed = EvaluationMetrics.ItemGlobStart();
+        EvaluationMetrics.ItemGlobStop(
+            completed,
+            ProjectEvaluationStage.Full,
+            BuildEventContext.InvalidSubmissionId,
+            recursive: true,
+            excludeCount: 0,
+            fileCount: 1);
+
+        collector.Measurements.Count(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobRequestCountName).ShouldBe(1);
+        collector.Measurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ItemGlobConcurrencyName &&
+            measurement.Value == 1);
+    }
+
+    [Fact]
     public void SubmissionIdTagIsOptIn()
     {
         EvaluationMetrics.IncludeSubmissionIdOverrideForTests = false;
@@ -294,6 +441,15 @@ public sealed class EvaluationMetrics_Tests
             _ = ProjectInstance.FromProjectRootElement(
                 CreateRootElement("<Project />"),
                 new ProjectOptions { ProjectCollection = collection });
+
+            EvaluationMetrics.ItemGlobMetricState state = EvaluationMetrics.ItemGlobStart();
+            EvaluationMetrics.ItemGlobStop(
+                state,
+                ProjectEvaluationStage.Full,
+                BuildEventContext.InvalidSubmissionId,
+                recursive: false,
+                excludeCount: 0,
+                fileCount: 1);
 
             collector.Measurements.ShouldAllBe(measurement =>
                 !measurement.Tags.ContainsKey(EvaluationMetrics.SubmissionIdTagName));
@@ -390,6 +546,58 @@ public sealed class EvaluationMetrics_Tests
                 new ProjectOptions { ProjectCollection = collection }));
     }
 
+    [Fact]
+    public void ThrowingItemGlobMetricsListenerDoesNotBreakEvaluation()
+    {
+        using ResetMetricsOnDispose reset = new();
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == EvaluationMetrics.MeterName &&
+                instrument.Name == EvaluationMetrics.ItemGlobRequestCountName)
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, _, _, _) => throw new InvalidOperationException("Test listener failure"));
+        listener.Start();
+
+        EvaluationMetrics.ItemGlobMetricState state = EvaluationMetrics.ItemGlobStart();
+        Should.NotThrow(() =>
+            EvaluationMetrics.ItemGlobStop(
+                state,
+                ProjectEvaluationStage.Full,
+                BuildEventContext.InvalidSubmissionId,
+                recursive: true,
+                excludeCount: 0,
+                fileCount: 1));
+
+        using MetricCollector collector = new();
+        long startTimestamp = EvaluationMetrics.EvaluateStart();
+        EvaluationMetrics.EvaluateStop(
+            startTimestamp,
+            ProjectEvaluationStage.Full,
+            BuildEventContext.InvalidSubmissionId,
+            succeeded: true);
+
+        collector.Measurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ProjectEvaluationCountName);
+        collector.Measurements.ShouldContain(measurement =>
+            measurement.InstrumentName == EvaluationMetrics.ProjectEvaluationDurationName);
+
+        EvaluationMetrics.ItemGlobMetricState nextState = EvaluationMetrics.ItemGlobStart();
+        EvaluationMetrics.ItemGlobStop(
+            nextState,
+            ProjectEvaluationStage.Full,
+            BuildEventContext.InvalidSubmissionId,
+            recursive: true,
+            excludeCount: 0,
+            fileCount: 1);
+
+        collector.Measurements.ShouldNotContain(measurement =>
+            measurement.InstrumentName.StartsWith("msbuild.project.evaluation.item.glob", StringComparison.Ordinal));
+    }
+
     private static string[] GetExpectedPasses(ProjectEvaluationStage stage) => stage switch
     {
         ProjectEvaluationStage.Properties => ["initial_properties", "properties"],
@@ -411,11 +619,15 @@ public sealed class EvaluationMetrics_Tests
     {
         private readonly MeterListener _listener = new();
 
-        public MetricCollector()
+        public MetricCollector(params string[] enabledInstruments)
         {
+            HashSet<string>? enabledInstrumentSet = enabledInstruments.Length == 0
+                ? null
+                : new HashSet<string>(enabledInstruments, StringComparer.Ordinal);
             _listener.InstrumentPublished = (instrument, listener) =>
             {
-                if (instrument.Meter.Name == EvaluationMetrics.MeterName)
+                if (instrument.Meter.Name == EvaluationMetrics.MeterName &&
+                    (enabledInstrumentSet is null || enabledInstrumentSet.Contains(instrument.Name)))
                 {
                     listener.EnableMeasurementEvents(instrument);
                 }

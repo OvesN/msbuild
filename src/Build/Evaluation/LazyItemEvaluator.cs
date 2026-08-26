@@ -36,6 +36,8 @@ namespace Microsoft.Build.Evaluation
         private readonly IItemFactory<I, I> _itemFactory;
         private readonly LoggingContext _loggingContext;
         private readonly EvaluationProfiler _evaluationProfiler;
+        private readonly ProjectEvaluationStage _evaluationStage;
+        private readonly int _submissionId;
 
         private int _nextElementOrder = 0;
 
@@ -49,7 +51,14 @@ namespace Microsoft.Build.Evaluation
 
         protected FileMatcher FileMatcher => EvaluationContext.FileMatcher;
 
-        public LazyItemEvaluator(IEvaluatorData<P, I, M, D> data, IItemFactory<I, I> itemFactory, LoggingContext loggingContext, EvaluationProfiler evaluationProfiler, EvaluationContext evaluationContext)
+        public LazyItemEvaluator(
+            IEvaluatorData<P, I, M, D> data,
+            IItemFactory<I, I> itemFactory,
+            LoggingContext loggingContext,
+            EvaluationProfiler evaluationProfiler,
+            EvaluationContext evaluationContext,
+            ProjectEvaluationStage evaluationStage,
+            int submissionId)
         {
             _outerEvaluatorData = data;
             _outerExpander = new Expander<P, I>(_outerEvaluatorData, _outerEvaluatorData, evaluationContext, loggingContext);
@@ -58,6 +67,8 @@ namespace Microsoft.Build.Evaluation
             _itemFactory = itemFactory;
             _loggingContext = loggingContext;
             _evaluationProfiler = evaluationProfiler;
+            _evaluationStage = evaluationStage;
+            _submissionId = submissionId;
 
             EvaluationContext = evaluationContext;
         }

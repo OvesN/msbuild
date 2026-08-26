@@ -11,6 +11,7 @@ using Microsoft.Build.Eventing;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
+using Microsoft.Build.TelemetryInfra;
 using Microsoft.CodeAnalysis.Collections;
 
 namespace Microsoft.Build.Evaluation
@@ -112,27 +113,60 @@ namespace Microsoft.Build.Evaluation
                                 excludePatternsForGlobs = BuildExcludePatternsForGlobs(globsToIgnore, excludePatterns);
                             }
 
-                            string[] includeSplitFilesEscaped;
+                            string[] includeSplitFilesEscaped = [];
                             if (MSBuildEventSource.Log.IsEnabled())
                             {
                                 MSBuildEventSource.Log.ExpandGlobStart(_rootDirectory ?? string.Empty, glob, string.Join(", ", excludePatternsForGlobs));
                             }
 
-                            using (_lazyEvaluator?._evaluationProfiler.TrackGlob(_rootDirectory, glob, excludePatternsForGlobs))
+                            EvaluationMetrics.ItemGlobMetricState metricState = EvaluationMetrics.ItemGlobStart();
+                            bool recursive = metricState.IsEnabled && glob.IndexOf("**", StringComparison.Ordinal) >= 0;
+                            long completionTimestamp = 0;
+                            try
                             {
-                                includeSplitFilesEscaped = EngineFileUtilities.GetFileListEscaped(
-                                    _rootDirectory,
-                                    glob,
-                                    excludePatternsForGlobs,
-                                    fileMatcher: FileMatcher,
-                                    loggingMechanism: _lazyEvaluator?._loggingContext,
-                                    includeLocation: _itemElement.IncludeLocation,
-                                    excludeLocation: _itemElement.ExcludeLocation);
+                                using (_lazyEvaluator?._evaluationProfiler.TrackGlob(_rootDirectory, glob, excludePatternsForGlobs))
+                                {
+                                    includeSplitFilesEscaped = EngineFileUtilities.GetFileListEscaped(
+                                        _rootDirectory,
+                                        glob,
+                                        excludePatternsForGlobs,
+                                        fileMatcher: FileMatcher,
+                                        loggingMechanism: _lazyEvaluator?._loggingContext,
+                                        includeLocation: _itemElement.IncludeLocation,
+                                        excludeLocation: _itemElement.ExcludeLocation);
+                                    if (metricState.IsEnabled)
+                                    {
+                                        completionTimestamp = EvaluationMetrics.ItemGlobComplete(metricState);
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                EvaluationMetrics.ItemGlobCancel(metricState);
+                                throw;
                             }
 
-                            if (MSBuildEventSource.Log.IsEnabled())
+                            try
                             {
-                                MSBuildEventSource.Log.ExpandGlobStop(_rootDirectory ?? string.Empty, glob, string.Join(", ", excludePatternsForGlobs));
+                                if (MSBuildEventSource.Log.IsEnabled())
+                                {
+                                    MSBuildEventSource.Log.ExpandGlobStop(_rootDirectory ?? string.Empty, glob, string.Join(", ", excludePatternsForGlobs));
+                                }
+                            }
+                            finally
+                            {
+                                if (metricState.IsEnabled)
+                                {
+                                    LazyItemEvaluator<P, I, M, D> lazyEvaluator = _lazyEvaluator!;
+                                    EvaluationMetrics.ItemGlobStop(
+                                        metricState,
+                                        completionTimestamp,
+                                        lazyEvaluator._evaluationStage,
+                                        lazyEvaluator._submissionId,
+                                        recursive,
+                                        excludePatternsForGlobs.Count,
+                                        includeSplitFilesEscaped.Length);
+                                }
                             }
 
                             foreach (string includeSplitFileEscaped in includeSplitFilesEscaped)
