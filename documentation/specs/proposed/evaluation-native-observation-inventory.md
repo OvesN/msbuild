@@ -147,7 +147,7 @@ before root source acquisition rather than intercepting repeated reads.
 | Toolset definition locations | Request | `ToolsetDefinitionLocations` | Exact flags controlling Registry/config discovery |
 | Project load settings | Request | `ProjectOptions.LoadSettings`, `BuildParameters.ProjectLoadSettings` | Exact `ProjectLoadSettings` flags |
 | Source load policy | Request/effective | PRE/source entry points | `autoReloadFromDisk`, preserve-formatting, read-only, and related load policy |
-| Parser behavior | Process/request ambient | `ParserIgnoreConfiguration`, `MSBUILD_PARSE_CONFIG`, `Directory.Parse.config` handling | Effective parser-ignore configuration identity; supporting source record for any config file consumed |
+| Parser behavior | Process/request ambient | `ParserIgnoreConfiguration`, `MSBUILD_PARSE_CONFIG`, `Directory.Parse.config` handling | Effective parser-ignore configuration identity; raw-byte hash and parse outcome for every config file consumed, including malformed XML |
 | Evaluation stage | Request | `ProjectOptions.EvaluationStage` | Exact `ProjectEvaluationStage` |
 | Interactive mode | Request/effective | evaluation entry point, `BuildParameters`, `NuGetInteractive` coupling | Effective interactive booleans |
 | Visual Studio request mode | Request/effective | `BuildingInsideVisualStudio`, evaluator `_isRunningInVisualStudio` | Effective value passed to SDK resolution |

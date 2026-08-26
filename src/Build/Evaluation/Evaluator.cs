@@ -572,12 +572,27 @@ namespace Microsoft.Build.Evaluation
                                 EvaluationPathKind.File,
                                 bool.TryParse(observation.Result, out bool exists) && exists);
                             break;
-                        case "ContentHash":
+                        case "RawContentHash":
                             _observationSession.RecordFileRead(
                                 observation.Request,
                                 observation.Result,
-                                isVerifiable: false,
-                                hashKind: EvaluationContentHashKind.ParsedXml);
+                                isVerifiable: true,
+                                hashKind: EvaluationContentHashKind.RawBytes);
+                            break;
+                        case "ParseOutcome":
+                            _observationSession.RecordExternalInput(
+                                EvaluationExternalInputKind.ParserConfiguration,
+                                "ParseOutcome",
+                                observation.Request,
+                                observation.Result);
+                            break;
+                        case "LoadFailure":
+                            _observationSession.RecordExternalInput(
+                                EvaluationExternalInputKind.ParserConfiguration,
+                                "LoadFailure",
+                                observation.Request,
+                                observation.Result);
+                            _observationSession.RecordOperationFailure();
                             break;
                         case "UpwardSearchCandidate":
                             parserCandidates.Add(observation.Request);
