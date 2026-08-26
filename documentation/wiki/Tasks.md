@@ -25,6 +25,11 @@ A task is a class implementing [`ITask`](https://github.com/dotnet/msbuild/blob/
     - Use `ITaskItem`/`ITaskItem[]` when the task needs item **metadata** (e.g. `Identity`, `RecursiveDir`, or custom metadata) in addition to the item spec.
     - Use `ITaskItem<T>` (e.g. `ITaskItem<AbsolutePath>`, `ITaskItem<FileInfo>`, `ITaskItem<DirectoryInfo>`) when you need **both** item metadata **and** the strongly-typed, pre-rooted value — the `Value` property exposes the parsed `T` while the item still carries its metadata. Prefer this over taking a bare `ITaskItem` and re-parsing `ItemSpec` yourself.
     - Prefer the scalar path types (`AbsolutePath`/`FileInfo`/`DirectoryInfo`) over `string` even for optional parameters; they make the task's intent explicit and centralize rooting in the engine.
+    - In-box examples:
+      - `VerifyFileHash.File` uses `AbsolutePath` for a scalar path.
+      - `ZipDirectory.DestinationFile` and `SourceDirectory` use `ITaskItem<FileInfo>` and `ITaskItem<DirectoryInfo>` for typed paths with item semantics.
+      - `GetFileHash.Files` uses `ITaskItem<AbsolutePath>[]` for a typed item array whose metadata is updated and returned.
+    - See [Using the MSBuild task analyzer](Using-MSBuild-Task-Analyzer.md) for an end-to-end migration workflow and input-validation guidance.
   - The properties can have attributes `[Required]` which causes the engine to check that it has a value when the task is run and `[Output]` which exposes the property to be used again in XML
 
 - Tasks have the `Log` property set by the engine to log messages/errors/warnings.

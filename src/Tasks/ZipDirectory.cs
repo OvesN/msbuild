@@ -11,7 +11,7 @@ using Microsoft.Build.Utilities;
 namespace Microsoft.Build.Tasks
 {
     [MSBuildMultiThreadableTask]
-    public sealed class ZipDirectory : TaskExtension, IIncrementalTask, IMultiThreadableTask
+    public sealed class ZipDirectory : TaskExtension, IIncrementalTask
     {
         public const string CompressionLevelOptimal = "Optimal";
         public const string CompressionLevelFastest = "Fastest";
@@ -24,10 +24,10 @@ namespace Microsoft.Build.Tasks
         public const string CompressionLevelSmallestSize = "SmallestSize";
 
         /// <summary>
-        /// Gets or sets a <see cref="ITaskItem"/> containing the full path to the destination file to create.
+        /// Gets or sets a typed task item containing the destination file to create.
         /// </summary>
         [Required]
-        public ITaskItem DestinationFile { get; set; } = null!;
+        public ITaskItem<FileInfo> DestinationFile { get; set; } = null!;
 
         /// <summary>
         /// Gets or sets a value indicating whether the destination file should be overwritten.
@@ -35,10 +35,10 @@ namespace Microsoft.Build.Tasks
         public bool Overwrite { get; set; }
 
         /// <summary>
-        /// Gets or sets a <see cref="ITaskItem"/> containing the full path to the source directory to create a zip archive from.
+        /// Gets or sets a typed task item containing the source directory to create a zip archive from.
         /// </summary>
         [Required]
-        public ITaskItem SourceDirectory { get; set; } = null!;
+        public ITaskItem<DirectoryInfo> SourceDirectory { get; set; } = null!;
 
         /// <summary>
         /// Question the incremental nature of this task.
@@ -58,44 +58,35 @@ namespace Microsoft.Build.Tasks
         /// </remarks>
         public string? CompressionLevel { get; set; }
 
-        /// <inheritdoc />
-        public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
-
         public override bool Execute()
         {
-            AbsolutePath sourceDirectoryAbsolutePath = TaskEnvironment.GetAbsolutePath(SourceDirectory.ItemSpec);
-            DirectoryInfo sourceDirectory = new DirectoryInfo(sourceDirectoryAbsolutePath);
-
-            if (!sourceDirectory.Exists)
+            if (!SourceDirectory.Value.Exists)
             {
-                Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorDirectoryDoesNotExist", sourceDirectory.FullName);
+                Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorDirectoryDoesNotExist", SourceDirectory.Value.FullName);
                 return false;
             }
-
-            AbsolutePath destinationFileAbsolutePath = TaskEnvironment.GetAbsolutePath(DestinationFile.ItemSpec);
-            FileInfo destinationFile = new FileInfo(destinationFileAbsolutePath);
 
             BuildEngine3.Yield();
 
             try
             {
-                if (destinationFile.Exists)
+                if (DestinationFile.Value.Exists)
                 {
                     if (!Overwrite || FailIfNotIncremental)
                     {
-                        Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorFileExists", destinationFile.FullName);
+                        Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorFileExists", DestinationFile.Value.FullName);
 
                         return false;
                     }
 
                     try
                     {
-                        File.Delete(destinationFile.FullName);
+                        File.Delete(DestinationFile.Value.FullName);
                     }
                     catch (Exception e)
                     {
-                        string lockedFileMessage = LockCheck.GetLockedFileMessage(destinationFile.FullName);
-                        Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorFailed", sourceDirectory.FullName, destinationFile.FullName, e.Message, lockedFileMessage);
+                        string lockedFileMessage = LockCheck.GetLockedFileMessage(DestinationFile.Value.FullName);
+                        Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorFailed", SourceDirectory.Value.FullName, DestinationFile.Value.FullName, e.Message, lockedFileMessage);
 
                         return false;
                     }
@@ -105,18 +96,18 @@ namespace Microsoft.Build.Tasks
                 {
                     if (FailIfNotIncremental)
                     {
-                        Log.LogErrorFromResources("ZipDirectory.Comment", sourceDirectory.FullName, destinationFile.FullName);
+                        Log.LogErrorFromResources("ZipDirectory.Comment", SourceDirectory.Value.FullName, DestinationFile.Value.FullName);
                     }
                     else
                     {
-                        Log.LogMessageFromResources(MessageImportance.High, "ZipDirectory.Comment", sourceDirectory.FullName, destinationFile.FullName);
+                        Log.LogMessageFromResources(MessageImportance.High, "ZipDirectory.Comment", SourceDirectory.Value.FullName, DestinationFile.Value.FullName);
                         if (CompressionLevel is null)
                         {
-                            ZipFile.CreateFromDirectory(sourceDirectory.FullName, destinationFile.FullName);
+                            ZipFile.CreateFromDirectory(SourceDirectory.Value.FullName, DestinationFile.Value.FullName);
                         }
                         else if (TryParseCompressionLevel(CompressionLevel, out CompressionLevel? compressionLevel))
                         {
-                            ZipFile.CreateFromDirectory(sourceDirectory.FullName, destinationFile.FullName, compressionLevel.Value, includeBaseDirectory: false);
+                            ZipFile.CreateFromDirectory(SourceDirectory.Value.FullName, DestinationFile.Value.FullName, compressionLevel.Value, includeBaseDirectory: false);
                         }
                         else
                         {
@@ -132,13 +123,13 @@ namespace Microsoft.Build.Tasks
                                 Log.LogWarningWithCodeFromResources("ZipDirectory.ErrorInvalidCompressionLevel", CompressionLevel);
                             }
 
-                            ZipFile.CreateFromDirectory(sourceDirectory.FullName, destinationFile.FullName);
+                            ZipFile.CreateFromDirectory(SourceDirectory.Value.FullName, DestinationFile.Value.FullName);
                         }
                     }
                 }
                 catch (Exception e)
                 {
-                    Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorFailed", sourceDirectory.FullName, destinationFile.FullName, e.Message, string.Empty);
+                    Log.LogErrorWithCodeFromResources("ZipDirectory.ErrorFailed", SourceDirectory.Value.FullName, DestinationFile.Value.FullName, e.Message, string.Empty);
                 }
             }
             finally

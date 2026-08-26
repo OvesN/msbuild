@@ -19,7 +19,7 @@ namespace Microsoft.Build.Tasks
     /// Computes the checksum for a single file.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    public sealed class GetFileHash : TaskExtension, ICancelableTask, IMultiThreadableTask
+    public sealed class GetFileHash : TaskExtension, ICancelableTask
     {
         internal const string _defaultFileHashAlgorithm = "SHA256";
         internal const string _hashEncodingHex = "hex";
@@ -36,7 +36,7 @@ namespace Microsoft.Build.Tasks
         /// The files to be hashed.
         /// </summary>
         [Required]
-        public ITaskItem[] Files { get; set; }
+        public ITaskItem<AbsolutePath>[] Files { get; set; }
 
         /// <summary>
         /// The algorithm. Allowed values: SHA256, SHA384, SHA512. Default = SHA256.
@@ -65,9 +65,6 @@ namespace Microsoft.Build.Tasks
         [Output]
         public ITaskItem[] Items { get; set; }
 
-        /// <inheritdoc />
-        public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
-
         public override bool Execute()
         {
             if (!SupportedAlgorithms.TryGetValue(Algorithm, out var algorithmFactory))
@@ -87,16 +84,15 @@ namespace Microsoft.Build.Tasks
             var writeLock = new object();
             Parallel.For(0, Files.Length, parallelOptions, index =>
             {
-                var file = Files[index];
-                AbsolutePath filePath = TaskEnvironment.GetAbsolutePath(file.ItemSpec);
+                ITaskItem<AbsolutePath> file = Files[index];
 
-                if (!FileSystems.Default.FileExists(filePath))
+                if (!FileSystems.Default.FileExists(file.Value))
                 {
                     Log.LogErrorWithCodeFromResources("FileHash.FileNotFound", file.ItemSpec);
                     return;
                 }
 
-                var hash = ComputeHash(algorithmFactory, filePath, _cancellationTokenSource.Token);
+                var hash = ComputeHash(algorithmFactory, file.Value, _cancellationTokenSource.Token);
                 var encodedHash = EncodeHash(encoding, hash);
 
                 lock (writeLock)

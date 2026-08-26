@@ -3,6 +3,7 @@
 
 using System;
 using System.IO;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Tasks;
 using Microsoft.Build.Tasks.UnitTests.TestResources;
 using Shouldly;
@@ -26,8 +27,7 @@ namespace Microsoft.Build.UnitTests
         {
             new VerifyFileHash
             {
-                TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
-                File = Path.Combine(AppContext.BaseDirectory, "TestResources", "lorem.bin"),
+                File = new AbsolutePath(Path.Combine(AppContext.BaseDirectory, "TestResources", "lorem.bin")),
                 BuildEngine = _mockEngine,
                 Algorithm = "SHA256",
                 HashEncoding = "red",
@@ -45,8 +45,7 @@ namespace Microsoft.Build.UnitTests
         {
             new VerifyFileHash
             {
-                TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
-                File = Path.Combine(AppContext.BaseDirectory, "TestResources", "lorem.bin"),
+                File = new AbsolutePath(Path.Combine(AppContext.BaseDirectory, "TestResources", "lorem.bin")),
                 BuildEngine = _mockEngine,
                 Algorithm = "BANANA",
                 Hash = "xyz",
@@ -64,8 +63,7 @@ namespace Microsoft.Build.UnitTests
         {
             new VerifyFileHash
             {
-                TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
-                File = Path.Combine(AppContext.BaseDirectory, "this_does_not_exist.txt"),
+                File = new AbsolutePath(Path.Combine(AppContext.BaseDirectory, "this_does_not_exist.txt")),
                 BuildEngine = _mockEngine,
                 Algorithm = "BANANA",
                 Hash = "xyz",
@@ -86,8 +84,7 @@ namespace Microsoft.Build.UnitTests
         {
             VerifyFileHash task = new VerifyFileHash
             {
-                TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
-                File = Path.Combine(AppContext.BaseDirectory, "TestResources", "lorem.bin"),
+                File = new AbsolutePath(Path.Combine(AppContext.BaseDirectory, "TestResources", "lorem.bin")),
                 BuildEngine = _mockEngine,
                 Algorithm = algoritm,
                 Hash = hash,
@@ -106,8 +103,7 @@ namespace Microsoft.Build.UnitTests
         {
             VerifyFileHash task = new VerifyFileHash
             {
-                TaskEnvironment = TaskEnvironmentHelper.CreateForTest(),
-                File = testBinary.FilePath,
+                File = new AbsolutePath(testBinary.FilePath),
                 BuildEngine = _mockEngine,
                 Algorithm = testBinary.HashAlgorithm,
                 Hash = testBinary.FileHash,

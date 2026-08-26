@@ -14,16 +14,13 @@ namespace Microsoft.Build.Tasks
     /// Verifies that a file matches the expected file hash.
     /// </summary>
     [MSBuildMultiThreadableTask]
-    public sealed class VerifyFileHash : TaskExtension, ICancelableTask, IMultiThreadableTask
+    public sealed class VerifyFileHash : TaskExtension, ICancelableTask
     {
-        /// <inheritdoc />
-        public TaskEnvironment TaskEnvironment { get; set; } = TaskEnvironment.Fallback;
-
         /// <summary>
         /// The file path.
         /// </summary>
         [Required]
-        public string File { get; set; }
+        public AbsolutePath File { get; set; }
 
         /// <summary>
         /// The expected hash of the file.
@@ -43,11 +40,9 @@ namespace Microsoft.Build.Tasks
 
         public override bool Execute()
         {
-            AbsolutePath filePath = TaskEnvironment.GetAbsolutePath(File);
-
-            if (!FileSystems.Default.FileExists(filePath))
+            if (!FileSystems.Default.FileExists(File))
             {
-                Log.LogErrorWithCodeFromResources("FileHash.FileNotFound", filePath.OriginalValue);
+                Log.LogErrorWithCodeFromResources("FileHash.FileNotFound", File.OriginalValue);
                 return false;
             }
 
@@ -63,14 +58,14 @@ namespace Microsoft.Build.Tasks
                 return false;
             }
 
-            byte[] hash = GetFileHash.ComputeHash(algorithmFactory, filePath, _cancellationTokenSource.Token);
+            byte[] hash = GetFileHash.ComputeHash(algorithmFactory, File, _cancellationTokenSource.Token);
             string actualHash = GetFileHash.EncodeHash(encoding, hash);
             var comparison = encoding == Tasks.HashEncoding.Hex
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
             if (!string.Equals(actualHash, Hash, comparison))
             {
-                Log.LogErrorWithCodeFromResources("VerifyFileHash.HashMismatch", filePath.OriginalValue, Algorithm, Hash, actualHash);
+                Log.LogErrorWithCodeFromResources("VerifyFileHash.HashMismatch", File.OriginalValue, Algorithm, Hash, actualHash);
                 return false;
             }
 
