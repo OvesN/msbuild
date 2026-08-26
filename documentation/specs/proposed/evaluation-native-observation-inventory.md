@@ -182,8 +182,8 @@ evaluation.
 
 | Input | Observation seam | Required record |
 | --- | --- | --- |
-| Root project file | source acquisition, `ProjectRootElement.LoadDocument`, `XmlReaderExtension` | Root role, logical path, provider, consumed-content identity, encoding/BOM where applicable |
-| Imported project file | evaluator import loader, `ProjectRootElementCache` | Import role, importing location, logical path/provider, consumed-content identity |
+| Root project file | source acquisition, `ProjectRootElement.LoadDocument`, `XmlReaderExtension` | Root role, logical path, provider, consumed-content identity, encoding/BOM, and load-time `LastWriteTimeUtc` where applicable |
+| Imported project file | evaluator import loader, `ProjectRootElementCache` | Import role, importing location, logical path/provider, consumed-content identity, and load-time `LastWriteTimeUtc` |
 | PRE cache hit | `ProjectRootElementCache.Get` / `TryGet` | PRE object identity/version plus the source stamp captured when it was loaded |
 | In-memory `ProjectRootElement` | `Project.FromProjectRootElement`, PRE object model | Object/provider identity and version; use `ProjectRootElementLink.Version` for linked hosts |
 | `XmlReader` / `TextReader` source | `Project.FromXmlReader` and source loaders | Host source identity/version and consumed-character fingerprint; otherwise non-cacheable |
@@ -193,6 +193,10 @@ evaluation.
 
 For disk sources, compute identity from the bytes consumed by the parser. Do not reopen the
 file after evaluation to reconstruct the dependency.
+
+Capture the file timestamp before and after parsing. A change during the read marks the
+source incomplete. Object-model saves invalidate the raw-byte source stamp so a later
+observation cannot combine an old byte hash with new encoding or timestamp state.
 
 The PRE cache should eventually retain:
 
@@ -619,7 +623,7 @@ candidates retain the order consumed by evaluation.
 | --- | --- |
 | Session lifetime | Per-evaluation session plus load-time source stamps; source loading occurs before the evaluator session but hashes bytes as they are consumed |
 | Request snapshot | Typed immutable snapshot includes global properties, load/evaluation policy, host/runtime semantics, feature waves, and result-affecting escape hatches |
-| Root/import sources | Raw-byte hash and encoding for disk sources; object/link identity and version for in-memory/linked sources; opaque reader providers block reuse |
+| Root/import sources | Raw-byte hash, encoding, and consumed last-write time for disk sources; object/link identity and version for in-memory/linked sources; opaque reader providers block reuse |
 | Full text/byte reads | Typed hash domains distinguish raw bytes, decoded text, decoded line sequences, and parsed XML |
 | Streams/readers | Marked incomplete unless a semantic owner or provider supplies full-content identity |
 | Probes | Provider-tagged file/directory/file-or-directory outcomes; swallowed I/O failures are recorded as ambiguous |

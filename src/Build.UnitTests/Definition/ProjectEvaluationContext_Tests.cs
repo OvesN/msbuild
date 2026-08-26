@@ -737,9 +737,116 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(6);
+            report.SchemaVersion.ShouldBe(7);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsSourceTimestampUsedByMSBuildAllProjects()
+        {
+            var reports = new List<EvaluationObservationReport>();
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                reports.Add);
+            string importFile = _env.CreateFile(
+                "timestamp.props",
+                "<Project><PropertyGroup><Imported>true</Imported></PropertyGroup></Project>").Path;
+            string projectFile = _env.CreateFile(
+                "timestamp.proj",
+                "<Project><Import Project=\"timestamp.props\" /></Project>").Path;
+            DateTime initialTime = DateTime.UtcNow.AddMinutes(-10);
+            File.SetLastWriteTimeUtc(projectFile, initialTime);
+            File.SetLastWriteTimeUtc(importFile, initialTime.AddMinutes(1));
+            DateTime firstProjectTime = File.GetLastWriteTimeUtc(projectFile);
+            DateTime importTime = File.GetLastWriteTimeUtc(importFile);
+
+            Project firstProject = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            firstProject.GetPropertyValue(Constants.MSBuildAllProjectsPropertyName)
+                .ShouldStartWith(importFile);
+
+            File.SetLastWriteTimeUtc(projectFile, initialTime.AddMinutes(2));
+            DateTime secondProjectTime = File.GetLastWriteTimeUtc(projectFile);
+            Project secondProject = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            secondProject.GetPropertyValue(Constants.MSBuildAllProjectsPropertyName)
+                .ShouldStartWith(projectFile);
+            reports.Count.ShouldBe(2);
+
+            EvaluationProjectSourceObservation firstRoot = reports[0].ProjectSources.Single(
+                observation => observation.Role == EvaluationProjectSourceRole.Root);
+            EvaluationProjectSourceObservation firstImport = reports[0].ProjectSources.Single(
+                observation => observation.Role == EvaluationProjectSourceRole.Import);
+            EvaluationProjectSourceObservation secondRoot = reports[1].ProjectSources.Single(
+                observation => observation.Role == EvaluationProjectSourceRole.Root);
+
+            firstRoot.HasLastWriteTimeUtc.ShouldBeTrue();
+            firstRoot.LastWriteTimeUtcTicks.ShouldBe(firstProjectTime.Ticks);
+            firstImport.LastWriteTimeUtcTicks.ShouldBe(importTime.Ticks);
+            secondRoot.LastWriteTimeUtcTicks.ShouldBe(secondProjectTime.Ticks);
+            secondRoot.ContentHash.ShouldBe(firstRoot.ContentHash);
+        }
+
+        [Fact]
+        public void EvaluationObservationMarksSourceTimestampChangeDuringReadIncomplete()
+        {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile("timestamp-race.proj", "<Project />").Path;
+            DateTime initialTime = DateTime.UtcNow.AddMinutes(-10);
+            File.SetLastWriteTimeUtc(projectFile, initialTime);
+            ProjectRootElement.TestOnlyHookAfterSourceRead =
+                path => File.SetLastWriteTimeUtc(path, initialTime.AddMinutes(1));
+
+            try
+            {
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                });
+            }
+            finally
+            {
+                ProjectRootElement.TestOnlyHookAfterSourceRead = null;
+            }
+
+            EvaluationProjectSourceObservation root = report.ProjectSources.Single(
+                observation => observation.Role == EvaluationProjectSourceRole.Root);
+            root.TimestampWasStableDuringRead.ShouldBeFalse();
+            (report.Reasons & EvaluationObservationReason.ProjectSourceChangedDuringRead)
+                .ShouldBe(EvaluationObservationReason.ProjectSourceChangedDuringRead);
+            report.Categories.ShouldContain(observation =>
+                observation.Category == EvaluationObservationCategory.ProjectSource &&
+                observation.State == EvaluationObservationCategoryState.Incomplete);
+        }
+
+        [Fact]
+        public void EvaluationObservationUsesTimestampCapturedByCachedProjectRootElement()
+        {
+            string projectFile = _env.CreateFile("cached-timestamp.proj", "<Project />").Path;
+            DateTime initialTime = DateTime.UtcNow.AddMinutes(-10);
+            File.SetLastWriteTimeUtc(projectFile, initialTime);
+            DateTime capturedTime = File.GetLastWriteTimeUtc(projectFile);
+            ProjectRootElement root = ProjectRootElement.Open(projectFile);
+            File.SetLastWriteTimeUtc(projectFile, initialTime.AddMinutes(1));
+
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordProjectSource(root, EvaluationProjectSourceRole.Root);
+            EvaluationProjectSourceObservation source =
+                session.Complete(evaluationSucceeded: true).ProjectSources.ShouldHaveSingleItem();
+
+            source.HasLastWriteTimeUtc.ShouldBeTrue();
+            source.LastWriteTimeUtcTicks.ShouldBe(capturedTime.Ticks);
+            source.LastWriteTimeUtcTicks.ShouldNotBe(File.GetLastWriteTimeUtc(projectFile).Ticks);
         }
 
         [Fact]
@@ -772,7 +879,7 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
-        public void EvaluationObservationKeepsCommittedSourceHashAfterFailedReload()
+        public void EvaluationObservationInvalidatesSourceHashAfterFailedReload()
         {
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(enabled: true);
 
@@ -787,7 +894,36 @@ namespace Microsoft.Build.UnitTests.Definition
                 () => root.Reload(throwIfUnsavedChanges: false));
 
             root.Version.ShouldBe(originalVersion);
-            root.EvaluationObservationSourceHash.ShouldBe(originalHash);
+            originalHash.ShouldNotBeNull();
+            root.EvaluationObservationSourceHash.ShouldBeNull();
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordProjectSource(root, EvaluationProjectSourceRole.Root);
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            report.ProjectSources.ShouldHaveSingleItem().HashKind
+                .ShouldBe(EvaluationContentHashKind.ParsedXml);
+            (report.Reasons & EvaluationObservationReason.ParsedProjectSourceOnly)
+                .ShouldBe(EvaluationObservationReason.ParsedProjectSourceOnly);
+        }
+
+        [Fact]
+        public void EvaluationObservationInvalidatesRawSourceHashAfterSave()
+        {
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(enabled: true);
+            string projectFile = _env.CreateFile("saved-source.proj", "<Project />").Path;
+            ProjectRootElement root = ProjectRootElement.Open(projectFile);
+            root.EvaluationObservationSourceHash.ShouldNotBeNull();
+
+            root.Save(Encoding.UTF32);
+
+            root.EvaluationObservationSourceHash.ShouldBeNull();
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordProjectSource(root, EvaluationProjectSourceRole.Root);
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            EvaluationProjectSourceObservation source = report.ProjectSources.ShouldHaveSingleItem();
+            source.HashKind.ShouldBe(EvaluationContentHashKind.ParsedXml);
+            source.HasLastWriteTimeUtc.ShouldBeTrue();
+            (report.Reasons & EvaluationObservationReason.ParsedProjectSourceOnly)
+                .ShouldBe(EvaluationObservationReason.ParsedProjectSourceOnly);
         }
 
         [Fact]
@@ -804,6 +940,8 @@ namespace Microsoft.Build.UnitTests.Definition
             source.Version.ShouldBe(7);
             source.ContentHash.ShouldBeNull();
             source.Provider.ShouldContain(nameof(FakeProjectRootElementLink));
+            source.HasLastWriteTimeUtc.ShouldBeFalse();
+            source.TimestampWasStableDuringRead.ShouldBeTrue();
             (report.Reasons & EvaluationObservationReason.ParsedProjectSourceOnly)
                 .ShouldBe(EvaluationObservationReason.None);
             (report.Reasons & EvaluationObservationReason.UnversionedProjectRootElementCache)
@@ -823,6 +961,7 @@ namespace Microsoft.Build.UnitTests.Definition
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
             report.ProjectSources.ShouldHaveSingleItem().Provider.ShouldBe("XmlReader");
+            report.ProjectSources.ShouldHaveSingleItem().HasLastWriteTimeUtc.ShouldBeFalse();
             (report.Reasons & EvaluationObservationReason.UnversionedSourceProvider)
                 .ShouldBe(EvaluationObservationReason.UnversionedSourceProvider);
         }

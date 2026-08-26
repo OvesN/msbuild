@@ -24,7 +24,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 6;
+        private const int ObservationSchemaVersion = 7;
         private const int PropertyFunctionClassificationVersion = 1;
 
         [ThreadStatic]
@@ -447,6 +447,12 @@ namespace Microsoft.Build.Evaluation.Context
                         ? link.GetType().AssemblyQualifiedName
                         : source.EvaluationObservationSourceKind;
                     string sourceHash = source.EvaluationObservationSourceHash;
+                    DateTime? lastWriteTimeUtc =
+                        source.EvaluationObservationSourceKind == "Disk"
+                            ? source.EvaluationObservationLastWriteTimeUtc
+                            : null;
+                    bool timestampWasStableDuringRead =
+                        source.EvaluationObservationSourceTimestampStable;
                     string hash;
                     if (link is not null)
                     {
@@ -476,7 +482,10 @@ namespace Microsoft.Build.Evaluation.Context
                             ? EvaluationContentHashKind.RawBytes
                             : EvaluationContentHashKind.ParsedXml,
                         source.Encoding?.WebName,
-                        provider);
+                        provider,
+                        lastWriteTimeUtc.HasValue,
+                        lastWriteTimeUtc?.Ticks ?? 0,
+                        timestampWasStableDuringRead);
                     string key = string.Concat(((int)role).ToString(CultureInfo.InvariantCulture), "\0", path ?? source.GetHashCode().ToString(CultureInfo.InvariantCulture));
 
                     bool hadPriorObservation = _projectSources.TryGetValue(
@@ -484,13 +493,21 @@ namespace Microsoft.Build.Evaluation.Context
                         out EvaluationProjectSourceObservation prior);
                     if (hadPriorObservation &&
                         (prior.Version != observation.Version ||
-                         !string.Equals(prior.ContentHash, observation.ContentHash, StringComparison.Ordinal)))
+                         !string.Equals(prior.ContentHash, observation.ContentHash, StringComparison.Ordinal) ||
+                         prior.HasLastWriteTimeUtc != observation.HasLastWriteTimeUtc ||
+                         prior.LastWriteTimeUtcTicks != observation.LastWriteTimeUtcTicks ||
+                         prior.TimestampWasStableDuringRead != observation.TimestampWasStableDuringRead))
                     {
                         AddReason(EvaluationObservationReason.ConflictingObservation);
                     }
                     else
                     {
                         _projectSources[key] = observation;
+                    }
+
+                    if (!timestampWasStableDuringRead)
+                    {
+                        AddReason(EvaluationObservationReason.ProjectSourceChangedDuringRead);
                     }
 
                     if (source.FullPath is not null && hash is not null)
@@ -2429,6 +2446,7 @@ namespace Microsoft.Build.Evaluation.Context
                 case EvaluationObservationReason.UnversionedProjectRootElementCache:
                 case EvaluationObservationReason.UnversionedSourceProvider:
                 case EvaluationObservationReason.ParsedProjectSourceOnly:
+                case EvaluationObservationReason.ProjectSourceChangedDuringRead:
                     MarkCategory(EvaluationObservationCategory.ProjectSource, EvaluationObservationCategoryState.Incomplete);
                     break;
                 case EvaluationObservationReason.UnverifiableFileRead:

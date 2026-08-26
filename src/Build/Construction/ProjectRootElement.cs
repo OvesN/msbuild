@@ -46,6 +46,8 @@ namespace Microsoft.Build.Construction
     [DebuggerDisplay("{FullPath} #Children={Count} DefaultTargets={DefaultTargets} ToolsVersion={ToolsVersion} InitialTargets={InitialTargets} ExplicitlyLoaded={IsExplicitlyLoaded}")]
     public partial class ProjectRootElement : ProjectElementContainer
     {
+        internal static Action<string> TestOnlyHookAfterSourceRead { get; set; }
+
         // Constants for default (empty) project file.
         private const string EmptyProjectFileContent = "{0}<Project{1}{2}>\r\n</Project>";
         private const string EmptyProjectFileXmlDeclaration = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n";
@@ -144,6 +146,8 @@ namespace Microsoft.Build.Construction
         /// by an external means.
         /// </summary>
         private DateTime _lastWriteTimeWhenReadUtc;
+        private bool _hasLastWriteTimeWhenReadUtc;
+        private bool _evaluationObservationSourceTimestampStable = true;
 
         /// <summary>
         /// Reason it was last marked dirty; unlocalized, for debugging
@@ -733,6 +737,12 @@ namespace Microsoft.Build.Construction
             }
         }
         internal string EvaluationObservationSourceKind => _evaluationObservationSourceKind;
+        internal DateTime? EvaluationObservationLastWriteTimeUtc =>
+            Link is null && _hasLastWriteTimeWhenReadUtc
+                ? _lastWriteTimeWhenReadUtc
+                : null;
+        internal bool EvaluationObservationSourceTimestampStable =>
+            Link is not null || _evaluationObservationSourceTimestampStable;
 
         /// <summary>
         /// Gets a value indicating whether this PRE is known by its containing collection.
@@ -1608,6 +1618,8 @@ namespace Microsoft.Build.Construction
                 if (fileInfo != null)
                 {
                     _lastWriteTimeWhenReadUtc = fileInfo.LastWriteTimeUtc;
+                    _hasLastWriteTimeWhenReadUtc = true;
+                    _evaluationObservationSourceTimestampStable = true;
                     if (_lastWriteTimeWhenReadUtc > StreamTimeUtc)
                     {
                         StreamTimeUtc = null;
@@ -1615,6 +1627,7 @@ namespace Microsoft.Build.Construction
                 }
 
                 _versionOnDisk = Version;
+                PublishEvaluationObservationSourceStamp(contentHash: null);
             }
             if (MSBuildEventSource.Log.IsEnabled())
             {
@@ -1667,6 +1680,7 @@ namespace Microsoft.Build.Construction
 
             StreamTimeUtc = DateTime.UtcNow;
             _versionOnDisk = Version;
+            PublishEvaluationObservationSourceStamp(contentHash: null);
         }
 
         /// <summary>
@@ -1708,12 +1722,15 @@ namespace Microsoft.Build.Construction
             }
 
             string contentHash = null;
-            XmlDocumentWithLocation DocumentProducer(bool shouldPreserveFormatting) =>
-                LoadDocument(
+            XmlDocumentWithLocation DocumentProducer(bool shouldPreserveFormatting)
+            {
+                PublishEvaluationObservationSourceStamp(contentHash: null);
+                return LoadDocument(
                     path,
                     shouldPreserveFormatting,
                     ProjectRootElementCache.LoadProjectsReadOnly,
                     out contentHash);
+            }
             ReloadFrom(
                 DocumentProducer,
                 throwIfUnsavedChanges,
@@ -2168,6 +2185,11 @@ namespace Microsoft.Build.Construction
         {
             ErrorUtilities.VerifyThrowInternalRooted(fullPath);
             contentHash = null;
+            DateTime? lastWriteTimeBeforeRead = null;
+            if (EvaluationObservationSession.IsEnabled)
+            {
+                lastWriteTimeBeforeRead = FileUtilities.GetFileInfoNoThrow(fullPath)?.LastWriteTimeUtc;
+            }
 
             var document = new XmlDocumentWithLocation(loadAsReadOnly ? true : (bool?)null)
             {
@@ -2184,6 +2206,10 @@ namespace Microsoft.Build.Construction
                     document.Load(xtr.Reader);
                     contentHash = xtr.ContentHash;
                 }
+                if (EvaluationObservationSession.IsEnabled)
+                {
+                    TestOnlyHookAfterSourceRead?.Invoke(fullPath);
+                }
 
                 _projectFileLocation = ElementLocation.Create(fullPath);
                 _escapedFullPath = null;
@@ -2195,6 +2221,11 @@ namespace Microsoft.Build.Construction
                 }
 
                 _lastWriteTimeWhenReadUtc = FileUtilities.GetFileInfoNoThrow(fullPath).LastWriteTimeUtc;
+                _hasLastWriteTimeWhenReadUtc = true;
+                _evaluationObservationSourceTimestampStable =
+                    !EvaluationObservationSession.IsEnabled ||
+                    (lastWriteTimeBeforeRead.HasValue &&
+                     lastWriteTimeBeforeRead.Value == _lastWriteTimeWhenReadUtc);
                 if (StreamTimeUtc < _lastWriteTimeWhenReadUtc)
                 {
                     StreamTimeUtc = null;
