@@ -277,7 +277,8 @@ namespace Microsoft.Build.Evaluation.Context
             int entryCount,
             string entriesHash,
             string provider,
-            EvaluationEnumerationCompletion completion)
+            EvaluationEnumerationCompletion completion,
+            string optionsIdentity)
         {
             Path = path;
             SearchPattern = searchPattern;
@@ -288,6 +289,7 @@ namespace Microsoft.Build.Evaluation.Context
             EntriesHash = entriesHash;
             Provider = provider;
             Completion = completion;
+            OptionsIdentity = optionsIdentity;
         }
 
         internal string Path { get; }
@@ -299,6 +301,7 @@ namespace Microsoft.Build.Evaluation.Context
         internal string EntriesHash { get; }
         internal string Provider { get; }
         internal EvaluationEnumerationCompletion Completion { get; }
+        internal string OptionsIdentity { get; }
     }
 
     internal readonly struct EvaluationMetadataObservation
