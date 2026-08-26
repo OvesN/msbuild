@@ -39,6 +39,7 @@ namespace Microsoft.Build.Evaluation.Context
         UnversionedToolLocationHelperCache = 1L << 28,
         ObservationIncomplete = 1L << 29,
         UnversionedSourceProvider = 1L << 31,
+        ProjectSourceChangedDuringRead = 1L << 32,
     }
 
     internal enum EvaluationPathKind
@@ -375,7 +376,10 @@ namespace Microsoft.Build.Evaluation.Context
             string contentHash,
             EvaluationContentHashKind hashKind,
             string encoding,
-            string provider)
+            string provider,
+            bool hasLastWriteTimeUtc,
+            long lastWriteTimeUtcTicks,
+            bool timestampWasStableDuringRead)
         {
             Role = role;
             Path = path;
@@ -384,6 +388,9 @@ namespace Microsoft.Build.Evaluation.Context
             HashKind = hashKind;
             Encoding = encoding;
             Provider = provider;
+            HasLastWriteTimeUtc = hasLastWriteTimeUtc;
+            LastWriteTimeUtcTicks = lastWriteTimeUtcTicks;
+            TimestampWasStableDuringRead = timestampWasStableDuringRead;
         }
 
         internal EvaluationProjectSourceRole Role { get; }
@@ -393,6 +400,9 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationContentHashKind HashKind { get; }
         internal string Encoding { get; }
         internal string Provider { get; }
+        internal bool HasLastWriteTimeUtc { get; }
+        internal long LastWriteTimeUtcTicks { get; }
+        internal bool TimestampWasStableDuringRead { get; }
     }
 
     internal readonly struct EvaluationGlobObservation
