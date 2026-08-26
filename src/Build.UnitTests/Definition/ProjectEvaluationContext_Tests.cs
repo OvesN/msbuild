@@ -891,6 +891,135 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void EvaluationObservationRecordsMakeRelativePathResolution()
+        {
+            string requestedRoot = _env.CreateFolder().Path;
+            _env.SetCurrentDirectory(requestedRoot);
+            string canonicalRoot = Directory.GetCurrentDirectory();
+            string firstCurrentDirectory =
+                _env.CreateFolder(Path.Combine(canonicalRoot, "first")).Path;
+            string secondCurrentDirectory =
+                _env.CreateFolder(Path.Combine(firstCurrentDirectory, "nested")).Path;
+            string targetPath = Path.Combine(
+                _env.CreateFolder(Path.Combine(canonicalRoot, "target")).Path,
+                "target.txt");
+            var reports = new List<EvaluationObservationReport>();
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                reports.Add);
+            string projectFile = _env.CreateFile(
+                Path.Combine(canonicalRoot, "make-relative.proj"),
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Relative>$([MSBuild]::MakeRelative('relative-base', '{targetPath}'))</Relative>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            _env.SetCurrentDirectory(firstCurrentDirectory);
+            string firstEffectiveCurrentDirectory = Directory.GetCurrentDirectory();
+            Project firstProject = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+            string firstResult = firstProject.GetPropertyValue("Relative");
+
+            _env.SetCurrentDirectory(secondCurrentDirectory);
+            string secondEffectiveCurrentDirectory = Directory.GetCurrentDirectory();
+            Project secondProject = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+            string secondResult = secondProject.GetPropertyValue("Relative");
+
+            firstResult.ShouldNotBe(secondResult);
+            reports.Count.ShouldBe(2);
+            EvaluationExternalInputObservation firstResolution = reports[0].ExternalInputs.Single(
+                observation => observation.Operation == "MSBuild::MakeRelative.PathResolution");
+            EvaluationExternalInputObservation secondResolution = reports[1].ExternalInputs.Single(
+                observation => observation.Operation == "MSBuild::MakeRelative.PathResolution");
+            firstResolution.Request.ShouldBe($"First=relative-base\0Second={targetPath}");
+            secondResolution.Request.ShouldBe(firstResolution.Request);
+            firstResolution.Result.ShouldBe(
+                $"First={Path.Combine(firstEffectiveCurrentDirectory, "relative-base")}\0Second={targetPath}");
+            secondResolution.Result.ShouldBe(
+                $"First={Path.Combine(secondEffectiveCurrentDirectory, "relative-base")}\0Second={targetPath}");
+            reports.ShouldAllBe(report => report.PropertyFunctions.Any(observation =>
+                observation.ReceiverType == typeof(IntrinsicFunctions).FullName &&
+                observation.Member == "MakeRelative" &&
+                observation.Effects == EvaluationPropertyFunctionEffect.Ambient));
+        }
+
+        [WindowsOnlyFact]
+        public void EvaluationObservationRecordsMakeRelativeDriveRelativeResolution()
+        {
+            string requestedRoot = _env.CreateFolder().Path;
+            _env.SetCurrentDirectory(requestedRoot);
+            string effectiveCurrentDirectory = Directory.GetCurrentDirectory();
+            string driveRelativeBase =
+                Path.GetPathRoot(effectiveCurrentDirectory).Substring(0, 2) + "relative-base";
+            string targetPath = Path.Combine(effectiveCurrentDirectory, "target.txt");
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(effectiveCurrentDirectory, "drive-relative.proj"),
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Relative>$([MSBuild]::MakeRelative('{driveRelativeBase}', '{targetPath}'))</Relative>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            EvaluationExternalInputObservation resolution = report.ShouldNotBeNull().ExternalInputs.Single(
+                observation => observation.Operation == "MSBuild::MakeRelative.PathResolution");
+            resolution.Request.ShouldBe($"First={driveRelativeBase}\0Second={targetPath}");
+            resolution.Result.ShouldBe(
+                $"First={Path.GetFullPath(driveRelativeBase)}\0Second={targetPath}");
+        }
+
+        [Fact]
+        public void MakeRelativeIgnoresPathResolutionObserverFailure()
+        {
+            string basePath = _env.CreateFolder().Path;
+            string targetPath = Path.Combine(_env.CreateFolder().Path, "target.txt");
+            string expected = IntrinsicFunctions.MakeRelative(basePath, targetPath);
+            using IDisposable scope = EvaluationInputObserver.Enter(new ThrowingPathResolutionObserver());
+
+            IntrinsicFunctions.MakeRelative(basePath, targetPath).ShouldBe(expected);
+        }
+
+        [UnixOnlyFact]
+        public void MakeRelativeObservationDoesNotRequireCurrentDirectoryForRootedPaths()
+        {
+            string basePath = _env.CreateFolder().Path;
+            string targetPath = Path.Combine(_env.CreateFolder().Path, "target.txt");
+            string expected = IntrinsicFunctions.MakeRelative(basePath, targetPath);
+            string originalCurrentDirectory = Directory.GetCurrentDirectory();
+            string deletedCurrentDirectory = _env.CreateFolder().Path;
+            Directory.SetCurrentDirectory(deletedCurrentDirectory);
+            Directory.Delete(deletedCurrentDirectory);
+
+            try
+            {
+                using IDisposable scope = EvaluationInputObserver.Enter(new ThrowingPathResolutionObserver());
+                IntrinsicFunctions.MakeRelative(basePath, targetPath).ShouldBe(expected);
+            }
+            finally
+            {
+                Directory.SetCurrentDirectory(originalCurrentDirectory);
+            }
+        }
+
+        [Fact]
         public void EvaluationObservationRecordsEnvironmentAndPropertyFunctions()
         {
             _env.SetEnvironmentVariable("OBSERVED_ENVIRONMENT_INPUT", "environment-value");
@@ -972,7 +1101,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(9);
+            report.SchemaVersion.ShouldBe(10);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -3033,6 +3162,51 @@ namespace Microsoft.Build.UnitTests.Definition
         private sealed class ThrowingProbeFileSystem : TestFileSystemBase
         {
             public override bool FileExists(string path) => throw new IOException("Probe failed.");
+        }
+
+        private sealed class ThrowingPathResolutionObserver : IEvaluationInputObserver
+        {
+            public bool RetainDetails => false;
+
+            public void RecordPathProbe(string path, EvaluationPathProbeKind kind, bool exists)
+            {
+            }
+
+            public void RecordAmbiguousPathProbe(string path, EvaluationPathProbeKind kind)
+            {
+            }
+
+            public void RecordItemMetadata(
+                string itemSpec,
+                string modifier,
+                string baseDirectory,
+                string value)
+            {
+            }
+
+            public void RecordPathAdjustment(string value, string baseDirectory, string result)
+            {
+            }
+
+            public void RecordPathResolution(
+                string operation,
+                string firstInput,
+                string secondInput,
+                string firstResult,
+                string secondResult)
+            {
+                throw new InvalidOperationException("Test-only observer failure.");
+            }
+
+            public void RecordSearch(
+                string kind,
+                string request,
+                IReadOnlyList<string> candidates,
+                int candidateCount,
+                string candidatesFingerprint,
+                string selected)
+            {
+            }
         }
 
         private void EvaluateProjects(IEnumerable<string> projectContents, EvaluationContext context, Action<Project> afterEvaluationAction)

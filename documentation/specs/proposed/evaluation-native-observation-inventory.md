@@ -369,6 +369,7 @@ Important families include:
 | `System.IO.File` / `Directory` reads, probes, metadata, and enumeration | Route to the matching filesystem record |
 | `FileInfo` / `DirectoryInfo` instance members | Classify each external field/read; no type-wide assumption |
 | `Path.GetFullPath` and equivalent normalization | Record current/base directory and exact result |
+| `[MSBuild]::MakeRelative` | Ambient; record both exact `GetFullPath` inputs/results at the normalization seam plus the final function result |
 | `Path.GetTempPath` | Ambient |
 | `Path.GetRandomFileName` | Volatile |
 | `Path.GetTempFileName` | Volatile plus side effect |
