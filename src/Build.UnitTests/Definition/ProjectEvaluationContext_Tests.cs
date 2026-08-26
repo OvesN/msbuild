@@ -972,7 +972,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(8);
+            report.SchemaVersion.ShouldBe(9);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -1384,12 +1384,134 @@ namespace Microsoft.Build.UnitTests.Definition
                 observation.Value == parserConfig);
             report.FileReads.ShouldContain(observation =>
                 FileUtilities.PathsEqual(observation.Path, parserConfig) &&
-                !observation.IsVerifiable &&
-                observation.HashKind == EvaluationContentHashKind.ParsedXml);
+                observation.IsVerifiable &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.ContentHash == EvaluationObservationSession.ComputeBytesHash(
+                    File.ReadAllBytes(parserConfig)));
             report.PathProbes.ShouldContain(observation =>
                 FileUtilities.PathsEqual(observation.Path, parserConfig) &&
                 observation.Kind == EvaluationPathKind.File &&
                 observation.Exists);
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.ParserConfiguration &&
+                observation.Operation == "ParseOutcome" &&
+                FileUtilities.PathsEqual(observation.Request, parserConfig) &&
+                observation.Result == "ParsedParseConfig");
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsMalformedParserConfigurationBytesAndOutcome()
+        {
+            string parserConfig = _env.CreateFile("Directory.Parse.config", string.Empty).Path;
+            byte[] malformedBytes =
+            [
+                .. Encoding.Unicode.GetPreamble(),
+                .. Encoding.Unicode.GetBytes("<ParseConfig><IgnoreAttributes></ParseConfig>trailing"),
+            ];
+            File.WriteAllBytes(parserConfig, malformedBytes);
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(malformedBytes);
+            _env.SetEnvironmentVariable(ParserIgnoreConfiguration.EnvironmentVariableName, parserConfig);
+
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile("malformed-parser.proj", "<Project />").Path;
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, parserConfig) &&
+                observation.IsVerifiable &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.ContentHash == expectedHash);
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.ParserConfiguration &&
+                observation.Operation == "ParseOutcome" &&
+                FileUtilities.PathsEqual(observation.Request, parserConfig) &&
+                observation.Result == $"MalformedXml:{typeof(XmlException).FullName}");
+            (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsUnexpectedParserConfigurationRoot()
+        {
+            string parserConfig = _env.CreateFile(
+                "Directory.Parse.config",
+                "<UnexpectedRoot />").Path;
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(
+                File.ReadAllBytes(parserConfig));
+            _env.SetEnvironmentVariable(ParserIgnoreConfiguration.EnvironmentVariableName, parserConfig);
+
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            string projectFile = _env.CreateFile("unexpected-parser-root.proj", "<Project />").Path;
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, parserConfig) &&
+                observation.ContentHash == expectedHash);
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.ParserConfiguration &&
+                observation.Operation == "ParseOutcome" &&
+                FileUtilities.PathsEqual(observation.Request, parserConfig) &&
+                observation.Result == "ParsedUnexpectedRoot");
+        }
+
+        [Fact]
+        public void EvaluationObservationFailsClosedWhenParserConfigurationReadFails()
+        {
+            string parserConfig = _env.CreateFile(
+                "Directory.Parse.config",
+                "<ParseConfig />").Path;
+            _env.SetEnvironmentVariable(ParserIgnoreConfiguration.EnvironmentVariableName, parserConfig);
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            ParserIgnoreConfiguration.TestOnlyHookBeforeConfigRead = path =>
+            {
+                if (FileUtilities.PathsEqual(path, parserConfig))
+                {
+                    throw new IOException("Test-only parser configuration read failure.");
+                }
+            };
+
+            try
+            {
+                string projectFile = _env.CreateFile("failed-parser-read.proj", "<Project />").Path;
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                });
+            }
+            finally
+            {
+                ParserIgnoreConfiguration.TestOnlyHookBeforeConfigRead = null;
+            }
+
+            report.ShouldNotBeNull();
+            report.FileReads.ShouldNotContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, parserConfig));
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.ParserConfiguration &&
+                observation.Operation == "LoadFailure" &&
+                FileUtilities.PathsEqual(observation.Request, parserConfig) &&
+                observation.Result == typeof(IOException).FullName);
+            (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
+                .ShouldBe(EvaluationObservationReason.ExternalOperationFailure);
         }
 
         [Fact]

@@ -23,6 +23,8 @@ namespace Microsoft.Build.Evaluation
     /// </summary>
     internal sealed class ParserIgnoreConfiguration : ITranslatable
     {
+        internal static Action<string>? TestOnlyHookBeforeConfigRead { get; set; }
+
         internal readonly struct Observation
         {
             internal Observation(string kind, string request, string? result)
@@ -314,24 +316,23 @@ namespace Microsoft.Build.Evaluation
 
             try
             {
+                TestOnlyHookBeforeConfigRead?.Invoke(fullPath);
                 var settings = new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Prohibit };
                 var doc = new System.Xml.XmlDocument();
-                using (var stream = File.OpenRead(fullPath))
+                using (Stream stream = OpenConfigStream(fullPath))
                 using (var reader = System.Xml.XmlReader.Create(stream, settings))
                 {
                     doc.Load(reader);
-                }
-                if (EvaluationObservationSession.IsEnabled)
-                {
-                    RecordObservation("ContentHash", fullPath, EvaluationObservationSession.ComputeTextHash(doc.OuterXml));
                 }
 
                 System.Xml.XmlElement? root = doc.DocumentElement;
                 if (root is null || !root.Name.Equals("ParseConfig", StringComparison.OrdinalIgnoreCase))
                 {
+                    RecordObservation("ParseOutcome", fullPath, "ParsedUnexpectedRoot");
                     return;
                 }
 
+                RecordObservation("ParseOutcome", fullPath, "ParsedParseConfig");
                 foreach (System.Xml.XmlNode child in root.ChildNodes)
                 {
                     if (child.NodeType != System.Xml.XmlNodeType.Element)
@@ -373,10 +374,32 @@ namespace Microsoft.Build.Evaluation
                     }
                 }
             }
-            catch
+            catch (System.Xml.XmlException ex)
             {
-                // If the file can't be parsed as XML, silently skip it
+                RecordObservation(
+                    "ParseOutcome",
+                    fullPath,
+                    string.Concat("MalformedXml:", ex.GetType().FullName));
             }
+            catch (Exception ex)
+            {
+                RecordObservation("LoadFailure", fullPath, ex.GetType().FullName);
+            }
+        }
+
+        private Stream OpenConfigStream(string fullPath)
+        {
+            if (!EvaluationObservationSession.IsEnabled)
+            {
+                return File.OpenRead(fullPath);
+            }
+
+            byte[] content = File.ReadAllBytes(fullPath);
+            RecordObservation(
+                "RawContentHash",
+                fullPath,
+                EvaluationObservationSession.ComputeBytesHash(content));
+            return new MemoryStream(content, writable: false);
         }
 
         internal void RecordUpwardSearch(
