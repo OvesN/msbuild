@@ -24,14 +24,23 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 7;
+        private const int ObservationSchemaVersion = 8;
         private const int PropertyFunctionClassificationVersion = 1;
+#if NET
+        private const int SupportedEnumerationOptionsPropertyCount = 8;
+#endif
 
         [ThreadStatic]
         private static EvaluationObservationSession s_current;
 
         private static readonly bool s_enabled =
             Environment.GetEnvironmentVariable(ObservationEnvironmentVariable) == "1";
+#if NET
+        private static readonly int s_enumerationOptionsPropertyCount =
+            typeof(EnumerationOptions).GetProperties().Length;
+        private static readonly bool s_enumerationOptionsShapeSupported =
+            s_enumerationOptionsPropertyCount == SupportedEnumerationOptionsPropertyCount;
+#endif
         private static readonly ConditionalWeakTable<ProjectRootElement, ProjectSourceHashCache> s_projectSourceHashes = new();
         private static readonly string s_defaultFileSystemProvider =
             FileSystems.Default.GetType().AssemblyQualifiedName;
@@ -157,6 +166,7 @@ namespace Microsoft.Build.Evaluation.Context
         private long _unsupportedCategories;
         private int _completed;
         private int _propertyFunctionInvocationId;
+        private int _incompleteEnumerationIdentity;
         private int _suppressDirectoryEnumerations;
         private TestConfiguration _testConfiguration;
 
@@ -1048,7 +1058,8 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationEnumerationKind kind,
             IReadOnlyList<string> entries,
             EvaluationEnumerationCompletion completion,
-            string provider = null)
+            string provider = null,
+            string optionsIdentity = null)
         {
             RecordEnumerationCore(
                 path,
@@ -1059,7 +1070,8 @@ namespace Microsoft.Build.Evaluation.Context
                 entries?.Count ?? 0,
                 ComputeStringSequenceHash(entries),
                 completion,
-                provider);
+                provider,
+                optionsIdentity);
         }
 
         internal void RecordEnumeration(
@@ -1071,7 +1083,8 @@ namespace Microsoft.Build.Evaluation.Context
             int entryCount,
             string entriesHash,
             EvaluationEnumerationCompletion completion,
-            string provider = null)
+            string provider = null,
+            string optionsIdentity = null)
         {
             RecordEnumerationCore(
                 path,
@@ -1082,7 +1095,8 @@ namespace Microsoft.Build.Evaluation.Context
                 entryCount,
                 entriesHash,
                 completion,
-                provider);
+                provider,
+                optionsIdentity);
         }
 
         private void RecordEnumerationCore(
@@ -1094,7 +1108,8 @@ namespace Microsoft.Build.Evaluation.Context
             int entryCount,
             string entriesHash,
             EvaluationEnumerationCompletion completion,
-            string provider)
+            string provider,
+            string optionsIdentity)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -1115,12 +1130,17 @@ namespace Microsoft.Build.Evaluation.Context
                         return;
                     }
 
+                    int incompleteIdentity = completion == EvaluationEnumerationCompletion.Complete
+                        ? 0
+                        : ++_incompleteEnumerationIdentity;
                     var key = new EnumerationKey(
                         NormalizePath(path),
                         searchPattern ?? "*",
                         searchOption,
                         kind,
-                        provider ?? s_defaultFileSystemProvider);
+                        provider ?? s_defaultFileSystemProvider,
+                        optionsIdentity,
+                        incompleteIdentity);
                     var observation = new EvaluationDirectoryEnumerationObservation(
                         key.Path,
                         key.SearchPattern,
@@ -1130,7 +1150,8 @@ namespace Microsoft.Build.Evaluation.Context
                         entryCount,
                         entriesHash,
                         key.Provider,
-                        completion);
+                        completion,
+                        key.OptionsIdentity);
 
                     if (_directoryEnumerations.TryGetValue(key, out EvaluationDirectoryEnumerationObservation priorObservation))
                     {
@@ -1638,13 +1659,23 @@ namespace Microsoft.Build.Evaluation.Context
                         entries.Add(entry?.ToString());
                     }
 
+                    bool requestIsComplete = TryGetDirectoryEnumerationRequest(
+                        isStatic: true,
+                        member,
+                        arguments,
+                        out string searchPattern,
+                        out SearchOption searchOption,
+                        out string optionsIdentity);
                     RecordEnumeration(
                         firstArgument,
-                        arguments is { Length: > 1 } ? arguments[1]?.ToString() : "*",
-                        GetSearchOption(arguments),
+                        searchPattern,
+                        searchOption,
                         GetEnumerationKind(member),
                         entries,
-                        EvaluationEnumerationCompletion.Complete);
+                        requestIsComplete
+                            ? EvaluationEnumerationCompletion.Complete
+                            : EvaluationEnumerationCompletion.Partial,
+                        optionsIdentity: optionsIdentity);
                 }
                 else
                 {
@@ -1741,13 +1772,23 @@ namespace Microsoft.Build.Evaluation.Context
                         entries.Add(entry is FileSystemInfo resultInfo ? resultInfo.FullName : entry?.ToString());
                     }
 
+                    bool requestIsComplete = TryGetDirectoryEnumerationRequest(
+                        isStatic: false,
+                        member,
+                        arguments,
+                        out string searchPattern,
+                        out SearchOption searchOption,
+                        out string optionsIdentity);
                     RecordEnumeration(
                         fileSystemInfo.FullName,
-                        "*",
-                        GetSearchOption(arguments),
+                        searchPattern,
+                        searchOption,
                         GetEnumerationKind(member),
                         entries,
-                        EvaluationEnumerationCompletion.Complete);
+                        requestIsComplete
+                            ? EvaluationEnumerationCompletion.Complete
+                            : EvaluationEnumerationCompletion.Partial,
+                        optionsIdentity: optionsIdentity);
                 }
                 else if ((effects & EvaluationPropertyFunctionEffect.FileMetadata) != 0)
                 {
@@ -2080,20 +2121,209 @@ namespace Microsoft.Build.Evaluation.Context
                 : EvaluationEnumerationKind.Files;
         }
 
-        private static SearchOption GetSearchOption(object[] arguments)
+        private static bool TryGetDirectoryEnumerationRequest(
+            bool isStatic,
+            string member,
+            object[] arguments,
+            out string searchPattern,
+            out SearchOption searchOption,
+            out string optionsIdentity)
         {
-            if (arguments is not null)
+            searchPattern = "*";
+            object option = null;
+            bool shapeIsSupported;
+            int argumentCount = arguments?.Length ?? 0;
+
+            if (isStatic)
             {
-                for (int i = 0; i < arguments.Length; i++)
+                shapeIsSupported = argumentCount is 1 or 2 or 3;
+                if (argumentCount >= 2)
                 {
-                    if (arguments[i] is SearchOption searchOption)
+                    if (arguments[1] is string pattern)
                     {
-                        return searchOption;
+                        searchPattern = pattern;
+                    }
+                    else
+                    {
+                        shapeIsSupported = false;
+                        if (IsEnumerationOption(arguments[1]))
+                        {
+                            option = arguments[1];
+                        }
+                        else
+                        {
+                            searchPattern = SerializeValue(arguments[1]) ?? "<null>";
+                        }
+                    }
+                }
+
+                if (argumentCount >= 3)
+                {
+                    if (option is null || IsEnumerationOption(arguments[2]))
+                    {
+                        option = arguments[2];
+                    }
+                }
+            }
+            else
+            {
+                shapeIsSupported = argumentCount is 0 or 1 or 2;
+                if (argumentCount >= 1)
+                {
+                    if (arguments[0] is string pattern)
+                    {
+                        searchPattern = pattern;
+                    }
+                    else
+                    {
+                        shapeIsSupported = false;
+                        if (IsEnumerationOption(arguments[0]))
+                        {
+                            option = arguments[0];
+                        }
+                        else
+                        {
+                            searchPattern = SerializeValue(arguments[0]) ?? "<null>";
+                        }
+                    }
+                }
+
+                if (argumentCount >= 2)
+                {
+                    if (option is null || IsEnumerationOption(arguments[1]))
+                    {
+                        option = arguments[1];
                     }
                 }
             }
 
-            return SearchOption.TopDirectoryOnly;
+            if (!shapeIsSupported && !IsEnumerationOption(option) && arguments is not null)
+            {
+                for (int i = isStatic ? 1 : 0; i < arguments.Length; i++)
+                {
+                    if (IsEnumerationOption(arguments[i]))
+                    {
+                        option = arguments[i];
+                        break;
+                    }
+                }
+            }
+
+            bool optionsAreSupported = TryGetEnumerationOptionsIdentity(
+                option,
+                out searchOption,
+                out optionsIdentity);
+            if (!shapeIsSupported)
+            {
+                optionsIdentity = string.Concat(
+                    optionsIdentity,
+                    "\0UnsupportedArgumentShape=",
+                    isStatic ? "Static:" : "Instance:",
+                    member,
+                    ":",
+                    argumentCount.ToString(CultureInfo.InvariantCulture),
+                    "\0Arguments=",
+                    string.Join(";", SerializeArguments(arguments)));
+            }
+
+            return shapeIsSupported && optionsAreSupported;
+        }
+
+        private static bool IsEnumerationOption(object argument)
+        {
+            return argument is SearchOption ||
+                string.Equals(
+                    argument?.GetType().FullName,
+                    "System.IO.EnumerationOptions",
+                    StringComparison.Ordinal);
+        }
+
+        private static bool TryGetEnumerationOptionsIdentity(
+            object option,
+            out SearchOption searchOption,
+            out string optionsIdentity)
+        {
+            searchOption = SearchOption.TopDirectoryOnly;
+            optionsIdentity = "Default";
+            if (option is null)
+            {
+                return true;
+            }
+
+            if (option is SearchOption typedSearchOption)
+            {
+                searchOption = typedSearchOption;
+                optionsIdentity = string.Concat(
+                    nameof(SearchOption),
+                    ":",
+                    ((int)typedSearchOption).ToString(CultureInfo.InvariantCulture));
+                return typedSearchOption is SearchOption.TopDirectoryOnly or SearchOption.AllDirectories;
+            }
+
+            Type optionType = option.GetType();
+#if NET
+            if (option is EnumerationOptions enumerationOptions)
+            {
+                searchOption = enumerationOptions.RecurseSubdirectories
+                    ? SearchOption.AllDirectories
+                    : SearchOption.TopDirectoryOnly;
+                optionsIdentity = string.Concat(
+                    optionType.FullName,
+                    "\0",
+                    nameof(EnumerationOptions.AttributesToSkip),
+                    "=",
+                    ((int)enumerationOptions.AttributesToSkip).ToString(CultureInfo.InvariantCulture),
+                    "\0",
+                    nameof(EnumerationOptions.BufferSize),
+                    "=",
+                    enumerationOptions.BufferSize.ToString(CultureInfo.InvariantCulture),
+                    "\0",
+                    nameof(EnumerationOptions.IgnoreInaccessible),
+                    "=",
+                    enumerationOptions.IgnoreInaccessible ? "True" : "False",
+                    "\0",
+                    nameof(EnumerationOptions.MatchCasing),
+                    "=",
+                    ((int)enumerationOptions.MatchCasing).ToString(CultureInfo.InvariantCulture),
+                    "\0",
+                    nameof(EnumerationOptions.MatchType),
+                    "=",
+                    ((int)enumerationOptions.MatchType).ToString(CultureInfo.InvariantCulture),
+                    "\0",
+                    nameof(EnumerationOptions.MaxRecursionDepth),
+                    "=",
+                    enumerationOptions.MaxRecursionDepth.ToString(CultureInfo.InvariantCulture),
+                    "\0",
+                    nameof(EnumerationOptions.RecurseSubdirectories),
+                    "=",
+                    enumerationOptions.RecurseSubdirectories ? "True" : "False",
+                    "\0",
+                    nameof(EnumerationOptions.ReturnSpecialDirectories),
+                    "=",
+                    enumerationOptions.ReturnSpecialDirectories ? "True" : "False");
+                if (!s_enumerationOptionsShapeSupported)
+                {
+                    optionsIdentity = string.Concat(
+                        optionsIdentity,
+                        "\0UnsupportedPropertyCount=",
+                        s_enumerationOptionsPropertyCount.ToString(CultureInfo.InvariantCulture));
+                }
+
+                return s_enumerationOptionsShapeSupported;
+            }
+#endif
+
+            if (!string.Equals(
+                    optionType.FullName,
+                    "System.IO.EnumerationOptions",
+                    StringComparison.Ordinal))
+            {
+                optionsIdentity = string.Concat("<unsupported:", optionType.FullName, ">");
+                return false;
+            }
+
+            optionsIdentity = string.Concat("<unsupported-target:", optionType.FullName, ">");
+            return false;
         }
 
         private static bool IsNumericPropertyFunctionType(Type type)
@@ -2539,13 +2769,17 @@ namespace Microsoft.Build.Evaluation.Context
                 string searchPattern,
                 SearchOption searchOption,
                 EvaluationEnumerationKind kind,
-                string provider)
+                string provider,
+                string optionsIdentity,
+                int incompleteIdentity)
             {
                 Path = path;
                 SearchPattern = searchPattern;
                 SearchOption = searchOption;
                 Kind = kind;
                 Provider = provider;
+                OptionsIdentity = optionsIdentity;
+                IncompleteIdentity = incompleteIdentity;
             }
 
             internal string Path { get; }
@@ -2553,6 +2787,8 @@ namespace Microsoft.Build.Evaluation.Context
             internal SearchOption SearchOption { get; }
             internal EvaluationEnumerationKind Kind { get; }
             internal string Provider { get; }
+            internal string OptionsIdentity { get; }
+            internal int IncompleteIdentity { get; }
 
             public bool Equals(EnumerationKey other)
             {
@@ -2560,7 +2796,9 @@ namespace Microsoft.Build.Evaluation.Context
                     Kind == other.Kind &&
                     FileUtilities.PathComparer.Equals(Path, other.Path) &&
                     string.Equals(SearchPattern, other.SearchPattern, StringComparison.Ordinal) &&
-                    string.Equals(Provider, other.Provider, StringComparison.Ordinal);
+                    string.Equals(Provider, other.Provider, StringComparison.Ordinal) &&
+                    string.Equals(OptionsIdentity, other.OptionsIdentity, StringComparison.Ordinal) &&
+                    IncompleteIdentity == other.IncompleteIdentity;
             }
 
             public override bool Equals(object obj) => obj is EnumerationKey other && Equals(other);
@@ -2573,7 +2811,11 @@ namespace Microsoft.Build.Evaluation.Context
                     hashCode = (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(SearchPattern);
                     hashCode = (hashCode * 397) ^ (int)SearchOption;
                     hashCode = (hashCode * 397) ^ (int)Kind;
-                    return (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(Provider);
+                    hashCode = (hashCode * 397) ^ StringComparer.Ordinal.GetHashCode(Provider);
+                    hashCode = (hashCode * 397) ^ (OptionsIdentity is null
+                        ? 0
+                        : StringComparer.Ordinal.GetHashCode(OptionsIdentity));
+                    return (hashCode * 397) ^ IncompleteIdentity;
                 }
             }
         }

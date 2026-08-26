@@ -656,6 +656,241 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void EvaluationObservationRecordsRecursiveDirectoryPropertyFunctionArguments()
+        {
+            string sourceDirectory = _env.CreateFolder().Path;
+            _env.CreateFile(Path.Combine(sourceDirectory, "Top.cs"), string.Empty);
+            string nestedDirectory = _env.CreateFolder(Path.Combine(sourceDirectory, "nested")).Path;
+            _env.CreateFile(Path.Combine(nestedDirectory, "Nested.cs"), string.Empty);
+            _env.CreateFile(Path.Combine(nestedDirectory, "Ignored.txt"), string.Empty);
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                "recursive-enumeration.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <RecursiveCount>$([System.IO.Directory]::GetFiles('{sourceDirectory}', '*.cs', 'System.IO.SearchOption.AllDirectories').Length)</RecursiveCount>
+                    <TopCount>$([System.IO.Directory]::GetFiles('{sourceDirectory}', '*.cs', 'System.IO.SearchOption.TopDirectoryOnly').Length)</TopCount>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("RecursiveCount").ShouldBe("2");
+            project.GetPropertyValue("TopCount").ShouldBe("1");
+            report.ShouldNotBeNull();
+            report.DirectoryEnumerations.Count(observation =>
+                observation.Path == sourceDirectory &&
+                observation.SearchPattern == "*.cs").ShouldBe(2);
+            EvaluationDirectoryEnumerationObservation recursive = report.DirectoryEnumerations.Single(
+                observation =>
+                    observation.Path == sourceDirectory &&
+                    observation.SearchPattern == "*.cs" &&
+                    observation.SearchOption == SearchOption.AllDirectories);
+            recursive.EntryCount.ShouldBe(2);
+            recursive.OptionsIdentity.ShouldBe($"{nameof(SearchOption)}:{(int)SearchOption.AllDirectories}");
+            (report.Reasons & EvaluationObservationReason.PartialEnumeration)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsDirectoryInfoEnumerationPatterns()
+        {
+            string sourceDirectory = _env.CreateFolder().Path;
+            _env.CreateFile(Path.Combine(sourceDirectory, "Directory.Build.props"), string.Empty);
+            _env.CreateFile(Path.Combine(sourceDirectory, "Directory.Build.targets"), string.Empty);
+            string childPath = Path.Combine(sourceDirectory, "child");
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                "directory-info-enumeration.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <PropsCount>$([System.IO.Directory]::GetParent('{childPath}').GetFiles('*.props').Length)</PropsCount>
+                    <TargetsCount>$([System.IO.Directory]::GetParent('{childPath}').GetFiles('*.targets').Length)</TargetsCount>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("PropsCount").ShouldBe("1");
+            project.GetPropertyValue("TargetsCount").ShouldBe("1");
+            report.ShouldNotBeNull();
+            report.DirectoryEnumerations.Count(observation =>
+                observation.Path == sourceDirectory &&
+                observation.SearchOption == SearchOption.TopDirectoryOnly).ShouldBe(2);
+            report.DirectoryEnumerations.ShouldContain(observation =>
+                observation.SearchPattern == "*.props" &&
+                observation.Entries.ShouldHaveSingleItem().EndsWith(
+                    "Directory.Build.props",
+                    StringComparison.OrdinalIgnoreCase));
+            report.DirectoryEnumerations.ShouldContain(observation =>
+                observation.SearchPattern == "*.targets" &&
+                observation.Entries.ShouldHaveSingleItem().EndsWith(
+                    "Directory.Build.targets",
+                    StringComparison.OrdinalIgnoreCase));
+        }
+
+#if NET
+        [Fact]
+        public void EvaluationObservationRecordsEnumerationOptionsIdentity()
+        {
+            string sourceDirectory = _env.CreateFolder().Path;
+            string inputFile = _env.CreateFile(Path.Combine(sourceDirectory, "Input.cs"), string.Empty).Path;
+            var options = new EnumerationOptions
+            {
+                AttributesToSkip = FileAttributes.Hidden,
+                BufferSize = 4096,
+                IgnoreInaccessible = true,
+                MatchCasing = MatchCasing.CaseSensitive,
+                MatchType = MatchType.Simple,
+                MaxRecursionDepth = 3,
+                RecurseSubdirectories = true,
+                ReturnSpecialDirectories = true,
+            };
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                nameof(Directory.GetFiles),
+                null,
+                [sourceDirectory, "*.cs", options],
+                new[] { inputFile });
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            EvaluationDirectoryEnumerationObservation observation =
+                report.DirectoryEnumerations.ShouldHaveSingleItem();
+            observation.SearchOption.ShouldBe(SearchOption.AllDirectories);
+            observation.OptionsIdentity.ShouldContain("System.IO.EnumerationOptions");
+            observation.OptionsIdentity.ShouldContain("AttributesToSkip=2");
+            observation.OptionsIdentity.ShouldContain("BufferSize=4096");
+            observation.OptionsIdentity.ShouldContain("IgnoreInaccessible=True");
+            observation.OptionsIdentity.ShouldContain("MatchCasing=1");
+            observation.OptionsIdentity.ShouldContain("MatchType=0");
+            observation.OptionsIdentity.ShouldContain("MaxRecursionDepth=3");
+            observation.OptionsIdentity.ShouldContain("RecurseSubdirectories=True");
+            observation.OptionsIdentity.ShouldContain("ReturnSpecialDirectories=True");
+            observation.Completion.ShouldBe(EvaluationEnumerationCompletion.Complete);
+        }
+
+        [Fact]
+        public void EvaluationObservationRetainsDistinctEnumerationOptions()
+        {
+            string sourceDirectory = _env.CreateFolder().Path;
+            string inputFile = _env.CreateFile(Path.Combine(sourceDirectory, "Input.cs"), string.Empty).Path;
+            var caseSensitive = new EnumerationOptions
+            {
+                MatchCasing = MatchCasing.CaseSensitive,
+            };
+            var caseInsensitive = new EnumerationOptions
+            {
+                MatchCasing = MatchCasing.CaseInsensitive,
+            };
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                nameof(Directory.GetFiles),
+                null,
+                [sourceDirectory, "*.cs", caseSensitive],
+                new[] { inputFile });
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                nameof(Directory.GetFiles),
+                null,
+                [sourceDirectory, "*.cs", caseInsensitive],
+                new[] { inputFile });
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.DirectoryEnumerations.Count.ShouldBe(2);
+            report.DirectoryEnumerations.Select(observation => observation.OptionsIdentity)
+                .Distinct(StringComparer.Ordinal)
+                .Count()
+                .ShouldBe(2);
+        }
+
+        [Fact]
+        public void EvaluationObservationFailsClosedForUnsupportedEnumerationShape()
+        {
+            string sourceDirectory = _env.CreateFolder().Path;
+            string firstInput = _env.CreateFile(Path.Combine(sourceDirectory, "First.cs"), string.Empty).Path;
+            string secondInput = _env.CreateFile(Path.Combine(sourceDirectory, "Second.cs"), string.Empty).Path;
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+            };
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                nameof(Directory.GetFiles),
+                null,
+                [sourceDirectory, options, "extra"],
+                new[] { firstInput });
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                nameof(Directory.GetFiles),
+                null,
+                [sourceDirectory, options, "different-extra"],
+                new[] { secondInput });
+            session.RecordPropertyFunction(
+                typeof(DirectoryInfo),
+                nameof(DirectoryInfo.GetFiles),
+                new DirectoryInfo(sourceDirectory),
+                [options, "extra"],
+                new[] { new FileInfo(firstInput) });
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.DirectoryEnumerations.Count.ShouldBe(3);
+            report.DirectoryEnumerations.ShouldAllBe(observation =>
+                observation.SearchPattern == "*" &&
+                observation.SearchOption == SearchOption.AllDirectories &&
+                observation.Completion == EvaluationEnumerationCompletion.Partial &&
+                observation.OptionsIdentity.Contains("UnsupportedArgumentShape", StringComparison.Ordinal));
+            (report.Reasons & EvaluationObservationReason.PartialEnumeration)
+                .ShouldBe(EvaluationObservationReason.PartialEnumeration);
+        }
+#endif
+
+        [Fact]
+        public void PropertyFunctionFailureDiagnosticRetainsOriginalEnumerationArgument()
+        {
+            string sourceDirectory = _env.CreateFolder().Path;
+            string missingChild = Path.Combine(sourceDirectory, "missing", "child");
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(enabled: true);
+            string projectFile = _env.CreateFile(
+                "failed-enumeration.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Failure>$([System.IO.Directory]::GetParent('{missingChild}').GetFiles('*.cs', 'System.IO.SearchOption.AllDirectories').Length)</Failure>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            InvalidProjectFileException exception = Should.Throw<InvalidProjectFileException>(() =>
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                }));
+
+            exception.Message.ShouldContain("System.IO.SearchOption.AllDirectories");
+        }
+
+        [Fact]
         public void EvaluationObservationRecordsEnvironmentAndPropertyFunctions()
         {
             _env.SetEnvironmentVariable("OBSERVED_ENVIRONMENT_INPUT", "environment-value");
@@ -737,7 +972,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(7);
+            report.SchemaVersion.ShouldBe(8);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }

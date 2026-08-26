@@ -269,12 +269,17 @@ explicit native seam or provider-aware overload.
 
 | Input | Observation seam | Required record |
 | --- | --- | --- |
-| File enumeration | `IFileSystem.EnumerateFiles` | Root, pattern, recursion, provider, returned ordered members, completion |
-| Directory enumeration | `IFileSystem.EnumerateDirectories` | Same |
-| File-system-entry enumeration | `IFileSystem.EnumerateFileSystemEntries` | Same |
+| File enumeration | `IFileSystem.EnumerateFiles` and classified `Directory` / `DirectoryInfo` property functions | Root, actual pattern, recursion, complete `EnumerationOptions` identity when used, provider, returned ordered members, completion |
+| Directory enumeration | `IFileSystem.EnumerateDirectories` and classified `Directory` / `DirectoryInfo` property functions | Same |
+| File-system-entry enumeration | `IFileSystem.EnumerateFileSystemEntries` and classified `Directory` / `DirectoryInfo` property functions | Same |
 | Partial enumeration | recording iterator | Members consumed and partial state; mark incomplete unless the semantic owner proves the prefix is sufficient |
 | Enumeration failure | recording iterator | Exact proven failure/outcome |
 | Direct `Directory.*` enumeration | evaluator or classified property-function call site | Route through the evaluation provider |
+
+Property-function enumeration records only known overload shapes as complete. Unknown shapes
+or an `EnumerationOptions` runtime surface with unrecognized public properties retain all known
+pattern, recursion, and option values, are marked partial, and are never coalesced with another
+partial request.
 
 Raw enumerations are supporting evidence for a glob when a `GlobObservation` owns the
 semantic result.
