@@ -1366,6 +1366,23 @@ namespace Microsoft.Build.Framework
 
             string fullBase = NewPath.GetFullPath(basePath);
             string fullPath = NewPath.GetFullPath(path);
+            IEvaluationInputObserver observer = EvaluationInputObserver.Current;
+            if (observer is not null)
+            {
+                try
+                {
+                    observer.RecordPathResolution(
+                        "MakeRelative",
+                        basePath,
+                        path,
+                        fullBase,
+                        fullPath);
+                }
+                catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                {
+                    // Observation must not change path-normalization behavior.
+                }
+            }
 
             string[] splitBase = fullBase.Split(MSBuildConstants.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
             string[] splitPath = fullPath.Split(MSBuildConstants.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);

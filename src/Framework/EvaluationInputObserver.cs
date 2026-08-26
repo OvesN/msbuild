@@ -24,6 +24,12 @@ namespace Microsoft.Build.Framework
         void RecordAmbiguousPathProbe(string path, EvaluationPathProbeKind kind);
         void RecordItemMetadata(string itemSpec, string modifier, string baseDirectory, string value);
         void RecordPathAdjustment(string value, string baseDirectory, string result);
+        void RecordPathResolution(
+            string operation,
+            string firstInput,
+            string secondInput,
+            string firstResult,
+            string secondResult);
         void RecordSearch(
             string kind,
             string request,

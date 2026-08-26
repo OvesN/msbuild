@@ -24,7 +24,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 9;
+        private const int ObservationSchemaVersion = 10;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -60,7 +60,6 @@ namespace Microsoft.Build.Evaluation.Context
             "LeftShift",
             "RightShift",
             "RightShiftUnsigned",
-            "MakeRelative",
             "ValueOrDefault",
             "ConvertToBase64",
             "ConvertFromBase64",
@@ -323,6 +322,20 @@ namespace Microsoft.Build.Evaluation.Context
                 "UnixPathAdjustment",
                 string.Concat(value, "|Base=", baseDirectory),
                 result);
+        }
+
+        void IEvaluationInputObserver.RecordPathResolution(
+            string operation,
+            string firstInput,
+            string secondInput,
+            string firstResult,
+            string secondResult)
+        {
+            RecordExternalInput(
+                EvaluationExternalInputKind.Ambient,
+                string.Concat("MSBuild::", operation, ".PathResolution"),
+                string.Concat("First=", firstInput, "\0Second=", secondInput),
+                string.Concat("First=", firstResult, "\0Second=", secondResult));
         }
 
         void IEvaluationInputObserver.RecordSearch(
@@ -1877,6 +1890,7 @@ namespace Microsoft.Build.Evaluation.Context
 
                 if (string.Equals(member, "NormalizePath", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(member, "NormalizeDirectory", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(member, "MakeRelative", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(member, "AreFeaturesEnabled", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(member, "CheckFeatureAvailability", StringComparison.OrdinalIgnoreCase) ||
                     member.StartsWith("IsOs", StringComparison.OrdinalIgnoreCase) ||
