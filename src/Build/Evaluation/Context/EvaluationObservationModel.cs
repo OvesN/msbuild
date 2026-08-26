@@ -5,6 +5,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.Build.BackEnd.SdkResolution;
 
 #nullable disable
 
@@ -40,6 +41,7 @@ namespace Microsoft.Build.Evaluation.Context
         ObservationIncomplete = 1L << 29,
         UnversionedSourceProvider = 1L << 31,
         ProjectSourceChangedDuringRead = 1L << 32,
+        SdkResolutionWithoutCacheLifetime = 1L << 33,
     }
 
     internal enum EvaluationPathKind
@@ -556,9 +558,19 @@ namespace Microsoft.Build.Evaluation.Context
     internal readonly struct EvaluationSdkResolutionObservation
     {
         internal EvaluationSdkResolutionObservation(
+            int submissionId,
             string sdkName,
             string requestedVersion,
             string minimumVersion,
+            string projectPath,
+            string solutionPath,
+            bool interactive,
+            bool isRunningInVisualStudio,
+            bool failOnUnresolvedSdk,
+            string referenceLocationFile,
+            int referenceLocationLine,
+            int referenceLocationColumn,
+            SdkResolverCacheIdentity cacheIdentity,
             bool success,
             string path,
             string version,
@@ -570,9 +582,19 @@ namespace Microsoft.Build.Evaluation.Context
             string[] warnings,
             string[] errors)
         {
+            SubmissionId = submissionId;
             SdkName = sdkName;
             RequestedVersion = requestedVersion;
             MinimumVersion = minimumVersion;
+            ProjectPath = projectPath;
+            SolutionPath = solutionPath;
+            Interactive = interactive;
+            IsRunningInVisualStudio = isRunningInVisualStudio;
+            FailOnUnresolvedSdk = failOnUnresolvedSdk;
+            ReferenceLocationFile = referenceLocationFile;
+            ReferenceLocationLine = referenceLocationLine;
+            ReferenceLocationColumn = referenceLocationColumn;
+            CacheIdentity = cacheIdentity;
             Success = success;
             Path = path;
             Version = version;
@@ -585,9 +607,19 @@ namespace Microsoft.Build.Evaluation.Context
             Errors = errors;
         }
 
+        internal int SubmissionId { get; }
         internal string SdkName { get; }
         internal string RequestedVersion { get; }
         internal string MinimumVersion { get; }
+        internal string ProjectPath { get; }
+        internal string SolutionPath { get; }
+        internal bool Interactive { get; }
+        internal bool IsRunningInVisualStudio { get; }
+        internal bool FailOnUnresolvedSdk { get; }
+        internal string ReferenceLocationFile { get; }
+        internal int ReferenceLocationLine { get; }
+        internal int ReferenceLocationColumn { get; }
+        internal SdkResolverCacheIdentity CacheIdentity { get; }
         internal bool Success { get; }
         internal string Path { get; }
         internal string Version { get; }

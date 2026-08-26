@@ -1101,7 +1101,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(10);
+            report.SchemaVersion.ShouldBe(11);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -1918,11 +1918,26 @@ namespace Microsoft.Build.UnitTests.Definition
             reports[0].SdkResolutions.Count(observation =>
                 observation.SdkName == "foo" &&
                 !observation.FromCache).ShouldBe(1);
+            EvaluationSdkResolutionObservation cacheMiss =
+                reports[0].SdkResolutions.Single(observation => !observation.FromCache);
             EvaluationObservationReport cacheHitReport = reports[1];
-            cacheHitReport.SdkResolutions.ShouldContain(observation =>
+            EvaluationSdkResolutionObservation cacheHit =
+                cacheHitReport.SdkResolutions.First(observation =>
                 observation.FromCache &&
                 observation.SdkName == "foo" &&
                 observation.Success);
+            cacheHit.CacheIdentity.OwnerId.ShouldBe(cacheMiss.CacheIdentity.OwnerId);
+            cacheHit.CacheIdentity.Epoch.ShouldBe(cacheMiss.CacheIdentity.Epoch);
+            cacheHit.CacheIdentity.EntryId.ShouldBe(cacheMiss.CacheIdentity.EntryId);
+            reports[0].SdkResolutions.ShouldAllBe(observation =>
+                observation.CacheIdentity.EntryId == cacheMiss.CacheIdentity.EntryId);
+            cacheHitReport.SdkResolutions.ShouldAllBe(observation =>
+                observation.CacheIdentity.EntryId == cacheMiss.CacheIdentity.EntryId);
+            cacheHit.ProjectPath.ShouldBe(secondProject);
+            cacheMiss.ProjectPath.ShouldBe(firstProject);
+            ((ISdkResolverCacheValidator)context.SdkResolverService)
+                .IsCacheEntryCurrent(cacheHit.CacheIdentity)
+                .ShouldBeTrue();
         }
 
         [Fact]

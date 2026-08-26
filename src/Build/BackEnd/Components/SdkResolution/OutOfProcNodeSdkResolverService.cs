@@ -25,12 +25,19 @@ namespace Microsoft.Build.BackEnd.SdkResolution
     /// Since this object is a registered <see cref="IBuildComponent"/>, it is a singleton for the main process.  To get an instance of it, you
     /// must have access to an <see cref="IBuildComponentHost"/> and call <see cref="IBuildComponentHost.GetComponent"/> and pass <see cref="BuildComponentType.SdkResolverService"/>.
     /// </summary>
-    internal sealed class OutOfProcNodeSdkResolverService : HostedSdkResolverServiceBase
+    internal sealed class OutOfProcNodeSdkResolverService : HostedSdkResolverServiceBase, ISdkResolverCacheValidator
     {
+        private const string CacheKeyComparer = "MSBuildNameIgnoreCase";
+
+        private static long s_nextCacheIdentity;
+
         /// <summary>
         /// The cache of responses which is cleared between builds.
         /// </summary>
-        private readonly ConcurrentDictionary<string, Lazy<SdkResult>> _responseCache = new ConcurrentDictionary<string, Lazy<SdkResult>>(MSBuildNameIgnoreCaseComparer.Default);
+        private readonly ConcurrentDictionary<string, CacheEntry> _responseCache = new(MSBuildNameIgnoreCaseComparer.Default);
+        private readonly long _cacheIdentity = Interlocked.Increment(ref s_nextCacheIdentity);
+        private long _cacheEpoch = 1;
+        private long _nextEntryId;
 
         /// <summary>
         /// An event to signal when a response has been received.
@@ -72,21 +79,30 @@ namespace Microsoft.Build.BackEnd.SdkResolution
                 throw new SdkResolverServiceException("SDK could not be resolved by the SDK resolver because the worker node was shut down.");
             }
 
-            bool wasResultCached = true;
-
             MSBuildEventSource.Log.OutOfProcSdkResolverServiceRequestSdkPathFromMainNodeStart(submissionId, sdk.Name, solutionPath, projectPath);
 
             // Get a cached response if possible, otherwise send the request
-            Lazy<SdkResult> sdkResultLazy = _responseCache.GetOrAdd(
+            long cacheEpoch = Volatile.Read(ref _cacheEpoch);
+            var candidate = new CacheEntry(
+                Interlocked.Increment(ref _nextEntryId),
+                cacheEpoch,
+                new Lazy<SdkResult>(() =>
+                    RequestSdkPathFromMainNode(submissionId, sdk, loggingContext, sdkReferenceLocation, solutionPath, projectPath, interactive, isRunningInVisualStudio)));
+            CacheEntry entry = _responseCache.GetOrAdd(
                 sdk.Name,
-                key => new Lazy<SdkResult>(() =>
-                {
-                    wasResultCached = false;
-
-                    return RequestSdkPathFromMainNode(submissionId, sdk, loggingContext, sdkReferenceLocation, solutionPath, projectPath, interactive, isRunningInVisualStudio);
-                }));
-
-            SdkResult sdkResult = sdkResultLazy.Value;
+                candidate);
+            bool wasResultCached = !ReferenceEquals(entry, candidate);
+            SdkResult sdkResult = entry.Result.Value;
+            var cacheIdentity = new SdkResolverCacheIdentity(
+                typeof(OutOfProcNodeSdkResolverService).FullName,
+                _cacheIdentity,
+                "NodeBuild",
+                0,
+                entry.Epoch,
+                entry.Id,
+                sdk.Name,
+                CacheKeyComparer,
+                cacheEnabled: true);
 
             if (sdkResult.Version != null && !SdkResolverService.IsReferenceSameVersion(sdk, sdkResult.Version))
             {
@@ -95,9 +111,17 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             }
 
             EvaluationObservationSession.Current?.RecordSdkResolution(
+                submissionId,
                 sdk,
                 sdkResult,
-                wasResultCached);
+                wasResultCached,
+                cacheIdentity,
+                projectPath,
+                solutionPath,
+                interactive,
+                isRunningInVisualStudio,
+                failOnUnresolvedSdk,
+                sdkReferenceLocation);
 
             MSBuildEventSource.Log.OutOfProcSdkResolverServiceRequestSdkPathFromMainNodeStop(submissionId, sdk.Name, solutionPath, projectPath, _lastResponse.Success, wasResultCached);
 
@@ -110,7 +134,29 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             base.ShutdownComponent();
 
             // Clear the response cache
+            Interlocked.Increment(ref _cacheEpoch);
             _responseCache.Clear();
+        }
+
+        public bool IsCacheEntryCurrent(SdkResolverCacheIdentity cacheIdentity)
+        {
+            if (!cacheIdentity.CacheEnabled ||
+                cacheIdentity.OwnerId != _cacheIdentity ||
+                cacheIdentity.Epoch != Volatile.Read(ref _cacheEpoch) ||
+                !string.Equals(
+                    cacheIdentity.OwnerType,
+                    typeof(OutOfProcNodeSdkResolverService).FullName,
+                    StringComparison.Ordinal) ||
+                !string.Equals(cacheIdentity.ScopeKind, "NodeBuild", StringComparison.Ordinal) ||
+                cacheIdentity.ScopeId != 0 ||
+                !string.Equals(cacheIdentity.KeyComparer, CacheKeyComparer, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return _responseCache.TryGetValue(cacheIdentity.Key, out CacheEntry entry) &&
+                entry.Epoch == cacheIdentity.Epoch &&
+                entry.Id == cacheIdentity.EntryId;
         }
 
         /// <summary>
@@ -149,6 +195,20 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
             // Return the response which was set by another thread.  In the case of shutdown, it should be null.
             return _lastResponse;
+        }
+
+        private sealed class CacheEntry
+        {
+            internal CacheEntry(long id, long epoch, Lazy<SdkResult> result)
+            {
+                Id = id;
+                Epoch = epoch;
+                Result = result;
+            }
+
+            internal long Id { get; }
+            internal long Epoch { get; }
+            internal Lazy<SdkResult> Result { get; }
         }
     }
 }
