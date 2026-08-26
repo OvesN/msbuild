@@ -36,7 +36,7 @@
 | Environment | Imported, missing imported, SDK-injected, and live process values | `PropertyTrackingEvaluatorDataWrapper`; `Environment` property-function interception | Existing property lookup or property-function result |
 | Registry and ambient inputs | Registry requests/results/failures, culture/time/runtime/tool-location values, `MakeRelative` resolved base/path, volatile values | Intrinsic expansion, path-normalization seams, and post-execution property-function interception | Actual ambient value and returned value consumed by expansion |
 | Property functions | Receiver/member, classified effect, arguments/result or failure | `Expander.Function` after dispatch | Existing invocation result; known-pure calls are omitted |
-| SDK resolution | SDK request, cache hit/miss, and returned `SdkResult` | `CachingSdkResolverService` and out-of-proc SDK service | Existing SDK cache result; resolver-internal files are intentionally opaque |
+| SDK resolution | Complete resolver request, returned `SdkResult`, hit/miss, and cache owner/scope/key/epoch/entry identity with a live-entry validator | `CachingSdkResolverService` and out-of-proc SDK service | Existing SDK cache result while that exact entry remains live; resolver-internal files are intentionally opaque |
 | Tasks and toolsets | Effective `UsingTask` registration and selected toolset/provider identity | `TaskRegistry` and evaluator initialization | Resolved task registration and toolset already selected |
 | Side effects and issues | Mutations, partial operations, exceptions, conflicts, unsupported or unverifiable inputs | Evaluator, intrinsic/property-function hooks, and recorder conflict handling | Existing operation outcome; evaluation behavior is not changed |
 

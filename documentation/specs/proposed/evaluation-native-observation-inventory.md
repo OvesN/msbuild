@@ -497,20 +497,25 @@ observed.
 | Input | Observation seam | Required record |
 | --- | --- | --- |
 | SDK request | evaluator / `ISdkResolverService.ResolveSdk` | Name, requested/minimum version, project/solution paths, interactive value, effective `IsRunningInVisualStudio`, and failure mode |
-| SDK cache lookup | `CachingSdkResolverService`, `OutOfProcNodeSdkResolverService` | Request record and cache hit/miss |
+| SDK cache lookup | `CachingSdkResolverService`, `OutOfProcNodeSdkResolverService` | Cache owner type/instance, scope, effective name key and comparer, epoch, entry ID, enabled state, and hit/miss |
 | Selected SDK result | `SdkResult` | Success/failure, path/version, additional paths, properties/items/environment additions, warnings, and errors |
 | SDK-result synthetic XML | `CreateProjectForSdkResult` | Generated source linked to the selected SDK result |
 | SDK-result host-path compatibility probe | evaluator `dotnet.exe` probe before `DOTNET_HOST_PATH` injection | Candidate path, positive/negative default-filesystem result, and injected value if any |
 | SDK-injected properties/items/environment values | evaluator data | Exact values and whether evaluation later consumed them |
 
 The SDK result cache owns reuse validity. MSBuild returns the stored `SdkResult` for the
-same cache key until that cache is cleared; the evaluation observer does not independently
-detect SDK installation, workload, NuGet, resolver, or manifest changes.
+same cache key until that cache entry is cleared. Each observation records the complete
+resolver request separately from the narrower effective cache key, and
+`ISdkResolverCacheValidator.IsCacheEntryCurrent` validates that the exact owner, scope,
+epoch, key, and entry ID are still live. Clearing a submission, all caches, or an
+out-of-proc node cache makes the prior identity invalid.
 
-The current caches key primarily by SDK name. A complete request key and explicit cache
-lifetime/epoch are required before extending this reuse beyond the existing cache scope.
-The observation records omitted request fields but must not imply that the current cache
-used those fields when selecting the result.
+The current caches key primarily by SDK name with MSBuild-name case semantics; version,
+minimum version, project/solution path, interactivity, Visual Studio mode, failure mode,
+submission, and reference location remain request identity but do not falsely appear in
+the effective SDK-cache key. Disabling SDK caching leaves no validity owner and therefore
+marks the SDK observation incomplete. Resolver installation, workload, NuGet, manifest,
+and resolver-internal dependencies remain intentionally opaque within that cache lifetime.
 
 ### 16. Shared caches and provider provenance
 
@@ -640,7 +645,7 @@ candidates retain the order consumed by evaluation.
 | `UsingTask` / project-cache registrations | Effective task registrations and VS project-cache registration side effects are recorded |
 | Environment and Registry | Imported/live/missing environment reads and both Registry expression/function paths are recorded; raw values remain internal |
 | Toolset | Effective toolset and properties are recorded; pre-session Registry/config provenance remains an explicit reuse blocker |
-| SDK | Request, final result payload, and cache hit/miss are recorded; resolver internals are opaque |
+| SDK | Complete request, final result payload, effective cache key, owner/scope/epoch/entry identity, hit/miss, and live-entry validator are recorded; resolver internals are opaque |
 | Shared caches/providers | Final consumed values are recorded; caches/providers without replayable provenance or stable identity block reuse |
 | Property-function classification | Per-member fail-closed classifier records external effects, volatile values, side effects, and unknown members; pure calls are omitted |
 | Unsupported/coverage reporting | Schema/classification versions, per-category coverage/state, typed reasons, conflicts, partial operations, and atomic completion are present |
@@ -676,7 +681,7 @@ This order closes the largest native gaps while keeping each step measurable:
    filesystem, live-environment, ambient, volatile, and side-effect members.
 8. Add Registry expressions/functions and toolset Registry/configuration provenance.
 9. Add SDK request/result/cache-hit observation and synthetic SDK sources.
-10. Define the complete SDK request key and cache lifetime/epoch.
+10. Keep the complete SDK request identity distinct from the effective SDK cache key and validate the recorded owner/scope/epoch/entry lifetime.
 11. Add shared-cache provenance for PRE, filesystem, glob, search, directory,
     toolset, environment, and `ToolLocationHelper` caches.
 12. Add custom-provider contracts where custom-host support is required.

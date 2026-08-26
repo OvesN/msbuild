@@ -16,6 +16,7 @@ using Microsoft.Build.Framework;
 using Microsoft.Build.ObjectModelRemoting;
 using Microsoft.Build.Shared.FileSystem;
 using SdkResult = Microsoft.Build.BackEnd.SdkResolution.SdkResult;
+using SdkResolverCacheIdentity = Microsoft.Build.BackEnd.SdkResolution.SdkResolverCacheIdentity;
 
 #nullable disable
 
@@ -24,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 10;
+        private const int ObservationSchemaVersion = 11;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -916,9 +917,17 @@ namespace Microsoft.Build.Evaluation.Context
         }
 
         internal void RecordSdkResolution(
+            int submissionId,
             SdkReference sdk,
             SdkResult result,
-            bool fromCache)
+            bool fromCache,
+            SdkResolverCacheIdentity cacheIdentity,
+            string projectPath,
+            string solutionPath,
+            bool interactive,
+            bool isRunningInVisualStudio,
+            bool failOnUnresolvedSdk,
+            ElementLocation referenceLocation)
         {
             if (sdk is null)
             {
@@ -926,13 +935,28 @@ namespace Microsoft.Build.Evaluation.Context
             }
 
             MarkCategory(EvaluationObservationCategory.SdkResolution, EvaluationObservationCategoryState.Observed);
+            if (!cacheIdentity.CacheEnabled)
+            {
+                AddReason(EvaluationObservationReason.SdkResolutionWithoutCacheLifetime);
+            }
+
             Record(
                 () =>
                 {
                     _sdkResolutions.Add(new EvaluationSdkResolutionObservation(
+                        submissionId,
                         sdk.Name,
                         sdk.Version,
                         sdk.MinimumVersion,
+                        projectPath,
+                        solutionPath,
+                        interactive,
+                        isRunningInVisualStudio,
+                        failOnUnresolvedSdk,
+                        referenceLocation?.File,
+                        referenceLocation?.Line ?? 0,
+                        referenceLocation?.Column ?? 0,
+                        cacheIdentity,
                         result?.Success ?? false,
                         result?.Path,
                         result?.Version,
@@ -947,11 +971,14 @@ namespace Microsoft.Build.Evaluation.Context
         }
 
         internal void RecordSdkRequest(
+            int submissionId,
             SdkReference sdk,
             string projectPath,
             string solutionPath,
             bool interactive,
-            bool isRunningInVisualStudio)
+            bool isRunningInVisualStudio,
+            bool failOnUnresolvedSdk,
+            ElementLocation referenceLocation)
         {
             if (sdk is null)
             {
@@ -962,14 +989,19 @@ namespace Microsoft.Build.Evaluation.Context
                 EvaluationExternalInputKind.Sdk,
                 "SdkRequest",
                 string.Concat(
-                    sdk.Name,
-                    "|", sdk.Version,
-                    "|", sdk.MinimumVersion,
-                    "|", projectPath,
-                    "|", solutionPath),
+                    "Submission=", submissionId.ToString(CultureInfo.InvariantCulture),
+                    "\0Name=", sdk.Name,
+                    "\0Version=", sdk.Version,
+                    "\0MinimumVersion=", sdk.MinimumVersion,
+                    "\0Project=", projectPath,
+                    "\0Solution=", solutionPath,
+                    "\0Location=", referenceLocation?.File,
+                    ":", (referenceLocation?.Line ?? 0).ToString(CultureInfo.InvariantCulture),
+                    ":", (referenceLocation?.Column ?? 0).ToString(CultureInfo.InvariantCulture)),
                 string.Concat(
                     "Interactive=", interactive.ToString(CultureInfo.InvariantCulture),
-                    ";VisualStudio=", isRunningInVisualStudio.ToString(CultureInfo.InvariantCulture)));
+                    ";VisualStudio=", isRunningInVisualStudio.ToString(CultureInfo.InvariantCulture),
+                    ";FailOnUnresolved=", failOnUnresolvedSdk.ToString(CultureInfo.InvariantCulture)));
         }
 
         internal void RecordTaskRegistration(
@@ -2702,6 +2734,9 @@ namespace Microsoft.Build.Evaluation.Context
                     break;
                 case EvaluationObservationReason.PartialEnumeration:
                     MarkCategory(EvaluationObservationCategory.DirectoryEnumeration, EvaluationObservationCategoryState.Incomplete);
+                    break;
+                case EvaluationObservationReason.SdkResolutionWithoutCacheLifetime:
+                    MarkCategory(EvaluationObservationCategory.SdkResolution, EvaluationObservationCategoryState.Incomplete);
                     break;
                 case EvaluationObservationReason.IncompleteEvaluationStage:
                 case EvaluationObservationReason.ParserConfigurationProvenanceUnavailable:

@@ -2311,12 +2311,18 @@ namespace Microsoft.Build.Evaluation
                 // Combine SDK path with the "project" relative path
                 try
                 {
+                    bool failOnUnresolvedSdk =
+                        !_loadSettings.HasFlag(ProjectLoadSettings.IgnoreMissingImports) ||
+                        _loadSettings.HasFlag(ProjectLoadSettings.FailOnUnresolvedSdk);
                     _observationSession?.RecordSdkRequest(
+                        _submissionId,
                         sdkReference,
                         projectPath,
                         solutionPath,
                         _interactive,
-                        _isRunningInVisualStudio);
+                        _isRunningInVisualStudio,
+                        failOnUnresolvedSdk,
+                        importElement.Location);
 
                     using var assemblyLoadsTracker = AssemblyLoadsTracker.StartTracking(_evaluationLoggingContext, AssemblyLoadingContext.SdkResolution, _sdkResolverService.GetType());
 
@@ -2328,7 +2334,7 @@ namespace Microsoft.Build.Evaluation
                         solutionPath, projectPath,
                         _interactive,
                         _isRunningInVisualStudio,
-                        failOnUnresolvedSdk: !_loadSettings.HasFlag(ProjectLoadSettings.IgnoreMissingImports) || _loadSettings.HasFlag(ProjectLoadSettings.FailOnUnresolvedSdk));
+                        failOnUnresolvedSdk);
                 }
                 catch (Exception e) when (e is SdkResolverException or SdkResolverServiceException)
                 {
