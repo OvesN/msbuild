@@ -215,8 +215,10 @@ On a cache hit, the exact PRE object/version is observable even if the old sourc
 missing. The observation is then complete for the object consumed, but disk-backed future
 reuse remains blocked until load-time source provenance is available.
 
-Root observation requires the session to begin before project-source acquisition, not in
-the `Evaluator` constructor after a PRE already exists.
+File-based `Project` and `ProjectInstance` entry points begin a source-load capture before
+root acquisition. If root parsing fails before `Evaluator` exists, the load owner creates
+a minimal failed report containing the root bytes and typed failure; request coverage is
+marked incomplete because the normal evaluator snapshot was never reached.
 
 ### 3. File content reads
 

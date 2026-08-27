@@ -626,6 +626,65 @@ namespace Microsoft.Build.UnitTests.Definition
                 .State.ShouldBe(EvaluationObservationCategoryState.Incomplete);
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void EvaluationObservationRecordsMalformedRootBytes(bool useProjectInstance)
+        {
+            string malformedRoot = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "malformed-root.proj");
+            byte[] malformedBytes = Encoding.UTF8.GetBytes(
+                "<Project><PropertyGroup><Value>before</Value></Project>" +
+                new string('x', 128 * 1024));
+            File.WriteAllBytes(malformedRoot, malformedBytes);
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(malformedBytes);
+            var reports = new List<EvaluationObservationReport>();
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                reports.Add);
+            var options = new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            };
+
+            Action load = useProjectInstance
+                ? () => ProjectInstance.FromFile(malformedRoot, options)
+                : () => Project.FromFile(malformedRoot, options);
+
+            Should.Throw<InvalidProjectFileException>(load);
+
+            EvaluationObservationReport report = reports.ShouldHaveSingleItem();
+            report.ProjectPath.ShouldBe(malformedRoot);
+            report.EvaluationSucceeded.ShouldBeFalse();
+            report.Request.ShouldBeNull();
+            EvaluationProjectSourceObservation source =
+                report.ProjectSources.ShouldHaveSingleItem();
+            source.Role.ShouldBe(EvaluationProjectSourceRole.Root);
+            source.Outcome.ShouldBe(EvaluationProjectSourceOutcome.ParseFailure);
+            source.ContentHash.ShouldBe(expectedHash);
+            source.HashKind.ShouldBe(EvaluationContentHashKind.RawBytes);
+            source.Encoding.ShouldBe(Encoding.UTF8.WebName);
+            source.Provider.ShouldBe("Disk");
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, malformedRoot) &&
+                observation.ContentHash == expectedHash &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.IsVerifiable);
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.ShouldHaveSingleItem();
+            failure.Category.ShouldBe(EvaluationObservationCategory.ProjectSource);
+            failure.Operation.ShouldBe("ProjectSource.Parse");
+            failure.Path.ShouldBe(malformedRoot);
+            failure.ExceptionType.ShouldBe(typeof(XmlException).FullName);
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.Request)
+                .State.ShouldBe(EvaluationObservationCategoryState.Incomplete);
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.ProjectSource)
+                .State.ShouldBe(EvaluationObservationCategoryState.Incomplete);
+        }
+
         [Fact]
         public void EvaluationObservationRecordsInvalidMsbuildImportBytes()
         {

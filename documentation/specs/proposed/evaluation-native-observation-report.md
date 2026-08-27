@@ -7,23 +7,26 @@ The adversarial follow-up and confirmed counterexamples are documented in
 
 ## Session lifecycle
 
-1. `Evaluator` calls `EvaluationObservationSession.TryCreate`. When the feature is
+1. File-based `Project` and `ProjectInstance` loads pass a source capture into root
+   acquisition. A malformed root produces a minimal failed report before `Evaluator`
+   exists; its request category is incomplete.
+2. `Evaluator` calls `EvaluationObservationSession.TryCreate`. When the feature is
    disabled it returns `null`, so the normal evaluator path is unchanged.
-2. The session is passed to `PropertyTrackingEvaluatorDataWrapper`. The active evaluation
+3. The session is passed to `PropertyTrackingEvaluatorDataWrapper`. The active evaluation
    `IFileSystem`, including any directory-cache wrapper, is wrapped by
    `RecordingFileSystem`.
-3. `RecordInitialObservationSnapshot` records the root source and effective request state
+4. `RecordInitialObservationSnapshot` records the root source and effective request state
    once. It reuses existing evaluator, toolset, environment, trait, and PRE data.
-4. `EvaluationObservationSession.Enter` makes the session available through the
+5. `EvaluationObservationSession.Enter` makes the session available through the
    thread-static `Current` property and the Framework `EvaluationInputObserver` scope while
    `Evaluator.Evaluate` runs.
-5. Recorders add typed observations to per-session keyed collections. One lock protects
+6. Recorders add typed observations to per-session keyed collections. One lock protects
    mutation and completion. Repeated identical facts are deduplicated; conflicting facts,
    unsupported operations, partial results, and failures add typed reasons.
-6. `Evaluator` calls `Complete` from `finally`, including failed evaluations. Completion
+7. `Evaluator` calls `Complete` from `finally`, including failed evaluations. Completion
    closes the session under the lock and creates one read-only
    `EvaluationObservationReport`.
-7. Report finalization transfers the populated dictionaries/lists to read-only report
+8. Report finalization transfers the populated dictionaries/lists to read-only report
    views without array copies. The completed session detaches its references because it
    can remain reachable through evaluator objects. Late callbacks see completion and
    cannot change the report.

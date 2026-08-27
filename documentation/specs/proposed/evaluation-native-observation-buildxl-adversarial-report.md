@@ -292,15 +292,22 @@ reuse blocker. Parser-configuration load failures and registry-expression failur
 also retain typed attribution. Post-fix BuildXL differential results are reported
 only after the complete six-gap validation pass.
 
-### 8. Early root failures have no report
+### 8. Early root failures had no report at the baseline
 
-A malformed root project generated two BuildXL events for the root path and
+At the pinned validation baseline, a malformed root project generated two BuildXL events for the root path and
 zero native reports. The observation session is created in `Evaluator`,
 after the root `ProjectRootElement` has already been loaded.
 
 This is outside successful evaluation-cache reuse, but it disproves any
 claim that failed evaluation always has typed source and failure
 observations.
+
+The current observer starts a source-load capture before root acquisition
+for file-based `Project` and `ProjectInstance` entry points. If parsing
+fails, it emits one minimal failed report with the root role, exact
+raw-byte hash, parse outcome, timestamp/provider data, and typed
+`ProjectSource.Parse` failure. The request category is incomplete because
+normal evaluator initialization was never reached.
 
 ## Cache experiments
 

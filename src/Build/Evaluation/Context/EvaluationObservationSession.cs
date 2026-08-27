@@ -246,6 +246,43 @@ namespace Microsoft.Build.Evaluation.Context
                 : null;
         }
 
+        internal static void ReportProjectLoadFailure(
+            int evaluationId,
+            string projectPath,
+            ProjectEvaluationStage evaluationStage,
+            EvaluationContext.SharingPolicy sharingPolicy,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture)
+        {
+            try
+            {
+                if (sourceLoadCapture?.Failure is null)
+                {
+                    return;
+                }
+
+                EvaluationObservationSession session = TryCreate(
+                    evaluationId,
+                    projectPath,
+                    evaluationStage,
+                    sharingPolicy,
+                    hasDirectoryCache: false);
+                if (session is null)
+                {
+                    return;
+                }
+
+                session.MarkCategory(
+                    EvaluationObservationCategory.Request,
+                    EvaluationObservationCategoryState.Incomplete);
+                session.RecordProjectSourceFailure(projectPath, sourceLoadCapture);
+                session.Complete(evaluationSucceeded: false);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                // Preserve the project-load exception.
+            }
+        }
+
         internal static EvaluationObservationSession CreateForTests(int evaluationId = 1)
         {
             return new EvaluationObservationSession(
