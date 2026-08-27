@@ -2,6 +2,8 @@
 
 BuildXL differential validation is documented in
 [evaluation-native-observation-buildxl-validation.md](evaluation-native-observation-buildxl-validation.md).
+The adversarial follow-up and confirmed counterexamples are documented in
+[evaluation-native-observation-buildxl-adversarial-report.md](evaluation-native-observation-buildxl-adversarial-report.md).
 
 ## Session lifecycle
 

@@ -1,5 +1,10 @@
 # BuildXL differential validation of native evaluation observation
 
+> **Scope correction:** this report remains accurate for its original
+> scenario, but it is not a completeness result. The broader adversarial
+> campaign found confirmed missing and incorrect records. See
+> [evaluation-native-observation-buildxl-adversarial-report.md](evaluation-native-observation-buildxl-adversarial-report.md).
+
 ## Result
 
 On 2026-08-27, the evaluator-native observer at commit `d17808b37a` was
