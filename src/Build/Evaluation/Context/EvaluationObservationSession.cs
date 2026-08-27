@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 12;
+        private const int ObservationSchemaVersion = 13;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -804,11 +804,21 @@ namespace Microsoft.Build.Evaluation.Context
             object instance,
             object[] arguments,
             object result,
-            bool succeeded = true)
+            bool succeeded = true,
+            string pathBaseDirectory = null,
+            object[] usageArguments = null)
         {
             try
             {
-                RecordPropertyFunctionCore(receiverType, member, instance, arguments, result, succeeded);
+                RecordPropertyFunctionCore(
+                    receiverType,
+                    member,
+                    instance,
+                    arguments,
+                    result,
+                    succeeded,
+                    pathBaseDirectory,
+                    usageArguments);
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
@@ -822,7 +832,9 @@ namespace Microsoft.Build.Evaluation.Context
             object instance,
             object[] arguments,
             object result,
-            bool succeeded)
+            bool succeeded,
+            string pathBaseDirectory,
+            object[] usageArguments)
         {
             EvaluationPropertyFunctionEffect effects = ClassifyPropertyFunction(receiverType, member);
             if (succeeded && effects == EvaluationPropertyFunctionEffect.Pure)
@@ -830,7 +842,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return;
             }
 
-            string[] serializedArguments = SerializeArguments(arguments);
+            string[] serializedArguments = SerializeArguments(usageArguments ?? arguments);
             string serializedResult =
                 !succeeded
                     ? "<failed>"
@@ -920,7 +932,8 @@ namespace Microsoft.Build.Evaluation.Context
                     result,
                     effects,
                     serializedArguments,
-                    serializedResult);
+                    serializedResult,
+                    pathBaseDirectory);
             }
         }
 
@@ -1059,7 +1072,8 @@ namespace Microsoft.Build.Evaluation.Context
             string path,
             EvaluationPathKind kind,
             bool exists,
-            string provider = null)
+            string provider = null,
+            string baseDirectory = null)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -1077,7 +1091,7 @@ namespace Microsoft.Build.Evaluation.Context
                     }
 
                     var key = new PathProbeKey(
-                        NormalizePath(path),
+                        NormalizePath(path, baseDirectory),
                         kind,
                         provider ?? s_defaultFileSystemProvider);
                     var observation = new EvaluationPathProbeObservation(
@@ -1112,19 +1126,36 @@ namespace Microsoft.Build.Evaluation.Context
             IReadOnlyList<string> entries,
             EvaluationEnumerationCompletion completion,
             string provider = null,
-            string optionsIdentity = null)
+            string optionsIdentity = null,
+            string baseDirectory = null)
         {
+            string[] retainedEntries = _retainDetails && entries is { Count: > 0 }
+                ? new string[entries.Count]
+                : [];
+            var entriesHasher = new EvaluationInputFingerprintBuilder();
+            int entryCount = entries?.Count ?? 0;
+            for (int i = 0; i < entryCount; i++)
+            {
+                string normalizedEntry = NormalizePath(entries[i], baseDirectory);
+                entriesHasher.Add(normalizedEntry);
+                if (_retainDetails)
+                {
+                    retainedEntries[i] = normalizedEntry;
+                }
+            }
+
             RecordEnumerationCore(
                 path,
                 searchPattern,
                 searchOption,
                 kind,
-                _retainDetails ? CopyStrings(entries) : [],
-                entries?.Count ?? 0,
-                ComputeStringSequenceHash(entries),
+                retainedEntries,
+                entryCount,
+                entriesHasher.Complete(),
                 completion,
                 provider,
-                optionsIdentity);
+                optionsIdentity,
+                baseDirectory);
         }
 
         internal void RecordEnumeration(
@@ -1137,7 +1168,8 @@ namespace Microsoft.Build.Evaluation.Context
             string entriesHash,
             EvaluationEnumerationCompletion completion,
             string provider = null,
-            string optionsIdentity = null)
+            string optionsIdentity = null,
+            string baseDirectory = null)
         {
             RecordEnumerationCore(
                 path,
@@ -1149,7 +1181,8 @@ namespace Microsoft.Build.Evaluation.Context
                 entriesHash,
                 completion,
                 provider,
-                optionsIdentity);
+                optionsIdentity,
+                baseDirectory);
         }
 
         private void RecordEnumerationCore(
@@ -1162,7 +1195,8 @@ namespace Microsoft.Build.Evaluation.Context
             string entriesHash,
             EvaluationEnumerationCompletion completion,
             string provider,
-            string optionsIdentity)
+            string optionsIdentity,
+            string baseDirectory)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -1187,7 +1221,7 @@ namespace Microsoft.Build.Evaluation.Context
                         ? 0
                         : ++_incompleteEnumerationIdentity;
                     var key = new EnumerationKey(
-                        NormalizePath(path),
+                        NormalizePath(path, baseDirectory),
                         searchPattern ?? "*",
                         searchOption,
                         kind,
@@ -1236,7 +1270,8 @@ namespace Microsoft.Build.Evaluation.Context
             string path,
             EvaluationMetadataKind kind,
             long value,
-            string provider = null)
+            string provider = null,
+            string baseDirectory = null)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -1246,7 +1281,7 @@ namespace Microsoft.Build.Evaluation.Context
             MarkCategory(EvaluationObservationCategory.FileMetadata, EvaluationObservationCategoryState.Observed);
             try
             {
-                string normalizedPath = NormalizePath(path);
+                string normalizedPath = NormalizePath(path, baseDirectory);
                 RecordMetadataCore(
                     normalizedPath,
                     kind,
@@ -1279,10 +1314,7 @@ namespace Microsoft.Build.Evaluation.Context
             try
             {
                 string normalizedBaseDirectory = NormalizePath(baseDirectory);
-                string normalizedPath =
-                    !Path.IsPathRooted(path) && !string.IsNullOrEmpty(normalizedBaseDirectory)
-                        ? path
-                        : NormalizePath(path);
+                string normalizedPath = NormalizePath(path, normalizedBaseDirectory);
                 RecordMetadataCore(
                     normalizedPath,
                     kind,
@@ -1346,7 +1378,8 @@ namespace Microsoft.Build.Evaluation.Context
             string contentHash,
             bool isVerifiable,
             EvaluationContentHashKind hashKind = EvaluationContentHashKind.Unknown,
-            string provider = null)
+            string provider = null,
+            string baseDirectory = null)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -1367,7 +1400,7 @@ namespace Microsoft.Build.Evaluation.Context
                         return;
                     }
 
-                    string normalizedPath = NormalizePath(path);
+                    string normalizedPath = NormalizePath(path, baseDirectory);
                     string actualProvider = provider ?? s_defaultFileSystemProvider;
                     var key = new FileReadKey(normalizedPath, hashKind, actualProvider);
                     var observation = new EvaluationFileReadObservation(
@@ -1558,11 +1591,21 @@ namespace Microsoft.Build.Evaluation.Context
             }
         }
 
-        private string NormalizePath(string path)
+        internal string NormalizePath(string path, string baseDirectory = null)
         {
-            if (string.IsNullOrEmpty(path) || Path.IsPathRooted(path))
+            if (string.IsNullOrEmpty(path))
             {
-                return string.IsNullOrEmpty(path) ? path : FileUtilities.GetFullPathNoThrow(path);
+                return path;
+            }
+
+            if (FileUtilities.IsPathFullyQualifiedNoThrow(path))
+            {
+                return FileUtilities.GetFullPathNoThrow(path);
+            }
+
+            if (!string.IsNullOrEmpty(baseDirectory))
+            {
+                return FileUtilities.GetFullPathNoThrow(path, baseDirectory);
             }
 
             AddReason(EvaluationObservationReason.UnrootedPath);
@@ -1624,10 +1667,22 @@ namespace Microsoft.Build.Evaluation.Context
             object result,
             EvaluationPropertyFunctionEffect effects,
             string[] serializedArguments,
-            string serializedResult)
+            string serializedResult,
+            string pathBaseDirectory)
         {
             string receiverName = receiverType?.FullName;
             string firstArgument = arguments is { Length: > 0 } ? arguments[0]?.ToString() : null;
+            bool hasPathInput =
+                receiverName == typeof(System.IO.File).FullName ||
+                receiverName == typeof(System.IO.Directory).FullName ||
+                (receiverName == typeof(System.IO.Path).FullName &&
+                    string.Equals(member, "Exists", StringComparison.OrdinalIgnoreCase)) ||
+                (receiverType == typeof(IntrinsicFunctions) &&
+                    (string.Equals(member, "FileExists", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(member, "DirectoryExists", StringComparison.OrdinalIgnoreCase)));
+            string firstPath = hasPathInput
+                ? NormalizePath(firstArgument, pathBaseDirectory)
+                : firstArgument;
             string serializedRequest = string.Join("|", serializedArguments);
 
             if (receiverName == typeof(Environment).FullName)
@@ -1655,7 +1710,7 @@ namespace Microsoft.Build.Evaluation.Context
                     result is string text)
                 {
                     RecordFileRead(
-                        firstArgument,
+                        firstPath,
                         ComputeTextHash(text),
                         isVerifiable: true,
                         hashKind: EvaluationContentHashKind.DecodedText);
@@ -1664,7 +1719,7 @@ namespace Microsoft.Build.Evaluation.Context
                     result is byte[] bytes)
                 {
                     RecordFileRead(
-                        firstArgument,
+                        firstPath,
                         ComputeBytesHash(bytes),
                         isVerifiable: true,
                         hashKind: EvaluationContentHashKind.RawBytes);
@@ -1673,7 +1728,7 @@ namespace Microsoft.Build.Evaluation.Context
                     result is string[] lines)
                 {
                     RecordFileRead(
-                        firstArgument,
+                        firstPath,
                         ComputeStringSequenceHash(lines),
                         isVerifiable: true,
                         hashKind: EvaluationContentHashKind.DecodedTextSequence);
@@ -1681,12 +1736,12 @@ namespace Microsoft.Build.Evaluation.Context
                 else if (string.Equals(member, nameof(System.IO.File.Exists), StringComparison.OrdinalIgnoreCase) &&
                     result is bool fileExists)
                 {
-                    RecordProbe(firstArgument, EvaluationPathKind.File, fileExists);
+                    RecordProbe(firstPath, EvaluationPathKind.File, fileExists);
                 }
                 else
                 {
                     RecordMetadata(
-                        firstArgument,
+                        firstPath,
                         EvaluationMetadataKind.PropertyFunction,
                         serializedResult,
                         null,
@@ -1701,7 +1756,7 @@ namespace Microsoft.Build.Evaluation.Context
                 if (string.Equals(member, nameof(System.IO.Directory.Exists), StringComparison.OrdinalIgnoreCase) &&
                     result is bool directoryExists)
                 {
-                    RecordProbe(firstArgument, EvaluationPathKind.Directory, directoryExists);
+                    RecordProbe(firstPath, EvaluationPathKind.Directory, directoryExists);
                 }
                 else if ((effects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0 &&
                          result is ICollection collection)
@@ -1720,7 +1775,7 @@ namespace Microsoft.Build.Evaluation.Context
                         out SearchOption searchOption,
                         out string optionsIdentity);
                     RecordEnumeration(
-                        firstArgument,
+                        firstPath,
                         searchPattern,
                         searchOption,
                         GetEnumerationKind(member),
@@ -1728,20 +1783,21 @@ namespace Microsoft.Build.Evaluation.Context
                         requestIsComplete
                             ? EvaluationEnumerationCompletion.Complete
                             : EvaluationEnumerationCompletion.Partial,
-                        optionsIdentity: optionsIdentity);
+                        optionsIdentity: optionsIdentity,
+                        baseDirectory: pathBaseDirectory);
                 }
                 else if ((effects & EvaluationPropertyFunctionEffect.Ambient) != 0)
                 {
                     RecordExternalInputCore(
                         EvaluationExternalInputKind.Ambient,
                         string.Concat(receiverName, "::", member),
-                        serializedRequest,
+                        string.Concat("Arguments=", serializedRequest, "\0Base=", pathBaseDirectory),
                         serializedResult);
                 }
                 else
                 {
                     RecordMetadata(
-                        firstArgument,
+                        firstPath,
                         EvaluationMetadataKind.PropertyFunction,
                         serializedResult,
                         null,
@@ -1756,14 +1812,14 @@ namespace Microsoft.Build.Evaluation.Context
                 if (string.Equals(member, "Exists", StringComparison.OrdinalIgnoreCase) &&
                     result is bool exists)
                 {
-                    RecordProbe(firstArgument, EvaluationPathKind.FileOrDirectory, exists);
+                    RecordProbe(firstPath, EvaluationPathKind.FileOrDirectory, exists);
                 }
                 else if ((effects & EvaluationPropertyFunctionEffect.Ambient) != 0)
                 {
                     RecordExternalInputCore(
                         EvaluationExternalInputKind.Ambient,
                         string.Concat(receiverName, "::", member),
-                        serializedRequest,
+                        string.Concat("Arguments=", serializedRequest, "\0Base=", pathBaseDirectory),
                         serializedResult);
                 }
 
@@ -1775,12 +1831,12 @@ namespace Microsoft.Build.Evaluation.Context
                 if (string.Equals(member, "FileExists", StringComparison.OrdinalIgnoreCase) &&
                     result is bool fileExists)
                 {
-                    RecordProbe(firstArgument, EvaluationPathKind.File, fileExists);
+                    RecordProbe(firstPath, EvaluationPathKind.File, fileExists);
                 }
                 else if (string.Equals(member, "DirectoryExists", StringComparison.OrdinalIgnoreCase) &&
                          result is bool directoryExists)
                 {
-                    RecordProbe(firstArgument, EvaluationPathKind.Directory, directoryExists);
+                    RecordProbe(firstPath, EvaluationPathKind.Directory, directoryExists);
                 }
                 else if (string.Equals(member, "GetPathOfFileAbove", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(member, "GetDirectoryNameOfFileAbove", StringComparison.OrdinalIgnoreCase))
@@ -3105,6 +3161,24 @@ namespace Microsoft.Build.Evaluation.Context
             _session = session;
         }
 
+        private string CaptureBaseDirectory(string path)
+        {
+            if (string.IsNullOrEmpty(path) || FileUtilities.IsPathFullyQualifiedNoThrow(path))
+            {
+                return null;
+            }
+
+            try
+            {
+                return Directory.GetCurrentDirectory();
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                _session.MarkReason(EvaluationObservationReason.ObservationIncomplete);
+                return null;
+            }
+        }
+
         public TextReader ReadFile(string path)
         {
             if (_session.IsCompleted)
@@ -3112,6 +3186,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.ReadFile(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 TextReader reader = _inner.ReadFile(path);
@@ -3119,7 +3194,8 @@ namespace Microsoft.Build.Evaluation.Context
                     path,
                     contentHash: null,
                     isVerifiable: false,
-                    provider: _providerIdentity);
+                    provider: _providerIdentity,
+                    baseDirectory: baseDirectory);
                 return reader;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3136,6 +3212,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.GetFileStream(path, mode, access, share);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 Stream stream = _inner.GetFileStream(path, mode, access, share);
@@ -3145,7 +3222,8 @@ namespace Microsoft.Build.Evaluation.Context
                         path,
                         contentHash: null,
                         isVerifiable: false,
-                        provider: _providerIdentity);
+                        provider: _providerIdentity,
+                        baseDirectory: baseDirectory);
                 }
 
                 return stream;
@@ -3164,6 +3242,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.ReadFileAllText(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 string content = _inner.ReadFileAllText(path);
@@ -3174,7 +3253,8 @@ namespace Microsoft.Build.Evaluation.Context
                         EvaluationObservationSession.ComputeTextHash(content),
                         isVerifiable: true,
                         hashKind: EvaluationContentHashKind.DecodedText,
-                        provider: _providerIdentity);
+                        provider: _providerIdentity,
+                        baseDirectory: baseDirectory);
                 }
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
@@ -3197,6 +3277,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.ReadFileAllBytes(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 byte[] content = _inner.ReadFileAllBytes(path);
@@ -3207,7 +3288,8 @@ namespace Microsoft.Build.Evaluation.Context
                         EvaluationObservationSession.ComputeBytesHash(content),
                         isVerifiable: true,
                         hashKind: EvaluationContentHashKind.RawBytes,
-                        provider: _providerIdentity);
+                        provider: _providerIdentity,
+                        baseDirectory: baseDirectory);
                 }
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
@@ -3284,6 +3366,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.GetAttributes(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 FileAttributes attributes = _inner.GetAttributes(path);
@@ -3291,7 +3374,8 @@ namespace Microsoft.Build.Evaluation.Context
                     path,
                     EvaluationMetadataKind.Attributes,
                     (long)attributes,
-                    _providerIdentity);
+                    _providerIdentity,
+                    baseDirectory);
                 return attributes;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3308,6 +3392,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.GetLastWriteTimeUtc(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 DateTime timestamp = _inner.GetLastWriteTimeUtc(path);
@@ -3315,7 +3400,8 @@ namespace Microsoft.Build.Evaluation.Context
                     path,
                     EvaluationMetadataKind.LastWriteTimeUtc,
                     timestamp.Ticks,
-                    _providerIdentity);
+                    _providerIdentity,
+                    baseDirectory);
                 return timestamp;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3332,10 +3418,11 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.DirectoryExists(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 bool exists = _inner.DirectoryExists(path);
-                _session.RecordProbe(path, EvaluationPathKind.Directory, exists, _providerIdentity);
+                _session.RecordProbe(path, EvaluationPathKind.Directory, exists, _providerIdentity, baseDirectory);
                 return exists;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3352,10 +3439,11 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.FileExists(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 bool exists = _inner.FileExists(path);
-                _session.RecordProbe(path, EvaluationPathKind.File, exists, _providerIdentity);
+                _session.RecordProbe(path, EvaluationPathKind.File, exists, _providerIdentity, baseDirectory);
                 return exists;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3372,10 +3460,11 @@ namespace Microsoft.Build.Evaluation.Context
                 return _inner.FileOrDirectoryExists(path);
             }
 
+            string baseDirectory = CaptureBaseDirectory(path);
             try
             {
                 bool exists = _inner.FileOrDirectoryExists(path);
-                _session.RecordProbe(path, EvaluationPathKind.FileOrDirectory, exists, _providerIdentity);
+                _session.RecordProbe(path, EvaluationPathKind.FileOrDirectory, exists, _providerIdentity, baseDirectory);
                 return exists;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3392,25 +3481,7 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationEnumerationKind kind,
             Func<IFileSystem, string, string, SearchOption, IEnumerable<string>> enumerate)
         {
-            IEnumerable<string> entries;
-            try
-            {
-                entries = enumerate(_inner, path, searchPattern, searchOption);
-            }
-            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
-            {
-                _session.RecordEnumeration(
-                    path,
-                    searchPattern,
-                    searchOption,
-                    kind,
-                    [],
-                    EvaluationEnumerationCompletion.Failure,
-                    _providerIdentity);
-                throw;
-            }
-
-            return RecordEnumerationIterator(path, searchPattern, searchOption, kind, entries);
+            return RecordEnumerationIterator(path, searchPattern, searchOption, kind, enumerate);
         }
 
         private IEnumerable<string> RecordEnumerationIterator(
@@ -3418,8 +3489,9 @@ namespace Microsoft.Build.Evaluation.Context
             string searchPattern,
             SearchOption searchOption,
             EvaluationEnumerationKind kind,
-            IEnumerable<string> entries)
+            Func<IFileSystem, string, string, SearchOption, IEnumerable<string>> enumerate)
         {
+            string baseDirectory = CaptureBaseDirectory(path);
             List<string> observedEntries = _session.RetainDetails ? [] : null;
             var entriesHasher = new EvaluationInputFingerprintBuilder();
             int entryCount = 0;
@@ -3428,8 +3500,10 @@ namespace Microsoft.Build.Evaluation.Context
 
             try
             {
+                IEnumerable<string> entries;
                 try
                 {
+                    entries = enumerate(_inner, path, searchPattern, searchOption);
                     enumerator = entries.GetEnumerator();
                 }
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -3458,9 +3532,10 @@ namespace Microsoft.Build.Evaluation.Context
                     }
 
                     string entry = enumerator.Current;
+                    string normalizedEntry = _session.NormalizePath(entry, baseDirectory);
                     entryCount++;
-                    entriesHasher.Add(entry);
-                    observedEntries?.Add(entry);
+                    entriesHasher.Add(normalizedEntry);
+                    observedEntries?.Add(normalizedEntry);
                     yield return entry;
                 }
             }
@@ -3486,7 +3561,8 @@ namespace Microsoft.Build.Evaluation.Context
                         entryCount,
                         entriesHasher.Complete(),
                         completion,
-                        _providerIdentity);
+                        _providerIdentity,
+                        baseDirectory: baseDirectory);
                 }
             }
         }

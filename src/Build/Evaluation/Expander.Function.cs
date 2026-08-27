@@ -358,6 +358,52 @@ internal partial class Expander<P, I>
             return false;
         }
 
+        private string GetObservationPathBaseDirectory(object[] args)
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.Current;
+            if (session is null ||
+                args is not { Length: > 0 } ||
+                args[0] is not string path ||
+                string.IsNullOrEmpty(path) ||
+                FileUtilities.IsPathFullyQualifiedNoThrow(path))
+            {
+                return null;
+            }
+
+            bool hasPathInput =
+                _receiverType == typeof(System.IO.File) ||
+                _receiverType == typeof(System.IO.Directory) ||
+                (_receiverType == typeof(System.IO.Path) &&
+                    (string.Equals(_methodMethodName, "Exists", StringComparison.OrdinalIgnoreCase) ||
+                     (string.Equals(_methodMethodName, nameof(System.IO.Path.GetFullPath), StringComparison.OrdinalIgnoreCase) &&
+                      args.Length == 1))) ||
+                (_receiverType == typeof(IntrinsicFunctions) &&
+                    (string.Equals(_methodMethodName, "FileExists", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(_methodMethodName, "DirectoryExists", StringComparison.OrdinalIgnoreCase)));
+            if (!hasPathInput)
+            {
+                return null;
+            }
+
+            if (_receiverType == typeof(System.IO.Path) &&
+                string.Equals(_methodMethodName, nameof(System.IO.Path.GetFullPath), StringComparison.OrdinalIgnoreCase) &&
+                args.Length == 1 &&
+                !string.IsNullOrEmpty(FileUtilities.CurrentThreadWorkingDirectory))
+            {
+                return FileUtilities.CurrentThreadWorkingDirectory;
+            }
+
+            try
+            {
+                return System.IO.Directory.GetCurrentDirectory();
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                session.MarkReason(EvaluationObservationReason.ObservationIncomplete);
+                return null;
+            }
+        }
+
         /// <summary>
         /// Execute the function on the given instance.
         /// </summary>
@@ -370,6 +416,8 @@ internal partial class Expander<P, I>
             object functionResult = String.Empty;
             object[] args = null;
             object[] observationArguments = null;
+            object[] usageArguments = null;
+            string observationPathBaseDirectory = null;
 
             try
             {
@@ -431,27 +479,38 @@ internal partial class Expander<P, I>
                         }
 
                         args[n] = EscapingUtilities.UnescapeAll(argumentValue);
+                    }
+                    else
+                    {
+                        args[n] = argument;
+                    }
+                }
 
-                        // In -mt mode, resolve relative path arguments for File/Directory methods
-                        // against the thread-local working directory instead of the process-global
-                        // Environment.CurrentDirectory which may point to a different project's directory.
-                        // In multiprocess mode, CurrentThreadWorkingDirectory is null and
-                        // MakeFullPathFromThreadWorkingDirectory returns null — this is a no-op.
-                        // This must happen AFTER UnescapeAll so that the working directory path
-                        // (a real filesystem path) is not corrupted by MSBuild unescape processing.
-                        if ((_receiverType == typeof(System.IO.File) || _receiverType == typeof(System.IO.Directory))
-                            && IsFileOrDirectoryPathArgument(_methodMethodName, n))
+                if (EvaluationObservationSession.Current is not null)
+                {
+                    usageArguments = (object[])args.Clone();
+                }
+
+                // In -mt mode, resolve relative path arguments for File/Directory methods
+                // against the thread-local working directory instead of the process-global
+                // Environment.CurrentDirectory which may point to a different project's directory.
+                // In multiprocess mode, CurrentThreadWorkingDirectory is null and
+                // MakeFullPathFromThreadWorkingDirectory returns null — this is a no-op.
+                // This must happen AFTER UnescapeAll so that the working directory path
+                // (a real filesystem path) is not corrupted by MSBuild unescape processing.
+                if (_receiverType == typeof(System.IO.File) || _receiverType == typeof(System.IO.Directory))
+                {
+                    for (int n = 0; n < args.Length; n++)
+                    {
+                        if (args[n] is string pathArgument &&
+                            IsFileOrDirectoryPathArgument(_methodMethodName, n))
                         {
-                            AbsolutePath? resolved = FileUtilities.MakeFullPathFromThreadWorkingDirectory((string)args[n]);
+                            AbsolutePath? resolved = FileUtilities.MakeFullPathFromThreadWorkingDirectory(pathArgument);
                             if (resolved.HasValue)
                             {
                                 args[n] = (string)resolved.GetValueOrDefault();
                             }
                         }
-                    }
-                    else
-                    {
-                        args[n] = argument;
                     }
                 }
 
@@ -488,10 +547,15 @@ internal partial class Expander<P, I>
                         string startingDirectory = String.IsNullOrWhiteSpace(elementLocation.File) ? String.Empty : Path.GetDirectoryName(elementLocation.File);
 
                         args = [args[0], startingDirectory];
+                        if (usageArguments is not null)
+                        {
+                            usageArguments = [usageArguments[0], startingDirectory];
+                        }
                     }
                 }
 
                 observationArguments = args;
+                observationPathBaseDirectory = GetObservationPathBaseDirectory(args);
 
                 // If we've been asked to construct an instance, then we
                 // need to locate an appropriate constructor and invoke it
@@ -542,7 +606,9 @@ internal partial class Expander<P, I>
                             objectInstance,
                             args,
                             result: null,
-                            succeeded: false);
+                            succeeded: false,
+                            pathBaseDirectory: observationPathBaseDirectory,
+                            usageArguments: usageArguments);
                         EvaluationObservationSession.Current?.RecordOperationFailure();
                         if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
                         {
@@ -593,7 +659,9 @@ internal partial class Expander<P, I>
                     _methodMethodName,
                     objectInstance,
                     observationArguments,
-                    functionResult);
+                    functionResult,
+                    pathBaseDirectory: observationPathBaseDirectory,
+                    usageArguments: usageArguments);
 
                 // If the result of the function call is a string, then we need to escape the result
                 // so that we maintain the "engine contains escaped data" state.
@@ -632,7 +700,9 @@ internal partial class Expander<P, I>
                     objectInstance,
                     observationArguments ?? args,
                     result: null,
-                    succeeded: false);
+                    succeeded: false,
+                    pathBaseDirectory: observationPathBaseDirectory,
+                    usageArguments: usageArguments);
                 EvaluationObservationSession.Current?.RecordOperationFailure();
                 // We ended up with something other than a function expression
                 string partiallyEvaluated = GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args);
@@ -654,7 +724,9 @@ internal partial class Expander<P, I>
                     objectInstance,
                     observationArguments ?? args,
                     result: null,
-                    succeeded: false);
+                    succeeded: false,
+                    pathBaseDirectory: observationPathBaseDirectory,
+                    usageArguments: usageArguments);
                 EvaluationObservationSession.Current?.RecordOperationFailure();
                 // If there's a :: in the expression, they were probably trying for a static function
                 // invocation. Give them some more relevant info in that case

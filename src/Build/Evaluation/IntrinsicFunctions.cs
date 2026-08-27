@@ -540,9 +540,7 @@ namespace Microsoft.Build.Evaluation
         /// <returns></returns>
         public static bool FileExists(string path)
         {
-            bool exists = FileUtilities.FileExistsNoThrow(path);
-            EvaluationObservationSession.Current?.RecordProbe(path, EvaluationPathKind.File, exists);
-            return exists;
+            return FileUtilities.FileExistsNoThrow(path);
         }
 
         /// <summary>
@@ -552,9 +550,7 @@ namespace Microsoft.Build.Evaluation
         /// <returns></returns>
         public static bool DirectoryExists(string path)
         {
-            bool exists = FileUtilities.DirectoryExistsNoThrow(path);
-            EvaluationObservationSession.Current?.RecordProbe(path, EvaluationPathKind.Directory, exists);
-            return exists;
+            return FileUtilities.DirectoryExistsNoThrow(path);
         }
 
         /// <summary>

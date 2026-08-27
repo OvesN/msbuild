@@ -95,6 +95,21 @@ namespace Microsoft.Build.UnitTests.Definition
             }
         }
 
+        private sealed class TransientThreadWorkingDirectory : TransientTestState
+        {
+            private readonly string _originalValue = FileUtilities.CurrentThreadWorkingDirectory;
+
+            internal TransientThreadWorkingDirectory(string value)
+            {
+                FileUtilities.CurrentThreadWorkingDirectory = value;
+            }
+
+            public override void Revert()
+            {
+                FileUtilities.CurrentThreadWorkingDirectory = _originalValue;
+            }
+        }
+
         private static void SetResolverForContext(EvaluationContext context, SdkResolver resolver)
         {
             var sdkService = (SdkResolverService)context.SdkResolverService;
@@ -892,6 +907,358 @@ namespace Microsoft.Build.UnitTests.Definition
                 .State.ShouldBe(EvaluationObservationCategoryState.Observed);
         }
 
+        [Fact]
+        public void EvaluationObservationCanonicalizesRelativePropertyFunctionPaths()
+        {
+            string root = _env.CreateFolder().Path;
+            string inputPath = _env.CreateFile(Path.Combine(root, "relative.txt"), "content").Path;
+            string enumerationRoot = _env.CreateFolder(Path.Combine(root, "enum")).Path;
+            string topFile = _env.CreateFile(Path.Combine(enumerationRoot, "top.txt"), string.Empty).Path;
+            string nestedDirectory = _env.CreateFolder(Path.Combine(enumerationRoot, "nested")).Path;
+            string nestedFile = _env.CreateFile(Path.Combine(nestedDirectory, "nested.txt"), string.Empty).Path;
+            _env.SetCurrentDirectory(root);
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(root, "relative-paths.proj"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Read>$([System.IO.File]::ReadAllText('relative.txt'))</Read>
+                    <Exists>$([System.IO.File]::Exists('relative.txt'))</Exists>
+                    <WriteTime>$([System.IO.File]::GetLastWriteTimeUtc('relative.txt'))</WriteTime>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Files Include="$([System.IO.Directory]::GetFiles('enum', '*.txt', 'System.IO.SearchOption.AllDirectories'))" />
+                    <Input Include="relative.txt" />
+                    <Modified Include="@(Input->'%(ModifiedTime)')" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("Read").ShouldBe("content");
+            report.ShouldNotBeNull();
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, inputPath) &&
+                observation.HashKind == EvaluationContentHashKind.DecodedText);
+            report.FileReads.ShouldNotContain(observation => observation.Path == "relative.txt");
+            report.PathProbes.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, inputPath) &&
+                observation.Kind == EvaluationPathKind.File);
+            report.MetadataReads.Count(observation =>
+                FileUtilities.PathsEqual(observation.Path, inputPath)).ShouldBe(2);
+            EvaluationDirectoryEnumerationObservation enumeration =
+                report.DirectoryEnumerations.ShouldHaveSingleItem();
+            FileUtilities.PathsEqual(enumeration.Path, enumerationRoot).ShouldBeTrue();
+            enumeration.Entries.ShouldBe(
+                [topFile, nestedFile],
+                ignoreOrder: true);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(File).FullName &&
+                observation.Member == nameof(File.ReadAllText) &&
+                observation.Arguments.ShouldHaveSingleItem() == "relative.txt");
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(Directory).FullName &&
+                observation.Member == nameof(Directory.GetFiles) &&
+                observation.Arguments[0] == "enum");
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationCanonicalizesRelativeRecordingFileSystemPaths()
+        {
+            string root = _env.CreateFolder().Path;
+            string inputPath = _env.CreateFile(Path.Combine(root, "input.txt"), "content").Path;
+            string enumerationRoot = _env.CreateFolder(Path.Combine(root, "enum")).Path;
+            string enumeratedPath = _env.CreateFile(Path.Combine(enumerationRoot, "input.txt"), string.Empty).Path;
+            _env.SetCurrentDirectory(root);
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            var fileSystem = new RecordingFileSystem(FileSystems.Default, session);
+
+            fileSystem.FileExists("input.txt").ShouldBeTrue();
+            fileSystem.GetAttributes("input.txt").ShouldNotBe(FileAttributes.Directory);
+            fileSystem.ReadFileAllText("input.txt").ShouldBe("content");
+            fileSystem.EnumerateFiles("enum", "*.txt").ShouldHaveSingleItem();
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            report.PathProbes.ShouldHaveSingleItem().Path.ShouldBe(inputPath);
+            report.MetadataReads.ShouldHaveSingleItem().Path.ShouldBe(inputPath);
+            report.FileReads.ShouldHaveSingleItem().Path.ShouldBe(inputPath);
+            EvaluationDirectoryEnumerationObservation enumeration =
+                report.DirectoryEnumerations.ShouldHaveSingleItem();
+            enumeration.Path.ShouldBe(enumerationRoot);
+            enumeration.Entries.ShouldHaveSingleItem().ShouldBe(enumeratedPath);
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationPreservesAuthoredPathArgumentsInThreadWorkingDirectoryMode()
+        {
+            string correctRoot = _env.CreateFolder().Path;
+            string wrongRoot = _env.CreateFolder().Path;
+            string inputPath = _env.CreateFile(Path.Combine(correctRoot, "relative.txt"), "content").Path;
+            _env.SetCurrentDirectory(wrongRoot);
+            _env.WithTransientTestState(new TransientThreadWorkingDirectory(correctRoot));
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(correctRoot, "thread-working-directory.proj"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Read>$([System.IO.File]::ReadAllText('relative.txt'))</Read>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("Read").ShouldBe("content");
+            report.ShouldNotBeNull();
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, inputPath));
+            EvaluationPropertyFunctionObservation function = report.PropertyFunctions.Single(
+                observation =>
+                    observation.ReceiverType == typeof(File).FullName &&
+                    observation.Member == nameof(File.ReadAllText));
+            function.Arguments.ShouldHaveSingleItem().ShouldBe("relative.txt");
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationUsesThreadWorkingDirectoryForPathGetFullPath()
+        {
+            string correctRoot = _env.CreateFolder().Path;
+            string wrongRoot = _env.CreateFolder().Path;
+            _env.SetCurrentDirectory(wrongRoot);
+            _env.WithTransientTestState(new TransientThreadWorkingDirectory(correctRoot));
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(correctRoot, "path-get-full-path.proj"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <FullPath>$([System.IO.Path]::GetFullPath('sub'))</FullPath>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            string expected = Path.Combine(correctRoot, "sub");
+            project.GetPropertyValue("FullPath").ShouldBe(expected);
+            EvaluationExternalInputObservation observation =
+                report.ShouldNotBeNull().ExternalInputs.Single(input =>
+                    input.Operation == $"{typeof(Path).FullName}::{nameof(Path.GetFullPath)}");
+            observation.Request.ShouldBe($"Arguments=sub\0Base={correctRoot}");
+            observation.Result.ShouldBe(expected);
+            report.PropertyFunctions.Single(function =>
+                function.ReceiverType == typeof(Path).FullName &&
+                function.Member == nameof(Path.GetFullPath))
+                .Arguments.ShouldHaveSingleItem().ShouldBe("sub");
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsOneCanonicalProbePerExistenceIntrinsic()
+        {
+            string root = _env.CreateFolder().Path;
+            string filePath = _env.CreateFile(Path.Combine(root, "input.txt"), string.Empty).Path;
+            string directoryPath = _env.CreateFolder(Path.Combine(root, "directory")).Path;
+            _env.SetCurrentDirectory(root);
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(root, "intrinsic-probes.proj"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <FileExists>$([MSBuild]::FileExists('input.txt'))</FileExists>
+                    <DirectoryExists>$([MSBuild]::DirectoryExists('directory'))</DirectoryExists>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            report.ShouldNotBeNull();
+            report.PathProbes.Count.ShouldBe(2);
+            report.PathProbes.ShouldContain(observation =>
+                observation.Kind == EvaluationPathKind.File &&
+                observation.Exists &&
+                FileUtilities.PathsEqual(observation.Path, filePath));
+            report.PathProbes.ShouldContain(observation =>
+                observation.Kind == EvaluationPathKind.Directory &&
+                observation.Exists &&
+                FileUtilities.PathsEqual(observation.Path, directoryPath));
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationCanonicalizesRelativeDirectoryMetadata()
+        {
+            string root = _env.CreateFolder().Path;
+            string directoryPath = _env.CreateFolder(Path.Combine(root, "directory")).Path;
+            DateTime timestamp = Directory.GetLastWriteTimeUtc(directoryPath);
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+
+            session.RecordPropertyFunction(
+                typeof(Directory),
+                nameof(Directory.GetLastWriteTimeUtc),
+                null,
+                ["directory"],
+                timestamp,
+                pathBaseDirectory: root);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.MetadataReads.ShouldHaveSingleItem().Path.ShouldBe(directoryPath);
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationDoesNotTreatUnrelatedPathArgumentsAsFilesystemPaths()
+        {
+            string root = _env.CreateFolder().Path;
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+
+            session.RecordPropertyFunction(
+                typeof(Path),
+                "GetRelativePath",
+                null,
+                ["base", "target"],
+                "target");
+            session.RecordPropertyFunction(
+                typeof(Path),
+                nameof(Path.GetFullPath),
+                null,
+                ["child", root],
+                Path.Combine(root, "child"));
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.PathProbes.ShouldBeEmpty();
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Operation == $"{typeof(Path).FullName}::{nameof(Path.GetFullPath)}" &&
+                observation.Request.IndexOf($"Arguments=child|{root}", StringComparison.Ordinal) >= 0 &&
+                observation.Request.EndsWith("\0Base=", StringComparison.Ordinal));
+        }
+
+        [WindowsOnlyFact]
+        public void EvaluationObservationCapturesDriveRelativeEnumerationBaseAtIteration()
+        {
+            string firstRoot = _env.CreateFolder().Path;
+            string secondRoot = _env.CreateFolder().Path;
+            _env.CreateFolder(Path.Combine(firstRoot, "enum"));
+            _env.CreateFolder(Path.Combine(secondRoot, "enum"));
+            _env.CreateFile(Path.Combine(firstRoot, "enum", "first.txt"), string.Empty);
+            string secondFile = _env.CreateFile(Path.Combine(secondRoot, "enum", "second.txt"), string.Empty).Path;
+            string drive = Path.GetPathRoot(firstRoot).Substring(0, 2);
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            var fileSystem = new RecordingFileSystem(FileSystems.Default, session);
+            _env.SetCurrentDirectory(firstRoot);
+
+            IEnumerable<string> entries = fileSystem.EnumerateFiles($"{drive}enum", "*.txt");
+            _env.SetCurrentDirectory(secondRoot);
+            entries.ShouldHaveSingleItem();
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            EvaluationDirectoryEnumerationObservation enumeration =
+                report.DirectoryEnumerations.ShouldHaveSingleItem();
+            enumeration.Path.ShouldBe(Path.Combine(secondRoot, "enum"));
+            enumeration.Entries.ShouldHaveSingleItem().ShouldBe(secondFile);
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [WindowsOnlyFact]
+        public void EvaluationObservationCanonicalizesRootRelativeEnumeration()
+        {
+            string root = _env.CreateFolder().Path;
+            string otherRoot = _env.CreateFolder().Path;
+            string enumerationRoot = _env.CreateFolder(Path.Combine(root, "enum")).Path;
+            string filePath = _env.CreateFile(Path.Combine(enumerationRoot, "input.txt"), string.Empty).Path;
+            string rootRelativePath = enumerationRoot.Substring(2);
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            var fileSystem = new RecordingFileSystem(FileSystems.Default, session);
+            _env.SetCurrentDirectory(root);
+
+            IEnumerable<string> entries = fileSystem.EnumerateFiles(rootRelativePath, "*.txt");
+            _env.SetCurrentDirectory(otherRoot);
+            entries.ShouldHaveSingleItem();
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            EvaluationDirectoryEnumerationObservation enumeration =
+                report.DirectoryEnumerations.ShouldHaveSingleItem();
+            enumeration.Path.ShouldBe(enumerationRoot);
+            enumeration.Entries.ShouldHaveSingleItem().ShouldBe(filePath);
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [UnixOnlyFact]
+        public void EvaluationObservationCanonicalizesUnixSpecialCharacterPath()
+        {
+            string root = _env.CreateFolder().Path;
+            string filePath = _env.CreateFile(Path.Combine(root, "a|b"), string.Empty).Path;
+            _env.SetCurrentDirectory(root);
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            var fileSystem = new RecordingFileSystem(FileSystems.Default, session);
+
+            fileSystem.FileExists("a|b").ShouldBeTrue();
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            report.PathProbes.ShouldHaveSingleItem().Path.ShouldBe(filePath);
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [WindowsFullFrameworkOnlyFact]
+        public void EvaluationObservationCanonicalizesInvalidNonthrowingProbePath()
+        {
+            string root = _env.CreateFolder().Path;
+            _env.SetCurrentDirectory(root);
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            var fileSystem = new RecordingFileSystem(FileSystems.Default, session);
+
+            fileSystem.FileExists("a|b").ShouldBeFalse();
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+            report.PathProbes.ShouldHaveSingleItem().Path.ShouldBe(
+                string.Concat(root, Path.DirectorySeparatorChar, "a|b"));
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
 #if NET
         [Fact]
         public void EvaluationObservationRecordsEnumerationOptionsIdentity()
@@ -1240,7 +1607,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 observation.Selected.EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase));
             report.MetadataReads.ShouldContain(observation =>
                 observation.Kind == EvaluationMetadataKind.ItemModifiedTime &&
-                observation.Path == "settings.txt");
+                FileUtilities.PathsEqual(
+                    observation.Path,
+                    Path.Combine(Path.GetDirectoryName(projectFile), "settings.txt")));
             (report.Reasons & EvaluationObservationReason.UnsupportedVolatileInput)
                 .ShouldBe(EvaluationObservationReason.UnsupportedVolatileInput);
             (report.Reasons & EvaluationObservationReason.UnrootedPath)
@@ -1248,7 +1617,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(12);
+            report.SchemaVersion.ShouldBe(13);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -2218,7 +2587,8 @@ namespace Microsoft.Build.UnitTests.Definition
             innerFileSystem.EntriesProduced.ShouldBe(1);
             report.DirectoryEnumerations.ShouldHaveSingleItem()
                 .Completion.ShouldBe(EvaluationEnumerationCompletion.Partial);
-            report.DirectoryEnumerations.Single().Entries.ShouldBe(["first.cs"]);
+            report.DirectoryEnumerations.Single().Entries.ShouldBe(
+                [Path.Combine(Directory.GetCurrentDirectory(), "first.cs")]);
             (report.Reasons & EvaluationObservationReason.PartialEnumeration)
                 .ShouldBe(EvaluationObservationReason.PartialEnumeration);
         }

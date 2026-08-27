@@ -267,6 +267,11 @@ Path calculations are ambient path-resolution inputs, not file metadata:
 | Path normalization/full-path result | classified path member or evaluator helper | Input, base/current directory when consumed, and exact normalized result |
 | Path comparison/case behavior | request semantic snapshot | Comparison semantic ID |
 
+Relative file, probe, metadata, and enumeration inputs retain their authored
+arguments in the property-function usage record, but their typed filesystem
+records use the canonical absolute path resolved from the effective process
+or explicit item base directory captured at the operation seam.
+
 `FileUtilities.GetFileInfoNoThrow` does not have the observable `IFileSystem` overload
 available to the existence-probe helpers. Built-in item metadata therefore needs an
 explicit native seam or provider-aware overload.

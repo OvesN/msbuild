@@ -1012,6 +1012,45 @@ namespace Microsoft.Build.Framework
             return path;
         }
 
+        internal static string GetFullPathNoThrow(string path, string baseDirectory)
+        {
+            try
+            {
+                return NewPath.GetFullPath(path, baseDirectory);
+            }
+            catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
+            {
+                try
+                {
+                    return NewPath.Combine(baseDirectory, path);
+                }
+                catch (Exception combineException) when (ExceptionHandling.IsIoRelatedException(combineException))
+                {
+                    return string.Concat(
+                        baseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                        Path.DirectorySeparatorChar,
+                        path.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                }
+            }
+        }
+
+        internal static bool IsPathFullyQualifiedNoThrow(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return false;
+            }
+
+            try
+            {
+                return NewPath.IsPathFullyQualified(path);
+            }
+            catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// Compare if two paths, relative to the given currentDirectory are equal.
         /// Does not throw IO exceptions. See <see cref="GetFullPathNoThrow(string)"/>
