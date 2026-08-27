@@ -33,7 +33,8 @@ internal static class EvaluationObservationNativeBridge
                         report.PropertyFunctions.Count +
                         report.SdkResolutions.Count +
                         report.TaskRegistrations.Count +
-                        report.SideEffects.Count;
+                        report.SideEffects.Count +
+                        report.OperationFailures.Count;
                     if (collectPaths && metrics.TryBeginPathSample())
                     {
                         foreach (EvaluationPathProbeObservation observation in report.PathProbes)
@@ -93,6 +94,11 @@ internal static class EvaluationObservationNativeBridge
                         foreach (EvaluationTaskRegistrationObservation observation in report.TaskRegistrations)
                         {
                             metrics.AddPath(observation.AssemblyFile);
+                        }
+
+                        foreach (EvaluationOperationFailureObservation observation in report.OperationFailures)
+                        {
+                            metrics.AddPath(observation.Path);
                         }
                     }
                 },

@@ -43,7 +43,7 @@ The adversarial follow-up and confirmed counterexamples are documented in
 | Property functions | Receiver/member, classified effect, arguments/result or failure | `Expander.Function` after dispatch | Existing invocation result; known-pure calls are omitted |
 | SDK resolution | Complete resolver request, returned `SdkResult`, hit/miss, and cache owner/scope/key/epoch/entry identity with a live-entry validator | `CachingSdkResolverService` and out-of-proc SDK service | Existing SDK cache result while that exact entry remains live; resolver-internal files are intentionally opaque |
 | Tasks and toolsets | Effective `UsingTask` registration and selected toolset/provider identity | `TaskRegistry` and evaluator initialization | Resolved task registration and toolset already selected |
-| Side effects and issues | Mutations, partial operations, exceptions, conflicts, unsupported or unverifiable inputs | Evaluator, intrinsic/property-function hooks, and recorder conflict handling | Existing operation outcome; evaluation behavior is not changed |
+| Side effects and issues | Mutations, partial operations, typed failures with category/operation/path/provider/error, conflicts, unsupported or unverifiable inputs; localized failure messages are diagnostic-only | Evaluator, intrinsic/property-function hooks, and recorder conflict handling | Existing operation outcome; observation-internal failures cannot replace evaluation exceptions |
 
 ## Reuse
 

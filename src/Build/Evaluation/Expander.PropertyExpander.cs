@@ -754,7 +754,12 @@ internal partial class Expander<P, I>
                         "RegistryPropertyExpression",
                         registryExpression,
                         string.Concat("<failed:", ex.GetType().FullName, ">"));
-                    EvaluationObservationSession.Current?.RecordOperationFailure();
+                    EvaluationObservationSession.Current?.RecordOperationFailure(
+                        EvaluationObservationCategory.Registry,
+                        "RegistryPropertyExpression",
+                        path: null,
+                        provider: null,
+                        ex);
                     ProjectErrorUtilities.ThrowInvalidProject(_elementLocation, "InvalidRegistryPropertyExpression", $"$({registryExpression})", ex.Message);
                 }
             }

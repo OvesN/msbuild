@@ -27,16 +27,34 @@ namespace Microsoft.Build.Evaluation
 
         internal readonly struct Observation
         {
-            internal Observation(string kind, string request, string? result)
+            internal Observation(string kind, string request, string? result, Exception? exception)
             {
                 Kind = kind;
                 Request = request;
                 Result = result;
+                ExceptionType = exception?.GetType().FullName;
+                HResult = exception?.HResult ?? 0;
+                Message = GetExceptionMessage(exception);
             }
 
             internal string Kind { get; }
             internal string Request { get; }
             internal string? Result { get; }
+            internal string? ExceptionType { get; }
+            internal int HResult { get; }
+            internal string? Message { get; }
+
+            private static string? GetExceptionMessage(Exception? exception)
+            {
+                try
+                {
+                    return exception?.Message;
+                }
+                catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                {
+                    return null;
+                }
+            }
         }
 
         internal const string ConfigFileName = "Directory.Parse.config";
@@ -383,7 +401,7 @@ namespace Microsoft.Build.Evaluation
             }
             catch (Exception ex)
             {
-                RecordObservation("LoadFailure", fullPath, ex.GetType().FullName);
+                RecordObservation("LoadFailure", fullPath, ex.GetType().FullName, ex);
             }
         }
 
@@ -428,11 +446,15 @@ namespace Microsoft.Build.Evaluation
             }
         }
 
-        private void RecordObservation(string kind, string request, string? result)
+        private void RecordObservation(
+            string kind,
+            string request,
+            string? result,
+            Exception? exception = null)
         {
             if (EvaluationObservationSession.IsEnabled)
             {
-                (_observations ??= []).Add(new Observation(kind, request, result));
+                (_observations ??= []).Add(new Observation(kind, request, result, exception));
             }
         }
 

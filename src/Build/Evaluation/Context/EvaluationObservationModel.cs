@@ -692,6 +692,36 @@ namespace Microsoft.Build.Evaluation.Context
         internal string Value { get; }
     }
 
+    internal readonly struct EvaluationOperationFailureObservation
+    {
+        internal EvaluationOperationFailureObservation(
+            EvaluationObservationCategory category,
+            string operation,
+            string path,
+            string provider,
+            string exceptionType,
+            int hResult,
+            string message)
+        {
+            Category = category;
+            Operation = operation;
+            Path = path;
+            Provider = provider;
+            ExceptionType = exceptionType;
+            HResult = hResult;
+            Message = message;
+        }
+
+        internal EvaluationObservationCategory Category { get; }
+        internal string Operation { get; }
+        internal string Path { get; }
+        internal string Provider { get; }
+        internal string ExceptionType { get; }
+        internal int HResult { get; }
+        // Diagnostic-only localized text; not part of a stable dependency identity.
+        internal string Message { get; }
+    }
+
     internal readonly struct EvaluationCategoryObservation
     {
         internal EvaluationCategoryObservation(
@@ -734,7 +764,8 @@ namespace Microsoft.Build.Evaluation.Context
             IReadOnlyCollection<EvaluationPropertyFunctionObservation> propertyFunctions,
             IReadOnlyCollection<EvaluationSdkResolutionObservation> sdkResolutions,
             IReadOnlyCollection<EvaluationTaskRegistrationObservation> taskRegistrations,
-            IReadOnlyCollection<EvaluationSideEffectObservation> sideEffects)
+            IReadOnlyCollection<EvaluationSideEffectObservation> sideEffects,
+            IReadOnlyCollection<EvaluationOperationFailureObservation> operationFailures)
         {
             EvaluationId = evaluationId;
             ProjectPath = projectPath;
@@ -757,6 +788,7 @@ namespace Microsoft.Build.Evaluation.Context
             SdkResolutions = new EvaluationObservationCollection<EvaluationSdkResolutionObservation>(sdkResolutions);
             TaskRegistrations = new EvaluationObservationCollection<EvaluationTaskRegistrationObservation>(taskRegistrations);
             SideEffects = new EvaluationObservationCollection<EvaluationSideEffectObservation>(sideEffects);
+            OperationFailures = new EvaluationObservationCollection<EvaluationOperationFailureObservation>(operationFailures);
         }
 
         internal int EvaluationId { get; }
@@ -780,6 +812,7 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationObservationCollection<EvaluationSdkResolutionObservation> SdkResolutions { get; }
         internal EvaluationObservationCollection<EvaluationTaskRegistrationObservation> TaskRegistrations { get; }
         internal EvaluationObservationCollection<EvaluationSideEffectObservation> SideEffects { get; }
+        internal EvaluationObservationCollection<EvaluationOperationFailureObservation> OperationFailures { get; }
 
         internal bool HasBlockingObservations
         {

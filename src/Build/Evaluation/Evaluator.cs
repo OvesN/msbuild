@@ -592,7 +592,14 @@ namespace Microsoft.Build.Evaluation
                                 "LoadFailure",
                                 observation.Request,
                                 observation.Result);
-                            _observationSession.RecordOperationFailure();
+                            _observationSession.RecordOperationFailure(
+                                EvaluationObservationCategory.FileContent,
+                                "ParserIgnoreConfiguration.Load",
+                                observation.Request,
+                                FileSystems.Default.GetType().AssemblyQualifiedName,
+                                observation.ExceptionType,
+                                observation.HResult,
+                                observation.Message);
                             break;
                         case "UpwardSearchCandidate":
                             parserCandidates.Add(observation.Request);

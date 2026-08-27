@@ -1671,7 +1671,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(14);
+            report.SchemaVersion.ShouldBe(15);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -2057,6 +2057,118 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void EvaluationObservationRecordsTypedPropertyFunctionFailure()
+        {
+            string root = _env.CreateFolder().Path;
+            string missingPath = Path.Combine(root, "missing.txt");
+            _env.SetCurrentDirectory(root);
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(root, "failed-read.proj"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Missing>$([System.IO.File]::ReadAllText('missing.txt'))</Missing>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Should.Throw<InvalidProjectFileException>(() =>
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                }));
+
+            report.ShouldNotBeNull();
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.ShouldHaveSingleItem();
+            failure.Category.ShouldBe(EvaluationObservationCategory.FileContent);
+            failure.Operation.ShouldBe($"{typeof(File).FullName}::{nameof(File.ReadAllText)}");
+            failure.Path.ShouldBe(missingPath);
+            failure.Provider.ShouldBe(FileSystems.Default.GetType().AssemblyQualifiedName);
+            failure.ExceptionType.ShouldBe(typeof(FileNotFoundException).FullName);
+            failure.HResult.ShouldNotBe(0);
+            failure.Message.ShouldNotBeNullOrEmpty();
+            report.FileReads.ShouldNotContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, missingPath));
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.FileContent)
+                .State.ShouldBe(EvaluationObservationCategoryState.Incomplete);
+        }
+
+        [Fact]
+        public void EvaluationObservationDoesNotInventPathForNonFilesystemPropertyFunctionFailure()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+
+            session.RecordPropertyFunctionFailure(
+                typeof(IntrinsicFunctions),
+                "DoesTaskHostExist",
+                instance: null,
+                ["bogus-runtime", "x86"],
+                pathBaseDirectory: null,
+                new ArgumentException("Invalid runtime."));
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: false);
+
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.ShouldHaveSingleItem();
+            failure.Category.ShouldBe(EvaluationObservationCategory.PropertyFunction);
+            failure.Path.ShouldBeNull();
+            failure.Provider.ShouldBeNull();
+            (report.Reasons & EvaluationObservationReason.UnrootedPath)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationUsesFileSystemInfoInstanceForFailurePath()
+        {
+            string missingPath = Path.Combine(_env.DefaultTestDirectory.Path, "missing-info.txt");
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+
+            session.RecordPropertyFunctionFailure(
+                typeof(FileInfo),
+                nameof(FileInfo.Length),
+                new FileInfo(missingPath),
+                arguments: [],
+                pathBaseDirectory: null,
+                new FileNotFoundException("Missing file.", missingPath));
+
+            EvaluationOperationFailureObservation failure =
+                session.Complete(evaluationSucceeded: false).OperationFailures.ShouldHaveSingleItem();
+
+            failure.Category.ShouldBe(EvaluationObservationCategory.FileMetadata);
+            failure.Path.ShouldBe(missingPath);
+            failure.Provider.ShouldBe(FileSystems.Default.GetType().AssemblyQualifiedName);
+        }
+
+        [Fact]
+        public void EvaluationObservationFailureRecordingCannotReplaceEvaluationFailure()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+
+            Should.NotThrow(() =>
+                session.RecordPropertyFunctionFailure(
+                    typeof(File),
+                    nameof(File.ReadAllText),
+                    instance: null,
+                    [new ThrowingStringValue()],
+                    _env.DefaultTestDirectory.Path,
+                    new IOException("Original evaluation failure.")));
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: false);
+
+            report.OperationFailures.ShouldBeEmpty();
+            (report.Reasons & EvaluationObservationReason.ObservationIncomplete)
+                .ShouldBe(EvaluationObservationReason.ObservationIncomplete);
+            (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
+                .ShouldBe(EvaluationObservationReason.ExternalOperationFailure);
+        }
+
+        [Fact]
         public void EvaluationObservationRecordsParserConfigurationInputs()
         {
             string parserConfig = _env.CreateFile(
@@ -2209,6 +2321,15 @@ namespace Microsoft.Build.UnitTests.Definition
                 observation.Operation == "LoadFailure" &&
                 FileUtilities.PathsEqual(observation.Request, parserConfig) &&
                 observation.Result == typeof(IOException).FullName);
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.ShouldHaveSingleItem();
+            failure.Category.ShouldBe(EvaluationObservationCategory.FileContent);
+            failure.Operation.ShouldBe("ParserIgnoreConfiguration.Load");
+            failure.Path.ShouldBe(parserConfig);
+            failure.Provider.ShouldBe(FileSystems.Default.GetType().AssemblyQualifiedName);
+            failure.ExceptionType.ShouldBe(typeof(IOException).FullName);
+            failure.HResult.ShouldBe(new IOException().HResult);
+            failure.Message.ShouldBe("Test-only parser configuration read failure.");
             (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
                 .ShouldBe(EvaluationObservationReason.ExternalOperationFailure);
         }
@@ -2651,11 +2772,15 @@ namespace Microsoft.Build.UnitTests.Definition
         public void EvaluationObservationReportOwnsStableCollectionsAfterCompletion()
         {
             EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            string root = _env.DefaultTestDirectory.Path;
             session.RecordRequest(new EvaluationRequestObservation { ProjectPath = "before" });
-            session.RecordProbe("probe", EvaluationPathKind.File, exists: true);
-            session.RecordMetadata("metadata", EvaluationMetadataKind.LastWriteTimeUtc, value: 1);
+            session.RecordProbe(Path.Combine(root, "probe"), EvaluationPathKind.File, exists: true);
+            session.RecordMetadata(
+                Path.Combine(root, "metadata"),
+                EvaluationMetadataKind.LastWriteTimeUtc,
+                value: 1);
             session.RecordFileRead(
-                "content",
+                Path.Combine(root, "content"),
                 "hash",
                 isVerifiable: true,
                 EvaluationContentHashKind.RawBytes);
@@ -2665,12 +2790,18 @@ namespace Microsoft.Build.UnitTests.Definition
                 present: true,
                 value: "value");
             session.RecordEnumeration(
-                "enumeration",
+                Path.Combine(root, "enumeration"),
                 "*.cs",
                 SearchOption.TopDirectoryOnly,
                 EvaluationEnumerationKind.Files,
-                ["before.cs"],
+                [Path.Combine(root, "before.cs")],
                 EvaluationEnumerationCompletion.Complete);
+            session.RecordOperationFailure(
+                EvaluationObservationCategory.FileContent,
+                "before-operation",
+                Path.Combine(root, "failure"),
+                provider: "test-provider",
+                exception: new IOException("before"));
             var recordingFileSystem = new RecordingFileSystem(new PartialEnumerationFileSystem(), session);
             IEnumerator<string> lateEnumerator = recordingFileSystem.EnumerateFiles("late-enumeration").GetEnumerator();
             lateEnumerator.MoveNext().ShouldBeTrue();
@@ -2700,6 +2831,12 @@ namespace Microsoft.Build.UnitTests.Definition
                 EvaluationEnvironmentSource.Imported,
                 present: true,
                 value: "late-value");
+            session.RecordOperationFailure(
+                EvaluationObservationCategory.FileContent,
+                "late-operation",
+                Path.Combine(root, "late-failure"),
+                provider: "test-provider",
+                exception: new IOException("late"));
 
             report.Request.ProjectPath.ShouldBe("before");
             report.PathProbes.ShouldHaveSingleItem().Path.ShouldEndWith("probe");
@@ -2707,6 +2844,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.FileReads.ShouldHaveSingleItem().Path.ShouldEndWith("content");
             report.DirectoryEnumerations.ShouldHaveSingleItem().Path.ShouldEndWith("enumeration");
             report.Environment.ShouldHaveSingleItem().Name.ShouldBe("before");
+            report.OperationFailures.ShouldHaveSingleItem().Operation.ShouldBe("before-operation");
             (session.TestOnlyReasons & EvaluationObservationReason.ObservationIncomplete)
                 .ShouldBe(EvaluationObservationReason.None);
             session.TestOnlyRetainedObservationCount.ShouldBe(0);
@@ -2799,6 +2937,34 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void RecordingFileSystemMarksWritableStreamsUnsupported()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            var recordingFileSystem = new RecordingFileSystem(new ReadAndMetadataFileSystem(), session);
+            string path = Path.Combine(_env.DefaultTestDirectory.Path, "writable-stream.txt");
+
+            using Stream stream = recordingFileSystem.GetFileStream(
+                path,
+                FileMode.OpenOrCreate,
+                System.IO.FileAccess.ReadWrite,
+                FileShare.None);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.FileReads.ShouldContain(observation =>
+                observation.Path == path &&
+                !observation.IsVerifiable);
+            EvaluationSideEffectObservation sideEffect = report.SideEffects.ShouldHaveSingleItem();
+            sideEffect.Kind.ShouldBe("WritableFileStream");
+            sideEffect.Identity.ShouldBe(path);
+            (report.Reasons & EvaluationObservationReason.EvaluationSideEffect)
+                .ShouldBe(EvaluationObservationReason.EvaluationSideEffect);
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.VolatileOrSideEffect)
+                .State.ShouldBe(EvaluationObservationCategoryState.Unsupported);
+        }
+
+        [Fact]
         public void EvaluationObservationDoesNotConflictVolatileOrDistinctInstances()
         {
             EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
@@ -2844,15 +3010,128 @@ namespace Microsoft.Build.UnitTests.Definition
         {
             EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
             var recordingFileSystem = new RecordingFileSystem(new ThrowingFileSystem(), session);
+            string root = _env.DefaultTestDirectory.Path;
+            var operations = new List<(EvaluationObservationCategory Category, string Operation, string Path, Action Invoke)>();
 
-            Should.Throw<IOException>(() => recordingFileSystem.ReadFileAllText("read"));
-            Should.Throw<IOException>(() => recordingFileSystem.GetAttributes("metadata"));
+            void AddOperation(
+                EvaluationObservationCategory category,
+                string operation,
+                string pathSuffix,
+                Action<string> invoke)
+            {
+                string path = Path.Combine(root, pathSuffix);
+                operations.Add((category, operation, path, () => invoke(path)));
+            }
+
+            AddOperation(
+                EvaluationObservationCategory.FileContent,
+                nameof(IFileSystem.ReadFile),
+                "reader",
+                path => recordingFileSystem.ReadFile(path));
+            AddOperation(
+                EvaluationObservationCategory.FileContent,
+                nameof(IFileSystem.ReadFileAllText),
+                "text",
+                path => recordingFileSystem.ReadFileAllText(path));
+            AddOperation(
+                EvaluationObservationCategory.FileContent,
+                nameof(IFileSystem.ReadFileAllBytes),
+                "bytes",
+                path => recordingFileSystem.ReadFileAllBytes(path));
+            AddOperation(
+                EvaluationObservationCategory.FileContent,
+                nameof(IFileSystem.GetFileStream),
+                "read-stream",
+                path => recordingFileSystem.GetFileStream(
+                    path,
+                    FileMode.Open,
+                    System.IO.FileAccess.Read,
+                    FileShare.Read));
+            AddOperation(
+                EvaluationObservationCategory.VolatileOrSideEffect,
+                nameof(IFileSystem.GetFileStream),
+                "write-stream",
+                path => recordingFileSystem.GetFileStream(
+                    path,
+                    FileMode.OpenOrCreate,
+                    System.IO.FileAccess.Write,
+                    FileShare.None));
+            AddOperation(
+                EvaluationObservationCategory.VolatileOrSideEffect,
+                nameof(IFileSystem.GetFileStream),
+                "read-write-stream",
+                path => recordingFileSystem.GetFileStream(
+                    path,
+                    FileMode.OpenOrCreate,
+                    System.IO.FileAccess.ReadWrite,
+                    FileShare.None));
+            AddOperation(
+                EvaluationObservationCategory.FileMetadata,
+                nameof(IFileSystem.GetAttributes),
+                "attributes",
+                path => recordingFileSystem.GetAttributes(path));
+            AddOperation(
+                EvaluationObservationCategory.FileMetadata,
+                nameof(IFileSystem.GetLastWriteTimeUtc),
+                "write-time",
+                path => recordingFileSystem.GetLastWriteTimeUtc(path));
+            AddOperation(
+                EvaluationObservationCategory.PathProbe,
+                nameof(IFileSystem.FileExists),
+                "file-probe",
+                path => recordingFileSystem.FileExists(path));
+            AddOperation(
+                EvaluationObservationCategory.PathProbe,
+                nameof(IFileSystem.DirectoryExists),
+                "directory-probe",
+                path => recordingFileSystem.DirectoryExists(path));
+            AddOperation(
+                EvaluationObservationCategory.PathProbe,
+                nameof(IFileSystem.FileOrDirectoryExists),
+                "path-probe",
+                path => recordingFileSystem.FileOrDirectoryExists(path));
+            AddOperation(
+                EvaluationObservationCategory.DirectoryEnumeration,
+                nameof(IFileSystem.EnumerateFiles),
+                "files",
+                path => recordingFileSystem.EnumerateFiles(path).ToArray());
+            AddOperation(
+                EvaluationObservationCategory.DirectoryEnumeration,
+                nameof(IFileSystem.EnumerateDirectories),
+                "directories",
+                path => recordingFileSystem.EnumerateDirectories(path).ToArray());
+            AddOperation(
+                EvaluationObservationCategory.DirectoryEnumeration,
+                nameof(IFileSystem.EnumerateFileSystemEntries),
+                "entries",
+                path => recordingFileSystem.EnumerateFileSystemEntries(path).ToArray());
+
+            foreach (var operation in operations)
+            {
+                Should.Throw<IOException>(operation.Invoke);
+            }
 
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: false);
 
             report.EvaluationSucceeded.ShouldBeFalse();
             (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
                 .ShouldBe(EvaluationObservationReason.ExternalOperationFailure);
+            report.OperationFailures.Count.ShouldBe(operations.Count);
+            foreach (var expected in operations)
+            {
+                report.OperationFailures.ShouldContain(failure =>
+                    failure.Category == expected.Category &&
+                    failure.Operation == expected.Operation &&
+                    failure.Path == expected.Path &&
+                    failure.ExceptionType == typeof(IOException).FullName &&
+                    failure.HResult == new IOException().HResult &&
+                    failure.Message == "Operation failed." &&
+                    failure.Provider.IndexOf(nameof(ThrowingFileSystem), StringComparison.Ordinal) >= 0);
+            }
+
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.VolatileOrSideEffect)
+                .State.ShouldBe(EvaluationObservationCategoryState.Unsupported);
         }
 
         [Fact]
@@ -3733,6 +4012,11 @@ namespace Microsoft.Build.UnitTests.Definition
         private sealed class ReadAndMetadataFileSystem : TestFileSystemBase
         {
             public override TextReader ReadFile(string path) => new StringReader("reader");
+            public override Stream GetFileStream(
+                string path,
+                FileMode mode,
+                System.IO.FileAccess access,
+                FileShare share) => new MemoryStream();
             public override string ReadFileAllText(string path) => "content";
             public override byte[] ReadFileAllBytes(string path) => Encoding.UTF8.GetBytes("content");
             public override FileAttributes GetAttributes(string path) => FileAttributes.ReadOnly;
@@ -3741,13 +4025,32 @@ namespace Microsoft.Build.UnitTests.Definition
 
         private sealed class ThrowingFileSystem : TestFileSystemBase
         {
-            public override string ReadFileAllText(string path) => throw new IOException("Read failed.");
-            public override FileAttributes GetAttributes(string path) => throw new IOException("Metadata failed.");
+            public override TextReader ReadFile(string path) => throw new IOException("Operation failed.");
+            public override Stream GetFileStream(
+                string path,
+                FileMode mode,
+                System.IO.FileAccess access,
+                FileShare share) => throw new IOException("Operation failed.");
+            public override string ReadFileAllText(string path) => throw new IOException("Operation failed.");
+            public override byte[] ReadFileAllBytes(string path) => throw new IOException("Operation failed.");
+            public override IEnumerable<string> EnumerateFiles(string path, string searchPattern = "*", SearchOption searchOption = SearchOption.TopDirectoryOnly) => throw new IOException("Operation failed.");
+            public override IEnumerable<string> EnumerateDirectories(string path, string searchPattern = "*", SearchOption searchOption = SearchOption.TopDirectoryOnly) => throw new IOException("Operation failed.");
+            public override IEnumerable<string> EnumerateFileSystemEntries(string path, string searchPattern = "*", SearchOption searchOption = SearchOption.TopDirectoryOnly) => throw new IOException("Operation failed.");
+            public override FileAttributes GetAttributes(string path) => throw new IOException("Operation failed.");
+            public override DateTime GetLastWriteTimeUtc(string path) => throw new IOException("Operation failed.");
+            public override bool DirectoryExists(string path) => throw new IOException("Operation failed.");
+            public override bool FileExists(string path) => throw new IOException("Operation failed.");
+            public override bool FileOrDirectoryExists(string path) => throw new IOException("Operation failed.");
         }
 
         private sealed class ThrowingProbeFileSystem : TestFileSystemBase
         {
             public override bool FileExists(string path) => throw new IOException("Probe failed.");
+        }
+
+        private sealed class ThrowingStringValue
+        {
+            public override string ToString() => throw new InvalidOperationException("Observation serialization failed.");
         }
 
         private sealed class ThrowingPathResolutionObserver : IEvaluationInputObserver

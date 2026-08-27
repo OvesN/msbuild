@@ -265,9 +265,9 @@ The existing SDK-cache policy can intentionally hide resolver internals
 within one live cache entry. It does not make the native file/path inventory
 complete, and it does not cover the separate tool-location read.
 
-### 7. Failed reads lose the typed path
+### 7. Failed reads lost the typed path at the baseline
 
-For `File.ReadAllText("missing.txt")`:
+At the pinned validation baseline, for `File.ReadAllText("missing.txt")`:
 
 - BuildXL reported the failed access to the absolute missing path;
 - the native report contained the root project only in `FileReads`;
@@ -275,9 +275,13 @@ For `File.ReadAllText("missing.txt")`:
 - `ExternalOperationFailure` made `Completion` incomplete;
 - `FileContent` itself remained `Observed`.
 
-The global reason is safe, but there is no typed failed-file observation with
-path, operation, and error. The same problem applies to recorder catches that
-call parameterless `RecordOperationFailure`.
+The current observer resolves this model gap by emitting a typed failure with the
+affected category, operation, canonical path and provider when applicable,
+exception type, HRESULT, and diagnostic message. The affected category and
+`Completion` become incomplete, and `ExternalOperationFailure` remains the global
+reuse blocker. Parser-configuration load failures and registry-expression failures
+also retain typed attribution. Post-fix BuildXL differential results are reported
+only after the complete six-gap validation pass.
 
 ### 8. Early root failures have no report
 

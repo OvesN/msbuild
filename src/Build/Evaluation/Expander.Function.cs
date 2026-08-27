@@ -609,7 +609,13 @@ internal partial class Expander<P, I>
                             succeeded: false,
                             pathBaseDirectory: observationPathBaseDirectory,
                             usageArguments: usageArguments);
-                        EvaluationObservationSession.Current?.RecordOperationFailure();
+                        EvaluationObservationSession.Current?.RecordPropertyFunctionFailure(
+                            _receiverType,
+                            _methodMethodName,
+                            objectInstance,
+                            observationArguments ?? args,
+                            observationPathBaseDirectory,
+                            ex);
                         if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
                         {
                             return partiallyEvaluated;
@@ -703,7 +709,13 @@ internal partial class Expander<P, I>
                     succeeded: false,
                     pathBaseDirectory: observationPathBaseDirectory,
                     usageArguments: usageArguments);
-                EvaluationObservationSession.Current?.RecordOperationFailure();
+                EvaluationObservationSession.Current?.RecordPropertyFunctionFailure(
+                    _receiverType,
+                    _methodMethodName,
+                    objectInstance,
+                    observationArguments ?? args,
+                    observationPathBaseDirectory,
+                    ex.InnerException ?? ex);
                 // We ended up with something other than a function expression
                 string partiallyEvaluated = GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args);
                 if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
@@ -727,7 +739,13 @@ internal partial class Expander<P, I>
                     succeeded: false,
                     pathBaseDirectory: observationPathBaseDirectory,
                     usageArguments: usageArguments);
-                EvaluationObservationSession.Current?.RecordOperationFailure();
+                EvaluationObservationSession.Current?.RecordPropertyFunctionFailure(
+                    _receiverType,
+                    _methodMethodName,
+                    objectInstance,
+                    observationArguments ?? args,
+                    observationPathBaseDirectory,
+                    ex);
                 // If there's a :: in the expression, they were probably trying for a static function
                 // invocation. Give them some more relevant info in that case
                 if (s_invariantCompareInfo.IndexOf(_expression, "::", CompareOptions.OrdinalIgnoreCase) > -1)

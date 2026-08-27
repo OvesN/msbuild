@@ -244,6 +244,12 @@ Current Boolean APIs can conflate missing with access or I/O failure. Record onl
 outcome the API proves; add an issue when a negative result is ambiguous rather than
 inventing a more precise failure.
 
+Thrown filesystem and classified property-function operations additionally emit a
+typed failure record containing the affected observation category, operation,
+canonical path and provider when applicable, exception type, HRESULT, and diagnostic
+message. The localized message is diagnostic-only and is not part of a stable
+dependency identity.
+
 ### 5. File metadata and path resolution
 
 | Input | Observation seam | Required record |
@@ -596,6 +602,7 @@ The report records both observer trustworthiness and future-reuse blockers.
 | Input | Record |
 | --- | --- |
 | Evaluation success/failure | Boolean and failure category |
+| Typed filesystem/property-function operation failure | Affected category, operation, canonical path and provider when applicable, exception type, HRESULT, and diagnostic-only message |
 | Observation schema/classification version | Version IDs |
 | Category implementation coverage | `NotImplemented`, `Partial`, `Complete` |
 | Per-evaluation category state | `NotExercised`, `Observed`, `Incomplete`, `Unsupported` |
@@ -606,6 +613,11 @@ The report records both observer trustworthiness and future-reuse blockers.
 | Partial enumeration/stream | Completion state and typed issue |
 | Unsupported provider/function | Typed reason |
 | Known bypass exercised without observation | Typed bypass ID |
+
+If an external operation succeeds but observation-only hashing or record construction
+fails afterward, the report uses `ObservationIncomplete`, not
+`ExternalOperationFailure`; the latter is reserved for a failure of the external
+operation that evaluation actually invoked.
 
 Coverage counters and differential-test failures are internal diagnostics, not
 user-visible evaluation warnings.

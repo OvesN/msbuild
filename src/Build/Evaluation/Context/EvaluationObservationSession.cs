@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 14;
+        private const int ObservationSchemaVersion = 15;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -160,6 +160,7 @@ namespace Microsoft.Build.Evaluation.Context
         private List<EvaluationSdkResolutionObservation> _sdkResolutions = [];
         private Dictionary<string, EvaluationTaskRegistrationObservation> _taskRegistrations = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, EvaluationSideEffectObservation> _sideEffects = new(StringComparer.Ordinal);
+        private List<EvaluationOperationFailureObservation> _operationFailures = [];
         private readonly object _observationLock = new();
 
         private long _reasons;
@@ -396,7 +397,8 @@ namespace Microsoft.Build.Evaluation.Context
                         (_propertyFunctions?.Count ?? 0) +
                         (_sdkResolutions?.Count ?? 0) +
                         (_taskRegistrations?.Count ?? 0) +
-                        (_sideEffects?.Count ?? 0);
+                        (_sideEffects?.Count ?? 0) +
+                        (_operationFailures?.Count ?? 0);
                 }
             }
         }
@@ -423,7 +425,8 @@ namespace Microsoft.Build.Evaluation.Context
                         _propertyFunctions is null &&
                         _sdkResolutions is null &&
                         _taskRegistrations is null &&
-                        _sideEffects is null;
+                        _sideEffects is null &&
+                        _operationFailures is null;
                 }
             }
         }
@@ -1441,8 +1444,150 @@ namespace Microsoft.Build.Evaluation.Context
             }
         }
 
-        internal void RecordOperationFailure()
+        internal void RecordOperationFailure(
+            EvaluationObservationCategory category,
+            string operation,
+            string path,
+            string provider,
+            Exception exception,
+            string baseDirectory = null,
+            EvaluationObservationCategoryState categoryState = EvaluationObservationCategoryState.Incomplete)
         {
+            try
+            {
+                exception ??= new InvalidOperationException("The operation failed without exception details.");
+                RecordOperationFailureCore(
+                    category,
+                    operation,
+                    path,
+                    provider,
+                    exception.GetType().FullName,
+                    exception.HResult,
+                    exception.Message,
+                    baseDirectory,
+                    categoryState);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                MarkOperationFailureWithoutDetails(category, categoryState);
+                AddReason(EvaluationObservationReason.ObservationIncomplete);
+            }
+        }
+
+        internal void RecordOperationFailure(
+            EvaluationObservationCategory category,
+            string operation,
+            string path,
+            string provider,
+            string exceptionType,
+            int hResult,
+            string message,
+            string baseDirectory = null,
+            EvaluationObservationCategoryState categoryState = EvaluationObservationCategoryState.Incomplete)
+        {
+            try
+            {
+                RecordOperationFailureCore(
+                    category,
+                    operation,
+                    path,
+                    provider,
+                    exceptionType,
+                    hResult,
+                    message,
+                    baseDirectory,
+                    categoryState);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                MarkOperationFailureWithoutDetails(category, categoryState);
+                AddReason(EvaluationObservationReason.ObservationIncomplete);
+            }
+        }
+
+        internal void RecordPropertyFunctionFailure(
+            Type receiverType,
+            string member,
+            object instance,
+            object[] arguments,
+            string pathBaseDirectory,
+            Exception exception)
+        {
+            try
+            {
+                EvaluationPropertyFunctionEffect effects = ClassifyPropertyFunction(receiverType, member);
+                bool hasPathInput = TryGetPropertyFunctionPath(
+                    receiverType,
+                    member,
+                    instance,
+                    arguments,
+                    out string path);
+                EvaluationObservationCategory category =
+                    !hasPathInput
+                        ? EvaluationObservationCategory.PropertyFunction
+                        : (effects & EvaluationPropertyFunctionEffect.FileContent) != 0
+                            ? EvaluationObservationCategory.FileContent
+                            : (effects & EvaluationPropertyFunctionEffect.PathProbe) != 0
+                                ? EvaluationObservationCategory.PathProbe
+                                : (effects & EvaluationPropertyFunctionEffect.FileMetadata) != 0
+                                    ? EvaluationObservationCategory.FileMetadata
+                                    : (effects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0
+                                        ? EvaluationObservationCategory.DirectoryEnumeration
+                                        : EvaluationObservationCategory.PropertyFunction;
+                RecordOperationFailure(
+                    category,
+                    string.Concat(receiverType?.FullName ?? instance?.GetType().FullName ?? "<unknown>", "::", member),
+                    path,
+                    hasPathInput ? s_defaultFileSystemProvider : null,
+                    exception,
+                    pathBaseDirectory);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                MarkOperationFailureWithoutDetails(
+                    EvaluationObservationCategory.PropertyFunction,
+                    EvaluationObservationCategoryState.Incomplete);
+                AddReason(EvaluationObservationReason.ObservationIncomplete);
+            }
+        }
+
+        private void RecordOperationFailureCore(
+            EvaluationObservationCategory category,
+            string operation,
+            string path,
+            string provider,
+            string exceptionType,
+            int hResult,
+            string message,
+            string baseDirectory,
+            EvaluationObservationCategoryState categoryState)
+        {
+            MarkCategory(category, categoryState);
+            MarkCategory(EvaluationObservationCategory.Completion, EvaluationObservationCategoryState.Incomplete);
+            lock (_observationLock)
+            {
+                if (IsCompleted)
+                {
+                    return;
+                }
+
+                _operationFailures.Add(new EvaluationOperationFailureObservation(
+                    category,
+                    operation,
+                    NormalizePath(path, baseDirectory),
+                    provider,
+                    exceptionType ?? "<unknown>",
+                    hResult,
+                    message));
+                AddReason(EvaluationObservationReason.ExternalOperationFailure);
+            }
+        }
+
+        private void MarkOperationFailureWithoutDetails(
+            EvaluationObservationCategory category,
+            EvaluationObservationCategoryState categoryState)
+        {
+            MarkCategory(category, categoryState);
             MarkCategory(EvaluationObservationCategory.Completion, EvaluationObservationCategoryState.Incomplete);
             lock (_observationLock)
             {
@@ -1491,7 +1636,8 @@ namespace Microsoft.Build.Evaluation.Context
                             _propertyFunctions.Values,
                             _sdkResolutions,
                             _taskRegistrations.Values,
-                            _sideEffects.Values);
+                            _sideEffects.Values,
+                            _operationFailures);
                     }
                     catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                     {
@@ -1505,6 +1651,7 @@ namespace Microsoft.Build.Evaluation.Context
                             PropertyFunctionClassificationVersion,
                             CreateCategorySnapshot(),
                             null,
+                            [],
                             [],
                             [],
                             [],
@@ -1539,6 +1686,7 @@ namespace Microsoft.Build.Evaluation.Context
                     _sdkResolutions = null;
                     _taskRegistrations = null;
                     _sideEffects = null;
+                    _operationFailures = null;
                     testConfiguration = Interlocked.Exchange(ref _testConfiguration, null);
                 }
             }
@@ -1674,16 +1822,14 @@ namespace Microsoft.Build.Evaluation.Context
         {
             string receiverName = receiverType?.FullName;
             string firstArgument = arguments is { Length: > 0 } ? arguments[0]?.ToString() : null;
-            bool hasPathInput =
-                receiverName == typeof(System.IO.File).FullName ||
-                receiverName == typeof(System.IO.Directory).FullName ||
-                (receiverName == typeof(System.IO.Path).FullName &&
-                    string.Equals(member, "Exists", StringComparison.OrdinalIgnoreCase)) ||
-                (receiverType == typeof(IntrinsicFunctions) &&
-                    (string.Equals(member, "FileExists", StringComparison.OrdinalIgnoreCase) ||
-                     string.Equals(member, "DirectoryExists", StringComparison.OrdinalIgnoreCase)));
+            bool hasPathInput = TryGetPropertyFunctionPath(
+                receiverType,
+                member,
+                instance,
+                arguments,
+                out string pathInput);
             string firstPath = hasPathInput
-                ? NormalizePath(firstArgument, pathBaseDirectory)
+                ? NormalizePath(pathInput, pathBaseDirectory)
                 : firstArgument;
             string serializedRequest = string.Join("|", serializedArguments);
 
@@ -1954,6 +2100,34 @@ namespace Microsoft.Build.Evaluation.Context
                     firstArgument,
                     serializedResult);
             }
+        }
+
+        private static bool TryGetPropertyFunctionPath(
+            Type receiverType,
+            string member,
+            object instance,
+            object[] arguments,
+            out string path)
+        {
+            if (instance is FileSystemInfo fileSystemInfo)
+            {
+                path = fileSystemInfo.FullName;
+                return true;
+            }
+
+            string receiverName = receiverType?.FullName;
+            bool hasPathInput =
+                receiverName == typeof(System.IO.File).FullName ||
+                receiverName == typeof(System.IO.Directory).FullName ||
+                (receiverName == typeof(System.IO.Path).FullName &&
+                    string.Equals(member, "Exists", StringComparison.OrdinalIgnoreCase)) ||
+                (receiverType == typeof(IntrinsicFunctions) &&
+                    (string.Equals(member, "FileExists", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(member, "DirectoryExists", StringComparison.OrdinalIgnoreCase)));
+            path = hasPathInput && arguments is { Length: > 0 }
+                ? arguments[0]?.ToString()
+                : null;
+            return hasPathInput;
         }
 
         private EvaluationPropertyFunctionEffect ClassifyPropertyFunction(
@@ -3202,7 +3376,13 @@ namespace Microsoft.Build.Evaluation.Context
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.FileContent,
+                    nameof(IFileSystem.ReadFile),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3228,11 +3408,40 @@ namespace Microsoft.Build.Evaluation.Context
                         baseDirectory: baseDirectory);
                 }
 
+                if ((access & FileAccess.Write) != 0)
+                {
+                    _session.RecordSideEffect(
+                        "WritableFileStream",
+                        _session.NormalizePath(path, baseDirectory),
+                        string.Concat(
+                            "Provider=",
+                            _providerIdentity,
+                            "\0Mode=",
+                            mode,
+                            "\0Access=",
+                            access,
+                            "\0Share=",
+                            share));
+                }
+
                 return stream;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                EvaluationObservationCategory category =
+                    access == FileAccess.Read
+                        ? EvaluationObservationCategory.FileContent
+                        : EvaluationObservationCategory.VolatileOrSideEffect;
+                _session.RecordOperationFailure(
+                    category,
+                    nameof(IFileSystem.GetFileStream),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory,
+                    category == EvaluationObservationCategory.VolatileOrSideEffect
+                        ? EvaluationObservationCategoryState.Unsupported
+                        : EvaluationObservationCategoryState.Incomplete);
                 throw;
             }
         }
@@ -3260,14 +3469,20 @@ namespace Microsoft.Build.Evaluation.Context
                 }
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
-                    _session.RecordOperationFailure();
+                    _session.MarkReason(EvaluationObservationReason.ObservationIncomplete);
                 }
 
                 return content;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.FileContent,
+                    nameof(IFileSystem.ReadFileAllText),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3295,14 +3510,20 @@ namespace Microsoft.Build.Evaluation.Context
                 }
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
-                    _session.RecordOperationFailure();
+                    _session.MarkReason(EvaluationObservationReason.ObservationIncomplete);
                 }
 
                 return content;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.FileContent,
+                    nameof(IFileSystem.ReadFileAllBytes),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3322,6 +3543,7 @@ namespace Microsoft.Build.Evaluation.Context
                 searchPattern,
                 searchOption,
                 EvaluationEnumerationKind.Files,
+                nameof(IFileSystem.EnumerateFiles),
                 static (fileSystem, p, pattern, option) => fileSystem.EnumerateFiles(p, pattern, option));
         }
 
@@ -3340,6 +3562,7 @@ namespace Microsoft.Build.Evaluation.Context
                 searchPattern,
                 searchOption,
                 EvaluationEnumerationKind.Directories,
+                nameof(IFileSystem.EnumerateDirectories),
                 static (fileSystem, p, pattern, option) => fileSystem.EnumerateDirectories(p, pattern, option));
         }
 
@@ -3358,6 +3581,7 @@ namespace Microsoft.Build.Evaluation.Context
                 searchPattern,
                 searchOption,
                 EvaluationEnumerationKind.FilesAndDirectories,
+                nameof(IFileSystem.EnumerateFileSystemEntries),
                 static (fileSystem, p, pattern, option) => fileSystem.EnumerateFileSystemEntries(p, pattern, option));
         }
 
@@ -3382,7 +3606,13 @@ namespace Microsoft.Build.Evaluation.Context
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.FileMetadata,
+                    nameof(IFileSystem.GetAttributes),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3408,7 +3638,13 @@ namespace Microsoft.Build.Evaluation.Context
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.FileMetadata,
+                    nameof(IFileSystem.GetLastWriteTimeUtc),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3429,7 +3665,13 @@ namespace Microsoft.Build.Evaluation.Context
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.PathProbe,
+                    nameof(IFileSystem.DirectoryExists),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3450,7 +3692,13 @@ namespace Microsoft.Build.Evaluation.Context
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.PathProbe,
+                    nameof(IFileSystem.FileExists),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3471,7 +3719,13 @@ namespace Microsoft.Build.Evaluation.Context
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
             {
-                _session.RecordOperationFailure();
+                _session.RecordOperationFailure(
+                    EvaluationObservationCategory.PathProbe,
+                    nameof(IFileSystem.FileOrDirectoryExists),
+                    path,
+                    _providerIdentity,
+                    ex,
+                    baseDirectory);
                 throw;
             }
         }
@@ -3481,9 +3735,10 @@ namespace Microsoft.Build.Evaluation.Context
             string searchPattern,
             SearchOption searchOption,
             EvaluationEnumerationKind kind,
+            string operation,
             Func<IFileSystem, string, string, SearchOption, IEnumerable<string>> enumerate)
         {
-            return RecordEnumerationIterator(path, searchPattern, searchOption, kind, enumerate);
+            return RecordEnumerationIterator(path, searchPattern, searchOption, kind, operation, enumerate);
         }
 
         private IEnumerable<string> RecordEnumerationIterator(
@@ -3491,6 +3746,7 @@ namespace Microsoft.Build.Evaluation.Context
             string searchPattern,
             SearchOption searchOption,
             EvaluationEnumerationKind kind,
+            string operation,
             Func<IFileSystem, string, string, SearchOption, IEnumerable<string>> enumerate)
         {
             string baseDirectory = CaptureBaseDirectory(path);
@@ -3511,6 +3767,13 @@ namespace Microsoft.Build.Evaluation.Context
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
                     completion = EvaluationEnumerationCompletion.Failure;
+                    _session.RecordOperationFailure(
+                        EvaluationObservationCategory.DirectoryEnumeration,
+                        operation,
+                        path,
+                        _providerIdentity,
+                        ex,
+                        baseDirectory);
                     throw;
                 }
 
@@ -3524,6 +3787,13 @@ namespace Microsoft.Build.Evaluation.Context
                     catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                     {
                         completion = EvaluationEnumerationCompletion.Failure;
+                        _session.RecordOperationFailure(
+                            EvaluationObservationCategory.DirectoryEnumeration,
+                            operation,
+                            path,
+                            _providerIdentity,
+                            ex,
+                            baseDirectory);
                         throw;
                     }
 
@@ -3550,6 +3820,13 @@ namespace Microsoft.Build.Evaluation.Context
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
                     completion = EvaluationEnumerationCompletion.Failure;
+                    _session.RecordOperationFailure(
+                        EvaluationObservationCategory.DirectoryEnumeration,
+                        operation,
+                        path,
+                        _providerIdentity,
+                        ex,
+                        baseDirectory);
                     throw;
                 }
                 finally
