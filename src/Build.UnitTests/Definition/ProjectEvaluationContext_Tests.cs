@@ -745,6 +745,153 @@ namespace Microsoft.Build.UnitTests.Definition
                     StringComparison.OrdinalIgnoreCase));
         }
 
+        [Fact]
+        public void EvaluationObservationSeparatesPathCalculationsFromFileMetadata()
+        {
+            string missingChild = Path.Combine(_env.DefaultTestDirectory.Path, "missing", "child");
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                "path-calculations.proj",
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Parent>$([System.IO.Directory]::GetParent('{missingChild}'))</Parent>
+                    <ParentFullName>$([System.IO.Directory]::GetParent('{missingChild}').FullName)</ParentFullName>
+                    <ParentName>$([System.IO.Directory]::GetParent('{missingChild}').Name)</ParentName>
+                    <GrandParent>$([System.IO.Directory]::GetParent('{missingChild}').Parent.FullName)</GrandParent>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Ghost Include="ghost.txt" />
+                    <GhostFullPath Include="@(Ghost->'%(FullPath)')" />
+                    <GhostRootDirectory Include="@(Ghost->'%(RootDir)')" />
+                    <GhostRelativeDirectory Include="@(Ghost->'%(RelativeDir)')" />
+                    <GhostDirectory Include="@(Ghost->'%(Directory)')" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("Parent").ShouldBe(Path.GetDirectoryName(missingChild));
+            report.ShouldNotBeNull();
+            report.MetadataReads.ShouldBeEmpty();
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(Directory).FullName &&
+                observation.Member == nameof(Directory.GetParent) &&
+                observation.Effects == EvaluationPropertyFunctionEffect.Ambient);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(DirectoryInfo).FullName &&
+                observation.Member == nameof(DirectoryInfo.FullName) &&
+                observation.Effects == EvaluationPropertyFunctionEffect.Ambient);
+            report.PropertyFunctions.ShouldContain(observation =>
+                observation.ReceiverType == typeof(DirectoryInfo).FullName &&
+                observation.Member == nameof(DirectoryInfo.Parent) &&
+                observation.Effects == EvaluationPropertyFunctionEffect.Ambient);
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.Ambient &&
+                observation.Operation == $"{typeof(Directory).FullName}::{nameof(Directory.GetParent)}");
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Kind == EvaluationExternalInputKind.Ambient &&
+                observation.Operation == $"{typeof(DirectoryInfo).FullName}::{nameof(DirectoryInfo.FullName)}");
+            foreach (string modifier in new[] { "FullPath", "RootDir", "RelativeDir", "Directory" })
+            {
+                report.ExternalInputs.ShouldContain(observation =>
+                    observation.Kind == EvaluationExternalInputKind.Ambient &&
+                    observation.Operation == $"ItemMetadata::{modifier}" &&
+                    observation.Request.IndexOf("ItemSpec=ghost.txt", StringComparison.Ordinal) >= 0);
+            }
+
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.FileMetadata)
+                .State.ShouldBe(EvaluationObservationCategoryState.NotExercised);
+        }
+
+        [Fact]
+        public void EvaluationObservationRetainsRealFileSystemMetadataClassifications()
+        {
+            string filePath = _env.CreateFile("metadata.txt", "content").Path;
+            var fileInfo = new FileInfo(filePath);
+            var directoryInfo = new DirectoryInfo(Path.GetDirectoryName(filePath));
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                nameof(FileInfo.Attributes),
+                fileInfo,
+                [],
+                fileInfo.Attributes);
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                nameof(FileInfo.Length),
+                fileInfo,
+                [],
+                fileInfo.Length);
+            session.RecordPropertyFunction(
+                typeof(DirectoryInfo),
+                nameof(DirectoryInfo.LastWriteTimeUtc),
+                directoryInfo,
+                [],
+                directoryInfo.LastWriteTimeUtc);
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                nameof(FileInfo.FullName),
+                fileInfo,
+                [],
+                fileInfo.FullName);
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                nameof(FileInfo.DirectoryName),
+                fileInfo,
+                [],
+                fileInfo.DirectoryName);
+            session.RecordPropertyFunction(
+                typeof(DirectoryInfo),
+                nameof(DirectoryInfo.Parent),
+                directoryInfo,
+                [],
+                directoryInfo.Parent);
+            session.RecordPropertyFunction(
+                typeof(FileInfo),
+                "LinkTarget",
+                fileInfo,
+                [],
+                result: null);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            report.MetadataReads.ShouldContain(observation =>
+                observation.Path == filePath &&
+                observation.Operation == $"{typeof(FileInfo).FullName}::{nameof(FileInfo.Attributes)}");
+            report.MetadataReads.ShouldContain(observation =>
+                observation.Path == filePath &&
+                observation.Operation == $"{typeof(FileInfo).FullName}::{nameof(FileInfo.Length)}");
+            report.MetadataReads.ShouldContain(observation =>
+                observation.Path == directoryInfo.FullName &&
+                observation.Operation == $"{typeof(DirectoryInfo).FullName}::{nameof(DirectoryInfo.LastWriteTimeUtc)}");
+            report.MetadataReads.ShouldContain(observation =>
+                observation.Path == filePath &&
+                observation.Operation == $"{typeof(FileInfo).FullName}::LinkTarget");
+            report.MetadataReads.ShouldNotContain(observation =>
+                observation.Operation == $"{typeof(FileInfo).FullName}::{nameof(FileInfo.FullName)}" ||
+                observation.Operation == $"{typeof(FileInfo).FullName}::{nameof(FileInfo.DirectoryName)}" ||
+                observation.Operation == $"{typeof(DirectoryInfo).FullName}::{nameof(DirectoryInfo.Parent)}");
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Operation == $"{typeof(FileInfo).FullName}::{nameof(FileInfo.FullName)}");
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Operation == $"{typeof(FileInfo).FullName}::{nameof(FileInfo.DirectoryName)}");
+            report.ExternalInputs.ShouldContain(observation =>
+                observation.Operation == $"{typeof(DirectoryInfo).FullName}::{nameof(DirectoryInfo.Parent)}");
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.FileMetadata)
+                .State.ShouldBe(EvaluationObservationCategoryState.Observed);
+        }
+
 #if NET
         [Fact]
         public void EvaluationObservationRecordsEnumerationOptionsIdentity()
@@ -1101,7 +1248,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(11);
+            report.SchemaVersion.ShouldBe(12);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }

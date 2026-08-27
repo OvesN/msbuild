@@ -244,22 +244,28 @@ Current Boolean APIs can conflate missing with access or I/O failure. Record onl
 outcome the API proves; add an issue when a negative result is ambiguous rather than
 inventing a more precise failure.
 
-### 5. File metadata and path identity
+### 5. File metadata and path resolution
 
 | Input | Observation seam | Required record |
 | --- | --- | --- |
 | Attributes | `IFileSystem.GetAttributes` or classified function | Exact returned attributes and outcome |
 | Last-write time | `IFileSystem.GetLastWriteTimeUtc` or classified function | Exact returned value and outcome |
 | Creation, last-access, and local/UTC write times | classified `File` / `Directory` / `FileSystemInfo` member | Member, logical path, exact returned value, and time-zone dependency for local-time variants |
-| Length and other `FileInfo` / `DirectoryInfo` fields | classified member dispatcher | Member, logical path/provider, exact value |
+| Length and other filesystem-backed `FileInfo` / `DirectoryInfo` fields | classified member dispatcher | Member, logical path/provider, exact value |
 | Built-in item metadata `%(ModifiedTime)`, `%(CreatedTime)`, `%(AccessedTime)` | `ItemSpecModifiers` / `FileUtilities.GetFileInfoNoThrow` | Metadata kind, unescaped item spec, effective base directory/source, exact returned string, and time-zone dependency |
-| Built-in path metadata such as `%(FullPath)`, `%(RootDir)`, `%(RelativeDir)` | `ItemSpecModifiers` | Metadata kind, item spec, effective base directory/source, exact returned value |
 | Symlink/reparse target | classified member/provider | Logical path, target, and provider semantics |
-| Path normalization/full-path result | classified path member or evaluator helper | Input, base/current directory when consumed, and exact normalized result |
-| Path comparison/case behavior | request semantic snapshot | Comparison semantic ID |
 
 Metadata is recorded only when evaluation consumes it. A timestamp is not a substitute for
 content identity.
+
+Path calculations are ambient path-resolution inputs, not file metadata:
+
+| Input | Observation seam | Required record |
+| --- | --- | --- |
+| Built-in path modifiers `%(FullPath)`, `%(RootDir)`, `%(RelativeDir)`, `%(Directory)` | `ItemSpecModifiers` | Modifier, item spec, effective base directory/source, exact returned value |
+| `Directory.GetParent` and lexical `FileInfo` / `DirectoryInfo` members such as `FullName`, `Name`, `Directory`, `DirectoryName`, `Extension`, `Parent`, and `Root` | classified member dispatcher | Receiver/member, instance path, arguments, and exact result |
+| Path normalization/full-path result | classified path member or evaluator helper | Input, base/current directory when consumed, and exact normalized result |
+| Path comparison/case behavior | request semantic snapshot | Comparison semantic ID |
 
 `FileUtilities.GetFileInfoNoThrow` does not have the observable `IFileSystem` overload
 available to the existence-probe helpers. Built-in item metadata therefore needs an
@@ -367,7 +373,7 @@ Important families include:
 | Member family | Required handling |
 | --- | --- |
 | `System.IO.File` / `Directory` reads, probes, metadata, and enumeration | Route to the matching filesystem record |
-| `FileInfo` / `DirectoryInfo` instance members | Classify each external field/read; no type-wide assumption |
+| `FileInfo` / `DirectoryInfo` instance members | Record actual disk metadata separately from lexical path members such as `FullName`, `Name`, `Directory`, `Parent`, and `Root` |
 | `Path.GetFullPath` and equivalent normalization | Record current/base directory and exact result |
 | `[MSBuild]::MakeRelative` | Ambient; record both exact `GetFullPath` inputs/results at the normalization seam plus the final function result |
 | `Path.GetTempPath` | Ambient |
@@ -608,7 +614,7 @@ This is an implementation checklist, not a second set of dependency categories.
 | `EngineFileUtilities.GetFileList` decisions before `FileMatcher` | Glob |
 | `FileMatcher.Default` and process/per-context glob caches | Glob |
 | `FileUtilities.MaybeAdjustFilePath` / `LooksLikeUnixFilePath` | Path probe/path normalization |
-| `ItemSpecModifiers` / `FileUtilities.GetFileInfoNoThrow` | File metadata / path identity |
+| `ItemSpecModifiers` / `FileUtilities.GetFileInfoNoThrow` | File metadata / path resolution |
 | `Expander.ItemExpander.Transforms` direct `FileOrDirectoryExists` | Path probe |
 | `Evaluator._fallbackSearchPathsCache` process-static directory memo | Path probe supporting import search |
 | `ParserIgnoreConfiguration` default-filesystem probes and raw config reads | Parser-config search / project source |
@@ -638,8 +644,8 @@ candidates retain the order consumed by evaluation.
 | Full text/byte reads | Typed hash domains distinguish raw bytes, decoded text, decoded line sequences, and parsed XML |
 | Streams/readers | Marked incomplete unless a semantic owner or provider supplies full-content identity |
 | Probes | Provider-tagged file/directory/file-or-directory outcomes; swallowed I/O failures are recorded as ambiguous |
-| Metadata | Provider-tagged attributes, timestamps, lengths, path facts, and property-function member identity |
-| Built-in item metadata | `ItemSpecModifiers` records value plus effective base directory without treating normal relative specs as incomplete |
+| Metadata | Provider-tagged filesystem attributes, timestamps, lengths, symlink targets, and property-function member identity |
+| Path resolution | `ItemSpecModifiers` and lexical path members record input, effective base/instance, and result without claiming filesystem access |
 | Raw enumeration | Standalone enumerations record ordered fingerprint, count, completion, and provider; optional diagnostics retain members |
 | Globs and searches | Semantic glob ownership suppresses duplicate parallel walks; upward, parser, and import-fallback searches retain ordered candidates |
 | `UsingTask` / project-cache registrations | Effective task registrations and VS project-cache registration side effects are recorded |

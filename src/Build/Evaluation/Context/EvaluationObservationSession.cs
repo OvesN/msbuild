@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 11;
+        private const int ObservationSchemaVersion = 12;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -114,24 +114,26 @@ namespace Microsoft.Build.Evaluation.Context
             "GetLastAccessTimeUtc",
             "GetLastWriteTime",
             "GetLastWriteTimeUtc",
-            "GetParent",
         };
         private static readonly HashSet<string> s_fileSystemInfoMetadataMembers = new(StringComparer.OrdinalIgnoreCase)
         {
             "Attributes",
             "CreationTime",
             "CreationTimeUtc",
-            "Directory",
-            "DirectoryName",
             "Exists",
-            "Extension",
-            "FullName",
             "LastAccessTime",
             "LastAccessTimeUtc",
             "LastWriteTime",
             "LastWriteTimeUtc",
             "Length",
             "LinkTarget",
+        };
+        private static readonly HashSet<string> s_fileSystemInfoPathMembers = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Directory",
+            "DirectoryName",
+            "Extension",
+            "FullName",
             "Name",
             "Parent",
             "Root",
@@ -775,15 +777,21 @@ namespace Microsoft.Build.Evaluation.Context
             string baseDirectory,
             string value)
         {
+            if (metadataName is "FullPath" or "RootDir" or "RelativeDir" or "Directory")
+            {
+                RecordExternalInputCore(
+                    EvaluationExternalInputKind.Ambient,
+                    string.Concat("ItemMetadata::", metadataName),
+                    string.Concat("ItemSpec=", itemSpec, "\0Base=", baseDirectory),
+                    value);
+                return;
+            }
+
             EvaluationMetadataKind kind = metadataName switch
             {
                 "ModifiedTime" => EvaluationMetadataKind.ItemModifiedTime,
                 "CreatedTime" => EvaluationMetadataKind.ItemCreatedTime,
                 "AccessedTime" => EvaluationMetadataKind.ItemAccessedTime,
-                "FullPath" => EvaluationMetadataKind.ItemFullPath,
-                "RootDir" => EvaluationMetadataKind.ItemRootDirectory,
-                "RelativeDir" => EvaluationMetadataKind.ItemRelativeDirectory,
-                "Directory" => EvaluationMetadataKind.ItemDirectory,
                 _ => EvaluationMetadataKind.PropertyFunction,
             };
 
@@ -1722,6 +1730,14 @@ namespace Microsoft.Build.Evaluation.Context
                             : EvaluationEnumerationCompletion.Partial,
                         optionsIdentity: optionsIdentity);
                 }
+                else if ((effects & EvaluationPropertyFunctionEffect.Ambient) != 0)
+                {
+                    RecordExternalInputCore(
+                        EvaluationExternalInputKind.Ambient,
+                        string.Concat(receiverName, "::", member),
+                        serializedRequest,
+                        serializedResult);
+                }
                 else
                 {
                     RecordMetadata(
@@ -1843,6 +1859,14 @@ namespace Microsoft.Build.Evaluation.Context
                         serializedResult,
                         null,
                         string.Concat(receiverName, "::", member));
+                }
+                else if ((effects & EvaluationPropertyFunctionEffect.Ambient) != 0)
+                {
+                    RecordExternalInputCore(
+                        EvaluationExternalInputKind.Ambient,
+                        string.Concat(receiverName, "::", member),
+                        string.Concat("Instance=", fileSystemInfo.FullName, "\0Arguments=", serializedRequest),
+                        serializedResult);
                 }
 
                 return;
@@ -1990,6 +2014,11 @@ namespace Microsoft.Build.Evaluation.Context
                     return EvaluationPropertyFunctionEffect.DirectoryEnumeration;
                 }
 
+                if (string.Equals(member, nameof(System.IO.Directory.GetParent), StringComparison.OrdinalIgnoreCase))
+                {
+                    return EvaluationPropertyFunctionEffect.Ambient;
+                }
+
                 if (s_directoryMetadataMembers.Contains(member))
                 {
                     return EvaluationPropertyFunctionEffect.FileMetadata;
@@ -2023,6 +2052,11 @@ namespace Microsoft.Build.Evaluation.Context
                 {
                     return EvaluationPropertyFunctionEffect.SideEffect |
                         EvaluationPropertyFunctionEffect.OpaqueUnsupported;
+                }
+
+                if (s_fileSystemInfoPathMembers.Contains(member))
+                {
+                    return EvaluationPropertyFunctionEffect.Ambient;
                 }
 
                 return s_fileSystemInfoMetadataMembers.Contains(member)
