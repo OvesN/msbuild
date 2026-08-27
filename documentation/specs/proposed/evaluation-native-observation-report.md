@@ -1,5 +1,8 @@
 # Native Evaluation Observation Report
 
+BuildXL differential validation is documented in
+[evaluation-native-observation-buildxl-validation.md](evaluation-native-observation-buildxl-validation.md).
+
 ## Session lifecycle
 
 1. `Evaluator` calls `EvaluationObservationSession.TryCreate`. When the feature is
