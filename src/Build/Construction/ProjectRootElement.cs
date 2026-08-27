@@ -47,6 +47,7 @@ namespace Microsoft.Build.Construction
     public partial class ProjectRootElement : ProjectElementContainer
     {
         internal static Action<string> TestOnlyHookAfterSourceRead { get; set; }
+        internal static Action<string> TestOnlyHookAfterFailedSourceRead { get; set; }
 
         // Constants for default (empty) project file.
         private const string EmptyProjectFileContent = "{0}<Project{1}{2}>\r\n</Project>";
@@ -254,7 +255,8 @@ namespace Microsoft.Build.Construction
         private ProjectRootElement(
                 string path,
                 ProjectRootElementCacheBase projectRootElementCache,
-                bool preserveFormatting)
+                bool preserveFormatting,
+                EvaluationProjectSourceLoadCapture sourceLoadCapture = null)
         {
             ArgumentException.ThrowIfNullOrEmpty(path);
             ErrorUtilities.VerifyThrowInternalRooted(path);
@@ -266,14 +268,30 @@ namespace Microsoft.Build.Construction
             _versionOnDisk = Version;
             _timeLastChangedUtc = DateTime.UtcNow;
 
-            XmlDocumentWithLocation document = LoadDocument(
-                path,
-                preserveFormatting,
-                projectRootElementCache.LoadProjectsReadOnly,
-                out string contentHash);
+            try
+            {
+                XmlDocumentWithLocation document = LoadDocument(
+                    path,
+                    preserveFormatting,
+                    projectRootElementCache.LoadProjectsReadOnly,
+                    out string contentHash,
+                    sourceLoadCapture);
 
-            ProjectParser.Parse(document, this, ProjectRootElementCache.ParserIgnoreConfiguration);
-            PublishEvaluationObservationSourceStamp(contentHash);
+                ProjectParser.Parse(document, this, ProjectRootElementCache.ParserIgnoreConfiguration);
+                PublishEvaluationObservationSourceStamp(contentHash);
+            }
+            catch (Exception ex) when (
+                sourceLoadCapture is not null &&
+                !ExceptionHandling.IsCriticalException(ex))
+            {
+                sourceLoadCapture.Failure ??= ex;
+                if (sourceLoadCapture.Outcome == EvaluationProjectSourceOutcome.Parsed)
+                {
+                    sourceLoadCapture.Outcome = EvaluationProjectSourceOutcome.ParseFailure;
+                }
+
+                throw;
+            }
         }
 
         /// <summary>
@@ -1871,13 +1889,37 @@ namespace Microsoft.Build.Construction
         /// Path provided must be a canonicalized full path.
         /// May throw InvalidProjectFileException or an IO-related exception.
         /// </summary>
-        internal static ProjectRootElement OpenProjectOrSolution(string fullPath, IDictionary<string, string> globalProperties, string toolsVersion, ProjectRootElementCacheBase projectRootElementCache, bool isExplicitlyLoaded)
+        internal static ProjectRootElement OpenProjectOrSolution(
+            string fullPath,
+            IDictionary<string, string> globalProperties,
+            string toolsVersion,
+            ProjectRootElementCacheBase projectRootElementCache,
+            bool isExplicitlyLoaded,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture = null)
         {
             ErrorUtilities.VerifyThrowInternalRooted(fullPath);
 
+            ProjectRootElementCacheBase.OpenProjectRootElement loader;
+            if (sourceLoadCapture is null)
+            {
+                loader = static (path, cache) => CreateProjectFromPath(
+                    path,
+                    cache,
+                    preserveFormatting: false);
+            }
+            else
+            {
+                EvaluationProjectSourceLoadCapture capture = sourceLoadCapture;
+                loader = (path, cache) => CreateProjectFromPath(
+                    path,
+                    cache,
+                    preserveFormatting: false,
+                    capture);
+            }
+
             ProjectRootElement projectRootElement = projectRootElementCache.Get(
                 fullPath,
-                (path, cache) => CreateProjectFromPath(path, cache, preserveFormatting: false),
+                loader,
                 isExplicitlyLoaded,
                 // don't care about formatting, reuse whatever is there
                 preserveFormatting: null);
@@ -2141,7 +2183,8 @@ namespace Microsoft.Build.Construction
         private static ProjectRootElement CreateProjectFromPath(
                 string projectFile,
                 ProjectRootElementCacheBase projectRootElementCache,
-                bool preserveFormatting)
+                bool preserveFormatting,
+                EvaluationProjectSourceLoadCapture sourceLoadCapture = null)
         {
             ErrorUtilities.VerifyThrowInternalRooted(projectFile);
 
@@ -2153,7 +2196,11 @@ namespace Microsoft.Build.Construction
                 }
 
                 // OK it's a regular project file, load it normally.
-                return new ProjectRootElement(projectFile, projectRootElementCache, preserveFormatting);
+                return new ProjectRootElement(
+                    projectFile,
+                    projectRootElementCache,
+                    preserveFormatting,
+                    sourceLoadCapture);
             }
             catch (InvalidProjectFileException)
             {
@@ -2177,11 +2224,13 @@ namespace Microsoft.Build.Construction
         /// <param name="preserveFormatting"><code>true</code> to preserve the formatting of the document, otherwise <code>false</code>.</param>
         /// <param name="loadAsReadOnly">Whether to load the file in read-only mode.</param>
         /// <param name="contentHash">The observed raw content hash, or <see langword="null"/> when observation is disabled.</param>
+        /// <param name="sourceLoadCapture">Optional state retained when source loading or parsing fails.</param>
         private XmlDocumentWithLocation LoadDocument(
             string fullPath,
             bool preserveFormatting,
             bool loadAsReadOnly,
-            out string contentHash)
+            out string contentHash,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture = null)
         {
             ErrorUtilities.VerifyThrowInternalRooted(fullPath);
             contentHash = null;
@@ -2200,11 +2249,28 @@ namespace Microsoft.Build.Construction
             try
             {
                 MSBuildEventSource.Log.LoadDocumentStart(fullPath);
-                using (XmlReaderExtension xtr = XmlReaderExtension.Create(fullPath, loadAsReadOnly))
+                using (XmlReaderExtension xtr = XmlReaderExtension.Create(
+                    fullPath,
+                    loadAsReadOnly,
+                    sourceLoadCapture))
                 {
                     _encoding = xtr.Encoding;
-                    document.Load(xtr.Reader);
+                    try
+                    {
+                        document.Load(xtr.Reader);
+                    }
+                    catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                    {
+                        xtr.CaptureFailureObservation();
+                        throw;
+                    }
+
                     contentHash = xtr.ContentHash;
+                    if (sourceLoadCapture is not null)
+                    {
+                        sourceLoadCapture.ContentHash = contentHash;
+                        sourceLoadCapture.Encoding = _encoding?.WebName;
+                    }
                 }
                 if (EvaluationObservationSession.IsEnabled)
                 {
@@ -2220,19 +2286,53 @@ namespace Microsoft.Build.Construction
                     XmlDocument.FullPath = fullPath;
                 }
 
-                _lastWriteTimeWhenReadUtc = FileUtilities.GetFileInfoNoThrow(fullPath).LastWriteTimeUtc;
-                _hasLastWriteTimeWhenReadUtc = true;
+                FileInfo fileInfo = FileUtilities.GetFileInfoNoThrow(fullPath);
+                _hasLastWriteTimeWhenReadUtc = fileInfo is not null;
+                _lastWriteTimeWhenReadUtc = fileInfo?.LastWriteTimeUtc ?? default;
                 _evaluationObservationSourceTimestampStable =
                     !EvaluationObservationSession.IsEnabled ||
                     (lastWriteTimeBeforeRead.HasValue &&
+                     _hasLastWriteTimeWhenReadUtc &&
                      lastWriteTimeBeforeRead.Value == _lastWriteTimeWhenReadUtc);
-                if (StreamTimeUtc < _lastWriteTimeWhenReadUtc)
+                if (sourceLoadCapture is not null)
+                {
+                    sourceLoadCapture.HasLastWriteTimeUtc =
+                        _hasLastWriteTimeWhenReadUtc;
+                    sourceLoadCapture.LastWriteTimeUtcTicks = _lastWriteTimeWhenReadUtc.Ticks;
+                    sourceLoadCapture.TimestampWasStableDuringRead =
+                        _evaluationObservationSourceTimestampStable;
+                }
+
+                if (_hasLastWriteTimeWhenReadUtc &&
+                    StreamTimeUtc < _lastWriteTimeWhenReadUtc)
                 {
                     StreamTimeUtc = null;
                 }
             }
             catch (Exception ex) when (!ExceptionHandling.NotExpectedIoOrXmlException(ex))
             {
+                if (sourceLoadCapture is not null)
+                {
+                    TestOnlyHookAfterFailedSourceRead?.Invoke(fullPath);
+                    DateTime? lastWriteTimeAfterRead =
+                        FileUtilities.GetFileInfoNoThrow(fullPath)?.LastWriteTimeUtc;
+                    sourceLoadCapture.HasLastWriteTimeUtc =
+                        lastWriteTimeAfterRead.HasValue;
+                    sourceLoadCapture.LastWriteTimeUtcTicks =
+                        lastWriteTimeAfterRead?.Ticks ?? 0;
+                    sourceLoadCapture.TimestampWasStableDuringRead =
+                        sourceLoadCapture.ContentHash is null ||
+                        (lastWriteTimeBeforeRead.HasValue &&
+                         lastWriteTimeAfterRead.HasValue &&
+                         lastWriteTimeBeforeRead.Value == lastWriteTimeAfterRead.Value);
+                    sourceLoadCapture.Outcome =
+                        sourceLoadCapture.ContentHash is not null ||
+                        !ExceptionHandling.IsIoRelatedException(ex)
+                            ? EvaluationProjectSourceOutcome.ParseFailure
+                            : EvaluationProjectSourceOutcome.LoadFailure;
+                    sourceLoadCapture.Failure = ex;
+                }
+
                 BuildEventFileInfo fileInfo = ex is XmlException xmlException
                     ? new BuildEventFileInfo(fullPath, xmlException)
                     : new BuildEventFileInfo(fullPath);

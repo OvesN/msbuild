@@ -135,6 +135,26 @@ namespace Microsoft.Build.Evaluation.Context
         InMemory,
     }
 
+    internal enum EvaluationProjectSourceOutcome
+    {
+        Parsed,
+        ParseFailure,
+        LoadFailure,
+    }
+
+    internal sealed class EvaluationProjectSourceLoadCapture
+    {
+        internal string ContentHash { get; set; }
+        internal string Encoding { get; set; }
+        internal bool HasLastWriteTimeUtc { get; set; }
+        internal long LastWriteTimeUtcTicks { get; set; }
+        internal bool TimestampWasStableDuringRead { get; set; } = true;
+        internal EvaluationProjectSourceOutcome Outcome { get; set; } =
+            EvaluationProjectSourceOutcome.Parsed;
+        internal Exception Failure { get; set; }
+        internal bool ContentCaptureFailed { get; set; }
+    }
+
     internal enum EvaluationEnvironmentSource
     {
         Imported,
@@ -376,6 +396,7 @@ namespace Microsoft.Build.Evaluation.Context
     {
         internal EvaluationProjectSourceObservation(
             EvaluationProjectSourceRole role,
+            EvaluationProjectSourceOutcome outcome,
             string path,
             int version,
             string contentHash,
@@ -387,6 +408,7 @@ namespace Microsoft.Build.Evaluation.Context
             bool timestampWasStableDuringRead)
         {
             Role = role;
+            Outcome = outcome;
             Path = path;
             Version = version;
             ContentHash = contentHash;
@@ -399,6 +421,7 @@ namespace Microsoft.Build.Evaluation.Context
         }
 
         internal EvaluationProjectSourceRole Role { get; }
+        internal EvaluationProjectSourceOutcome Outcome { get; }
         internal string Path { get; }
         internal int Version { get; }
         internal string ContentHash { get; }

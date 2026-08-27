@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 15;
+        private const int ObservationSchemaVersion = 16;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -502,6 +502,7 @@ namespace Microsoft.Build.Evaluation.Context
 
                     var observation = new EvaluationProjectSourceObservation(
                         role,
+                        EvaluationProjectSourceOutcome.Parsed,
                         path,
                         source.Version,
                         hash,
@@ -521,7 +522,8 @@ namespace Microsoft.Build.Evaluation.Context
                         key,
                         out EvaluationProjectSourceObservation prior);
                     if (hadPriorObservation &&
-                        (prior.Version != observation.Version ||
+                        (prior.Outcome != observation.Outcome ||
+                         prior.Version != observation.Version ||
                          !string.Equals(prior.ContentHash, observation.ContentHash, StringComparison.Ordinal) ||
                          prior.HasLastWriteTimeUtc != observation.HasLastWriteTimeUtc ||
                          prior.LastWriteTimeUtcTicks != observation.LastWriteTimeUtcTicks ||
@@ -565,6 +567,119 @@ namespace Microsoft.Build.Evaluation.Context
                         AddReason(EvaluationObservationReason.UnversionedSourceProvider);
                     }
                 });
+        }
+
+        internal void RecordProjectSourceFailure(
+            string path,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture)
+        {
+            try
+            {
+                RecordProjectSourceFailureCore(path, sourceLoadCapture);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                AddReason(EvaluationObservationReason.ObservationIncomplete);
+            }
+        }
+
+        private void RecordProjectSourceFailureCore(
+            string path,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture)
+        {
+            if (string.IsNullOrEmpty(path) || sourceLoadCapture is null)
+            {
+                return;
+            }
+
+            const string provider = "Disk";
+            string normalizedPath = NormalizePath(path);
+            EvaluationProjectSourceRole role =
+                FileUtilities.PathComparer.Equals(_projectPath, normalizedPath)
+                    ? EvaluationProjectSourceRole.Root
+                    : EvaluationProjectSourceRole.Import;
+            EvaluationProjectSourceOutcome outcome =
+                sourceLoadCapture.Outcome == EvaluationProjectSourceOutcome.Parsed
+                    ? EvaluationProjectSourceOutcome.ParseFailure
+                    : sourceLoadCapture.Outcome;
+            var observation = new EvaluationProjectSourceObservation(
+                role,
+                outcome,
+                normalizedPath,
+                0,
+                sourceLoadCapture.ContentHash,
+                sourceLoadCapture.ContentHash is null
+                    ? EvaluationContentHashKind.Unknown
+                    : EvaluationContentHashKind.RawBytes,
+                sourceLoadCapture.Encoding,
+                provider,
+                sourceLoadCapture.HasLastWriteTimeUtc,
+                sourceLoadCapture.LastWriteTimeUtcTicks,
+                sourceLoadCapture.TimestampWasStableDuringRead);
+            string key = string.Concat(
+                ((int)role).ToString(CultureInfo.InvariantCulture),
+                "\0",
+                normalizedPath);
+
+            MarkCategory(
+                EvaluationObservationCategory.ProjectSource,
+                EvaluationObservationCategoryState.Incomplete);
+            Record(
+                () =>
+                {
+                    if (_projectSources.TryGetValue(
+                            key,
+                            out EvaluationProjectSourceObservation prior) &&
+                        (prior.Outcome != observation.Outcome ||
+                         prior.Version != observation.Version ||
+                         !string.Equals(prior.ContentHash, observation.ContentHash, StringComparison.Ordinal) ||
+                         prior.HasLastWriteTimeUtc != observation.HasLastWriteTimeUtc ||
+                         prior.LastWriteTimeUtcTicks != observation.LastWriteTimeUtcTicks ||
+                         prior.TimestampWasStableDuringRead != observation.TimestampWasStableDuringRead))
+                    {
+                        AddReason(EvaluationObservationReason.ConflictingObservation);
+                    }
+                    else
+                    {
+                        _projectSources[key] = observation;
+                    }
+
+                    if (!observation.TimestampWasStableDuringRead)
+                    {
+                        AddReason(EvaluationObservationReason.ProjectSourceChangedDuringRead);
+                    }
+                });
+
+            if (observation.ContentHash is not null)
+            {
+                RecordFileRead(
+                    normalizedPath,
+                    observation.ContentHash,
+                    isVerifiable: true,
+                    hashKind: EvaluationContentHashKind.RawBytes,
+                    provider: provider);
+            }
+            else
+            {
+                MarkCategory(
+                    EvaluationObservationCategory.FileContent,
+                    EvaluationObservationCategoryState.Incomplete);
+                AddReason(EvaluationObservationReason.ProjectXmlContentNotObserved);
+            }
+
+            if (sourceLoadCapture.ContentCaptureFailed)
+            {
+                AddReason(EvaluationObservationReason.ObservationIncomplete);
+            }
+
+            RecordOperationFailure(
+                EvaluationObservationCategory.ProjectSource,
+                outcome == EvaluationProjectSourceOutcome.LoadFailure
+                    ? "ProjectSource.Load"
+                    : "ProjectSource.Parse",
+                normalizedPath,
+                provider,
+                sourceLoadCapture.Failure);
         }
 
         internal void RecordGlob(

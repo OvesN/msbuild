@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
 using Microsoft.Build.Evaluation.Context;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 
 #nullable disable
@@ -18,26 +19,42 @@ namespace Microsoft.Build.Internal
     /// </summary>
     internal class XmlReaderExtension : IDisposable
     {
+        internal static Action<string> TestOnlyHookBeforeSourceRead { get; set; }
+
         /// <summary>
         ///     Creates an XmlReaderExtension with handle to an XmlReader.
         /// </summary>
         /// <param name="filePath">Path to the file on disk.</param>
         /// <param name="loadAsReadOnly">Whther to load the file in real only mode.</param>
+        /// <param name="sourceLoadCapture">Optional failed-source observation state.</param>
         /// <returns>Disposable XmlReaderExtension object.</returns>
-        internal static XmlReaderExtension Create(string filePath, bool loadAsReadOnly)
+        internal static XmlReaderExtension Create(
+            string filePath,
+            bool loadAsReadOnly,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture = null)
         {
-            return new XmlReaderExtension(filePath, loadAsReadOnly);
+            return new XmlReaderExtension(filePath, loadAsReadOnly, sourceLoadCapture);
         }
 
         private static readonly Encoding s_utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
         private readonly Stream _stream;
         private readonly StreamReader _streamReader;
         private readonly HashingReadStream _hashingStream;
+        private readonly EvaluationProjectSourceLoadCapture _sourceLoadCapture;
 
-        private XmlReaderExtension(string file, bool loadAsReadOnly)
+        private XmlReaderExtension(
+            string file,
+            bool loadAsReadOnly,
+            EvaluationProjectSourceLoadCapture sourceLoadCapture)
         {
+            _sourceLoadCapture = sourceLoadCapture;
             try
             {
+                if (_sourceLoadCapture is not null)
+                {
+                    TestOnlyHookBeforeSourceRead?.Invoke(file);
+                }
+
                 // Note: Passing in UTF8 w/o BOM into StreamReader. If the BOM is detected StreamReader will set the
                 // Encoding correctly (detectEncodingFromByteOrderMarks = true). The default is to use UTF8 (with BOM)
                 // which will cause the BOM to be added when we re-save the file in cases where it was not present on
@@ -79,7 +96,15 @@ namespace Microsoft.Build.Internal
             {
                 // GetXmlReader calls Read() to get Encoding and can throw. If it does, close
                 // the streams as needed.
-                Dispose();
+                try
+                {
+                    CaptureFailureObservation();
+                }
+                finally
+                {
+                    Dispose();
+                }
+
                 throw;
             }
         }
@@ -89,6 +114,28 @@ namespace Microsoft.Build.Internal
         internal Encoding Encoding { get; }
 
         internal string ContentHash => _hashingStream?.GetContentHash();
+
+        internal void CaptureFailureObservation()
+        {
+            if (_sourceLoadCapture is null)
+            {
+                return;
+            }
+
+            try
+            {
+                _sourceLoadCapture.ContentHash = _hashingStream?.CompleteContentHash();
+                _sourceLoadCapture.Encoding =
+                    (Encoding ?? _streamReader?.CurrentEncoding)?.WebName;
+                _sourceLoadCapture.ContentCaptureFailed =
+                    _hashingStream is not null &&
+                    _sourceLoadCapture.ContentHash is null;
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                _sourceLoadCapture.ContentCaptureFailed = true;
+            }
+        }
 
         public void Dispose()
         {
@@ -161,6 +208,26 @@ namespace Microsoft.Build.Internal
                 }
 
                 return _contentHash;
+            }
+
+            internal string CompleteContentHash()
+            {
+                if (!_sequential)
+                {
+                    return null;
+                }
+
+                if (_contentHash is not null)
+                {
+                    return _contentHash;
+                }
+
+                byte[] buffer = new byte[4096];
+                while (Read(buffer, 0, buffer.Length) > 0)
+                {
+                }
+
+                return GetContentHash();
             }
 
             public override bool CanRead => _inner.CanRead;

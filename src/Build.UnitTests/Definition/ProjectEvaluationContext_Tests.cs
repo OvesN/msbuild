@@ -518,11 +518,13 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
             report.ProjectSources.ShouldContain(observation =>
                 observation.Role == EvaluationProjectSourceRole.Root &&
+                observation.Outcome == EvaluationProjectSourceOutcome.Parsed &&
                 FileUtilities.PathsEqual(observation.Path, projectFile) &&
                 observation.HashKind == EvaluationContentHashKind.RawBytes &&
                 observation.ContentHash == EvaluationObservationSession.ComputeBytesHash(File.ReadAllBytes(projectFile)));
             report.ProjectSources.ShouldContain(observation =>
                 observation.Role == EvaluationProjectSourceRole.Import &&
+                observation.Outcome == EvaluationProjectSourceOutcome.Parsed &&
                 FileUtilities.PathsEqual(observation.Path, importedProject) &&
                 observation.ContentHash == EvaluationObservationSession.ComputeBytesHash(File.ReadAllBytes(importedProject)));
 
@@ -544,6 +546,367 @@ namespace Microsoft.Build.UnitTests.Definition
 
             project.GetItems("Compile").ShouldContain(item =>
                 string.Equals(Path.GetFileName(item.EvaluatedInclude), "Observed.cs", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void EvaluationObservationRecordsMalformedImportBytes(bool ignoreInvalidImport)
+        {
+            string malformedImport = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "malformed.props");
+            byte[] malformedBytes = Encoding.UTF8.GetBytes(
+                "<?xml version=\"1.0\" encoding=\"windows-1252\"?>" +
+                "<Project><PropertyGroup><Value>before</Value></Project>" +
+                new string('x', 128 * 1024));
+            File.WriteAllBytes(malformedImport, malformedBytes);
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(malformedBytes);
+            string projectFile = _env.CreateFile(
+                "malformed-import.proj",
+                """
+                <Project>
+                  <Import Project="malformed.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            Action evaluate = () => Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+                LoadSettings = ignoreInvalidImport
+                    ? ProjectLoadSettings.IgnoreInvalidImports
+                    : ProjectLoadSettings.Default,
+            });
+            if (ignoreInvalidImport)
+            {
+                Should.NotThrow(evaluate);
+            }
+            else
+            {
+                Should.Throw<InvalidProjectFileException>(evaluate);
+            }
+
+            report.ShouldNotBeNull();
+            report.EvaluationSucceeded.ShouldBe(ignoreInvalidImport);
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, malformedImport));
+            source.Role.ShouldBe(EvaluationProjectSourceRole.Import);
+            source.Outcome.ShouldBe(EvaluationProjectSourceOutcome.ParseFailure);
+            source.Version.ShouldBe(0);
+            source.ContentHash.ShouldBe(expectedHash);
+            source.HashKind.ShouldBe(EvaluationContentHashKind.RawBytes);
+            source.Encoding.ShouldBe(
+                "windows-1252",
+                StringCompareShould.IgnoreCase);
+            source.Provider.ShouldBe("Disk");
+            source.HasLastWriteTimeUtc.ShouldBeTrue();
+            source.TimestampWasStableDuringRead.ShouldBeTrue();
+            report.FileReads.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, malformedImport) &&
+                observation.ContentHash == expectedHash &&
+                observation.HashKind == EvaluationContentHashKind.RawBytes &&
+                observation.IsVerifiable);
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.Single(
+                    observation => FileUtilities.PathsEqual(observation.Path, malformedImport));
+            failure.Category.ShouldBe(EvaluationObservationCategory.ProjectSource);
+            failure.Operation.ShouldBe("ProjectSource.Parse");
+            failure.Provider.ShouldBe("Disk");
+            failure.ExceptionType.ShouldBe(typeof(XmlException).FullName);
+            (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
+                .ShouldBe(EvaluationObservationReason.ExternalOperationFailure);
+            (report.Reasons & EvaluationObservationReason.ProjectXmlContentNotObserved)
+                .ShouldBe(EvaluationObservationReason.None);
+            report.Categories.Single(observation =>
+                observation.Category == EvaluationObservationCategory.ProjectSource)
+                .State.ShouldBe(EvaluationObservationCategoryState.Incomplete);
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsInvalidMsbuildImportBytes()
+        {
+            string invalidImport = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "invalid-msbuild.props");
+            byte[] invalidBytes = Encoding.UTF8.GetBytes("<NotProject />");
+            File.WriteAllBytes(invalidImport, invalidBytes);
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(invalidBytes);
+            string projectFile = _env.CreateFile(
+                "invalid-msbuild-import.proj",
+                """
+                <Project>
+                  <Import Project="invalid-msbuild.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            Should.Throw<InvalidProjectFileException>(() =>
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                }));
+
+            report.ShouldNotBeNull();
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, invalidImport));
+            source.Outcome.ShouldBe(EvaluationProjectSourceOutcome.ParseFailure);
+            source.ContentHash.ShouldBe(expectedHash);
+            source.HashKind.ShouldBe(EvaluationContentHashKind.RawBytes);
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.Single(
+                    observation => FileUtilities.PathsEqual(observation.Path, invalidImport));
+            failure.Operation.ShouldBe("ProjectSource.Parse");
+            failure.ExceptionType.ShouldBe(typeof(InvalidProjectFileException).FullName);
+        }
+
+        [Fact]
+        public void EvaluationObservationClassifiesInvalidXmlEncodingAsParseFailure()
+        {
+            string invalidImport = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "invalid-encoding.props");
+            byte[] invalidBytes = Encoding.UTF8.GetBytes(
+                "<?xml version=\"1.0\" encoding=\"utf-42\"?><Project />" +
+                new string(' ', 128 * 1024));
+            File.WriteAllBytes(invalidImport, invalidBytes);
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(invalidBytes);
+            string projectFile = _env.CreateFile(
+                "invalid-encoding-import.proj",
+                """
+                <Project>
+                  <Import Project="invalid-encoding.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            Should.Throw<InvalidProjectFileException>(() =>
+                Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                }));
+
+            report.ShouldNotBeNull();
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, invalidImport));
+            source.Outcome.ShouldBe(EvaluationProjectSourceOutcome.ParseFailure);
+            source.ContentHash.ShouldBe(expectedHash);
+            source.HashKind.ShouldBe(EvaluationContentHashKind.RawBytes);
+            report.OperationFailures.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, invalidImport))
+                .Operation.ShouldBe("ProjectSource.Parse");
+        }
+
+        [Fact]
+        public void EvaluationObservationRecordsImportLoadFailure()
+        {
+            string importFile = _env.CreateFile("load-failure.props", "<Project />").Path;
+            string projectFile = _env.CreateFile(
+                "load-failure-import.proj",
+                """
+                <Project>
+                  <Import Project="load-failure.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            Microsoft.Build.Internal.XmlReaderExtension.TestOnlyHookBeforeSourceRead = path =>
+            {
+                if (FileUtilities.PathsEqual(path, importFile))
+                {
+                    throw new IOException("Test-only source load failure.");
+                }
+            };
+
+            try
+            {
+                Should.Throw<InvalidProjectFileException>(() =>
+                    Project.FromFile(projectFile, new ProjectOptions
+                    {
+                        ProjectCollection = _env.CreateProjectCollection().Collection,
+                    }));
+            }
+            finally
+            {
+                Microsoft.Build.Internal.XmlReaderExtension.TestOnlyHookBeforeSourceRead = null;
+            }
+
+            report.ShouldNotBeNull();
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, importFile));
+            source.Outcome.ShouldBe(EvaluationProjectSourceOutcome.LoadFailure);
+            source.ContentHash.ShouldBeNull();
+            source.HashKind.ShouldBe(EvaluationContentHashKind.Unknown);
+            source.HasLastWriteTimeUtc.ShouldBeTrue();
+            source.TimestampWasStableDuringRead.ShouldBeTrue();
+            EvaluationOperationFailureObservation failure =
+                report.OperationFailures.Single(
+                    observation => FileUtilities.PathsEqual(observation.Path, importFile));
+            failure.Operation.ShouldBe("ProjectSource.Load");
+            failure.ExceptionType.ShouldBe(typeof(IOException).FullName);
+            (report.Reasons & EvaluationObservationReason.ProjectXmlContentNotObserved)
+                .ShouldBe(EvaluationObservationReason.ProjectXmlContentNotObserved);
+            (report.Reasons & EvaluationObservationReason.ObservationIncomplete)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationMarksMalformedImportTimestampChange()
+        {
+            string malformedImport = _env.CreateFile(
+                "changing-malformed.props",
+                "<Project><PropertyGroup></Project>").Path;
+            DateTime initialTime = DateTime.UtcNow.AddMinutes(-10);
+            File.SetLastWriteTimeUtc(malformedImport, initialTime);
+            string projectFile = _env.CreateFile(
+                "changing-malformed-import.proj",
+                """
+                <Project>
+                  <Import Project="changing-malformed.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            ProjectRootElement.TestOnlyHookAfterFailedSourceRead = path =>
+            {
+                if (FileUtilities.PathsEqual(path, malformedImport))
+                {
+                    File.SetLastWriteTimeUtc(path, initialTime.AddMinutes(1));
+                }
+            };
+
+            try
+            {
+                Should.Throw<InvalidProjectFileException>(() =>
+                    Project.FromFile(projectFile, new ProjectOptions
+                    {
+                        ProjectCollection = _env.CreateProjectCollection().Collection,
+                    }));
+            }
+            finally
+            {
+                ProjectRootElement.TestOnlyHookAfterFailedSourceRead = null;
+            }
+
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, malformedImport));
+            source.TimestampWasStableDuringRead.ShouldBeFalse();
+            (report.Reasons & EvaluationObservationReason.ProjectSourceChangedDuringRead)
+                .ShouldBe(EvaluationObservationReason.ProjectSourceChangedDuringRead);
+        }
+
+        [Fact]
+        public void EvaluationObservationRetainsImportHashWhenFileIsDeletedAfterRead()
+        {
+            string importFile = _env.CreateFile(
+                "deleted-after-read.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ImportedBeforeDeletion>true</ImportedBeforeDeletion>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+            string expectedHash = EvaluationObservationSession.ComputeBytesHash(
+                File.ReadAllBytes(importFile));
+            string projectFile = _env.CreateFile(
+                "deleted-after-read-import.proj",
+                """
+                <Project>
+                  <Import Project="deleted-after-read.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            ProjectRootElement.TestOnlyHookAfterSourceRead = path =>
+            {
+                if (FileUtilities.PathsEqual(path, importFile))
+                {
+                    File.Delete(path);
+                }
+            };
+
+            Project project;
+            try
+            {
+                project = Project.FromFile(projectFile, new ProjectOptions
+                {
+                    ProjectCollection = _env.CreateProjectCollection().Collection,
+                });
+            }
+            finally
+            {
+                ProjectRootElement.TestOnlyHookAfterSourceRead = null;
+            }
+
+            project.GetPropertyValue("ImportedBeforeDeletion").ShouldBe("true");
+            EvaluationProjectSourceObservation source = report.ProjectSources.Single(
+                observation => FileUtilities.PathsEqual(observation.Path, importFile));
+            source.Outcome.ShouldBe(EvaluationProjectSourceOutcome.Parsed);
+            source.ContentHash.ShouldBe(expectedHash);
+            source.HashKind.ShouldBe(EvaluationContentHashKind.RawBytes);
+            source.HasLastWriteTimeUtc.ShouldBeFalse();
+            (report.Reasons & EvaluationObservationReason.ProjectXmlContentNotObserved)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void EvaluationObservationKeepsIgnoredMissingImportAsNegativeProbe(
+            bool importPathIsDirectory)
+        {
+            string missingImport = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "missing-import.props");
+            if (importPathIsDirectory)
+            {
+                Directory.CreateDirectory(missingImport);
+            }
+
+            string projectFile = _env.CreateFile(
+                "ignored-missing-import.proj",
+                """
+                <Project>
+                  <Import Project="missing-import.props" />
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+
+            Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+                LoadSettings = ProjectLoadSettings.IgnoreMissingImports,
+            });
+
+            report.ShouldNotBeNull();
+            report.PathProbes.ShouldContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, missingImport) &&
+                !observation.Exists);
+            report.ProjectSources.ShouldNotContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, missingImport));
+            report.OperationFailures.ShouldNotContain(observation =>
+                FileUtilities.PathsEqual(observation.Path, missingImport));
+            (report.Reasons & EvaluationObservationReason.ExternalOperationFailure)
+                .ShouldBe(EvaluationObservationReason.None);
         }
 
         [Fact]
@@ -1671,7 +2034,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(15);
+            report.SchemaVersion.ShouldBe(16);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }

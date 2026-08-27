@@ -128,9 +128,9 @@ a canonical identity across Windows namespace aliases. The same issue
 applies conceptually to substituted drives, junction targets, and other
 equivalent names.
 
-### 3. Malformed import reporting claims more coverage than it has
+### 3. Malformed imports were incomplete at the baseline
 
-For a malformed imported `.props` file:
+At the pinned validation baseline, for a malformed imported `.props` file:
 
 - BuildXL recorded a successful `CreateFile` read;
 - native observation recorded a positive file probe;
@@ -144,6 +144,15 @@ For a malformed imported `.props` file:
 The path set happened to contain the import because of the probe. A
 path-only differential would therefore miss the missing content
 observation.
+
+The current observer resolves this model gap. It completes the raw-byte hash
+through the original still-open stream, records an import source with
+`ParseFailure`, emits a typed `ProjectSource.Parse` failure, and marks the
+project-source category incomplete. The same record is retained when
+`IgnoreInvalidImports` allows evaluation to continue. Missing imports remain
+negative probes and are not reclassified as failed sources. Post-fix BuildXL
+differential results are reported only after the complete six-gap validation
+pass.
 
 ## Confirmed incomplete path observations
 

@@ -2709,6 +2709,10 @@ namespace Microsoft.Build.Evaluation
                     }
 
                     ProjectRootElement importedProjectElement;
+                    EvaluationProjectSourceLoadCapture sourceLoadCapture =
+                        _observationSession is null
+                            ? null
+                            : new EvaluationProjectSourceLoadCapture();
 
                     try
                     {
@@ -2726,7 +2730,8 @@ namespace Microsoft.Build.Evaluation
                                         instance => ((IProperty)instance).EvaluatedValueEscaped),
                                     _data.ExplicitToolsVersion,
                                     _projectRootElementCache,
-                                    explicitlyLoaded);
+                                    explicitlyLoaded,
+                                    sourceLoadCapture);
 
                         if (duplicateImport)
                         {
@@ -2790,6 +2795,15 @@ namespace Microsoft.Build.Evaluation
                             importFileUnescaped,
                             EvaluationPathKind.File,
                             importExists);
+                        if (sourceLoadCapture?.Failure is not null &&
+                            (sourceLoadCapture.Outcome != EvaluationProjectSourceOutcome.LoadFailure ||
+                             importExists))
+                        {
+                            _observationSession?.RecordProjectSourceFailure(
+                                importFileUnescaped,
+                                sourceLoadCapture);
+                        }
+
                         if (!importExists)
                         {
                             if ((_loadSettings & ProjectLoadSettings.IgnoreMissingImports) != 0)
