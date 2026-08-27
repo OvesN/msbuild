@@ -1259,6 +1259,60 @@ namespace Microsoft.Build.UnitTests.Definition
                 .ShouldBe(EvaluationObservationReason.None);
         }
 
+        [WindowsOnlyFact]
+        public void EvaluationObservationUnifiesExtendedDrivePathIdentity()
+        {
+            string root = _env.CreateFolder().Path;
+            string inputPath = _env.CreateFile(Path.Combine(root, "input.txt"), "content").Path;
+            string extendedPath = $@"\\?\{inputPath}";
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
+            string projectFile = _env.CreateFile(
+                Path.Combine(root, "extended-path.proj"),
+                $"""
+                <Project>
+                  <PropertyGroup>
+                    <Normal>$([System.IO.File]::ReadAllText('{inputPath}'))</Normal>
+                    <Extended>$([System.IO.File]::ReadAllText('{extendedPath}'))</Extended>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            Project project = Project.FromFile(projectFile, new ProjectOptions
+            {
+                ProjectCollection = _env.CreateProjectCollection().Collection,
+            });
+
+            project.GetPropertyValue("Normal").ShouldBe("content");
+            project.GetPropertyValue("Extended").ShouldBe("content");
+            report.ShouldNotBeNull();
+            report.FileReads.Count(observation =>
+                observation.HashKind == EvaluationContentHashKind.DecodedText &&
+                FileUtilities.PathsEqual(observation.Path, inputPath)).ShouldBe(1);
+            report.FileReads.ShouldNotContain(observation =>
+                observation.Path.StartsWith(@"\\?\", StringComparison.Ordinal));
+            report.PropertyFunctions.Count(observation =>
+                observation.ReceiverType == typeof(File).FullName &&
+                observation.Member == nameof(File.ReadAllText)).ShouldBe(2);
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [WindowsOnlyFact]
+        public void EvaluationObservationNormalizesOnlyEquivalentExtendedNamespaces()
+        {
+            FileUtilities.NormalizePathForObservation(@"\\?\C:\root\file.txt")
+                .ShouldBe(@"C:\root\file.txt");
+            FileUtilities.NormalizePathForObservation(@"\\?\UNC\server\share\file.txt")
+                .ShouldBe(@"\\server\share\file.txt");
+            FileUtilities.NormalizePathForObservation(@"\\?\Volume{00000000-0000-0000-0000-000000000000}\file.txt")
+                .ShouldBe(@"\\?\Volume{00000000-0000-0000-0000-000000000000}\file.txt");
+            FileUtilities.NormalizePathForObservation(@"\\.\pipe\name")
+                .ShouldBe(@"\\.\pipe\name");
+        }
+
 #if NET
         [Fact]
         public void EvaluationObservationRecordsEnumerationOptionsIdentity()
@@ -1617,7 +1671,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(13);
+            report.SchemaVersion.ShouldBe(14);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }

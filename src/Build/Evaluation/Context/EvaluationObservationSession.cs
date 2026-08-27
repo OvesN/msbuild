@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 13;
+        private const int ObservationSchemaVersion = 14;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -1600,12 +1600,14 @@ namespace Microsoft.Build.Evaluation.Context
 
             if (FileUtilities.IsPathFullyQualifiedNoThrow(path))
             {
-                return FileUtilities.GetFullPathNoThrow(path);
+                return FileUtilities.NormalizePathForObservation(
+                    FileUtilities.GetFullPathNoThrow(path));
             }
 
             if (!string.IsNullOrEmpty(baseDirectory))
             {
-                return FileUtilities.GetFullPathNoThrow(path, baseDirectory);
+                return FileUtilities.NormalizePathForObservation(
+                    FileUtilities.GetFullPathNoThrow(path, baseDirectory));
             }
 
             AddReason(EvaluationObservationReason.UnrootedPath);

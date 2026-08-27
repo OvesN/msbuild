@@ -272,6 +272,10 @@ arguments in the property-function usage record, but their typed filesystem
 records use the canonical absolute path resolved from the effective process
 or explicit item base directory captured at the operation seam.
 
+On Windows, observation identity normalizes equivalent drive and UNC
+extended-path spellings (`\\?\C:\...` and `\\?\UNC\...`) to their ordinary
+namespace form. Other device namespaces remain unchanged.
+
 `FileUtilities.GetFileInfoNoThrow` does not have the observable `IFileSystem` overload
 available to the existence-probe helpers. Built-in item metadata therefore needs an
 explicit native seam or provider-aware overload.

@@ -1051,6 +1051,31 @@ namespace Microsoft.Build.Framework
             }
         }
 
+        internal static string NormalizePathForObservation(string path)
+        {
+            if (!NativeMethods.IsWindows || string.IsNullOrEmpty(path))
+            {
+                return path;
+            }
+
+            const string ExtendedPrefix = @"\\?\";
+            const string ExtendedUncPrefix = @"\\?\UNC\";
+            if (path.StartsWith(ExtendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Concat(@"\\", path.Substring(ExtendedUncPrefix.Length));
+            }
+
+            if (path.Length >= 7 &&
+                path.StartsWith(ExtendedPrefix, StringComparison.Ordinal) &&
+                path[5] == ':' &&
+                (path[6] == Path.DirectorySeparatorChar || path[6] == Path.AltDirectorySeparatorChar))
+            {
+                return path.Substring(ExtendedPrefix.Length);
+            }
+
+            return path;
+        }
+
         /// <summary>
         /// Compare if two paths, relative to the given currentDirectory are equal.
         /// Does not throw IO exceptions. See <see cref="GetFullPathNoThrow(string)"/>
