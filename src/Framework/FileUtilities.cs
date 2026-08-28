@@ -1053,27 +1053,95 @@ namespace Microsoft.Build.Framework
 
         internal static string NormalizePathForObservation(string path)
         {
-            if (!NativeMethods.IsWindows || string.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path))
             {
                 return path;
             }
 
-            const string ExtendedPrefix = @"\\?\";
-            const string ExtendedUncPrefix = @"\\?\UNC\";
-            if (path.StartsWith(ExtendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+            if (NativeMethods.IsWindows)
             {
-                return string.Concat(@"\\", path.Substring(ExtendedUncPrefix.Length));
+                const string ExtendedPrefix = @"\\?\";
+                const string ExtendedUncPrefix = @"\\?\UNC\";
+                if (path.StartsWith(ExtendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    path = string.Concat(@"\\", path.Substring(ExtendedUncPrefix.Length));
+                }
+                else if (path.Length >= 7 &&
+                         path.StartsWith(ExtendedPrefix, StringComparison.Ordinal) &&
+                         path[5] == ':' &&
+                         (path[6] == Path.DirectorySeparatorChar || path[6] == Path.AltDirectorySeparatorChar))
+                {
+                    path = path.Substring(ExtendedPrefix.Length);
+                }
             }
 
-            if (path.Length >= 7 &&
-                path.StartsWith(ExtendedPrefix, StringComparison.Ordinal) &&
-                path[5] == ':' &&
-                (path[6] == Path.DirectorySeparatorChar || path[6] == Path.AltDirectorySeparatorChar))
+            int rootLength = GetObservationPathRootLength(path);
+            int normalizedLength = path.Length;
+            while (normalizedLength > rootLength &&
+                   (path[normalizedLength - 1] == Path.DirectorySeparatorChar ||
+                    path[normalizedLength - 1] == Path.AltDirectorySeparatorChar))
             {
-                return path.Substring(ExtendedPrefix.Length);
+                normalizedLength--;
             }
 
-            return path;
+            return normalizedLength == path.Length
+                ? path
+                : path.Substring(0, normalizedLength);
+        }
+
+        private static int GetObservationPathRootLength(string path)
+        {
+            if (path.Length == 0)
+            {
+                return 0;
+            }
+
+            if (!NativeMethods.IsWindows)
+            {
+                return path[0] == Path.DirectorySeparatorChar ? 1 : 0;
+            }
+
+            static bool IsDirectorySeparator(char character) =>
+                character == Path.DirectorySeparatorChar ||
+                character == Path.AltDirectorySeparatorChar;
+
+            if (path.Length >= 2 && path[1] == ':')
+            {
+                return path.Length >= 3 && IsDirectorySeparator(path[2]) ? 3 : 2;
+            }
+
+            if (!IsDirectorySeparator(path[0]))
+            {
+                return 0;
+            }
+
+            if (path.Length == 1 || !IsDirectorySeparator(path[1]))
+            {
+                return 1;
+            }
+
+            int index = 2;
+            while (index < path.Length && IsDirectorySeparator(path[index]))
+            {
+                index++;
+            }
+
+            while (index < path.Length && !IsDirectorySeparator(path[index]))
+            {
+                index++;
+            }
+
+            while (index < path.Length && IsDirectorySeparator(path[index]))
+            {
+                index++;
+            }
+
+            while (index < path.Length && !IsDirectorySeparator(path[index]))
+            {
+                index++;
+            }
+
+            return index < path.Length ? index + 1 : index;
         }
 
         /// <summary>
@@ -1767,7 +1835,7 @@ namespace Microsoft.Build.Framework
         {
             fileSystem ??= DefaultFileSystem;
             IEvaluationInputObserver observer = EvaluationInputObserver.Current;
-            candidates ??= observer?.RetainDetails == true ? [] : null;
+            candidates ??= observer is not null ? [] : null;
             var candidatesFingerprint = new EvaluationInputFingerprintBuilder();
             int candidateCount = 0;
             string? searchRequest = observer is null
@@ -1799,9 +1867,7 @@ namespace Microsoft.Build.Framework
                         candidates ?? [],
                         candidateCount,
                         candidatesFingerprint.Complete(),
-                        string.Equals(searchKind, "GetPathOfFileAbove", StringComparison.Ordinal)
-                            ? NormalizePath(lookInDirectory, fileName)
-                            : lookInDirectory);
+                        possibleFileDirectory);
                     // We've found the file, return the directory we found it in
                     return lookInDirectory;
                 }

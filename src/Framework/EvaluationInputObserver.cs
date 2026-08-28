@@ -30,6 +30,12 @@ namespace Microsoft.Build.Framework
             string secondInput,
             string firstResult,
             string secondResult);
+        void RecordGlobDirectory(
+            string directory,
+            string filespec,
+            string path,
+            bool exists,
+            string globIdentity = null);
         void RecordSearch(
             string kind,
             string request,

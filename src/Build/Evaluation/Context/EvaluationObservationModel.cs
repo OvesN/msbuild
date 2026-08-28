@@ -89,6 +89,19 @@ namespace Microsoft.Build.Evaluation.Context
         ParsedXml,
     }
 
+    [Flags]
+    internal enum EvaluationFilesystemTimestampSource
+    {
+        None = 0,
+        ProjectSource = 1 << 0,
+        FileRead = 1 << 1,
+        PathProbe = 1 << 2,
+        Metadata = 1 << 3,
+        DirectoryEnumeration = 1 << 4,
+        Glob = 1 << 5,
+        Search = 1 << 6,
+    }
+
     internal enum EvaluationObservationCategory
     {
         Request,
@@ -288,6 +301,32 @@ namespace Microsoft.Build.Evaluation.Context
         internal string Provider { get; }
     }
 
+    internal readonly struct EvaluationFilesystemTimestampObservation
+    {
+        internal EvaluationFilesystemTimestampObservation(
+            string path,
+            long lastWriteTimeUtcTicks,
+            bool exists,
+            EvaluationPathKind kind,
+            EvaluationFilesystemTimestampSource sources,
+            string provider)
+        {
+            Path = path;
+            LastWriteTimeUtcTicks = lastWriteTimeUtcTicks;
+            Exists = exists;
+            Kind = kind;
+            Sources = sources;
+            Provider = provider;
+        }
+
+        internal string Path { get; }
+        internal long LastWriteTimeUtcTicks { get; }
+        internal bool Exists { get; }
+        internal EvaluationPathKind Kind { get; }
+        internal EvaluationFilesystemTimestampSource Sources { get; }
+        internal string Provider { get; }
+    }
+
     internal readonly struct EvaluationDirectoryEnumerationObservation
     {
         internal EvaluationDirectoryEnumerationObservation(
@@ -445,6 +484,8 @@ namespace Microsoft.Build.Evaluation.Context
             string[] results,
             int resultCount,
             string resultsFingerprint,
+            string[] traversedDirectories,
+            bool filesystemTraversalExpected,
             bool resultsEscaped,
             bool wasLazy,
             bool driveEnumerating,
@@ -459,6 +500,8 @@ namespace Microsoft.Build.Evaluation.Context
             Results = results;
             ResultCount = resultCount;
             ResultsFingerprint = resultsFingerprint;
+            TraversedDirectories = traversedDirectories;
+            FilesystemTraversalExpected = filesystemTraversalExpected;
             ResultsEscaped = resultsEscaped;
             WasLazy = wasLazy;
             DriveEnumerating = driveEnumerating;
@@ -474,6 +517,8 @@ namespace Microsoft.Build.Evaluation.Context
         internal string[] Results { get; }
         internal int ResultCount { get; }
         internal string ResultsFingerprint { get; }
+        internal string[] TraversedDirectories { get; }
+        internal bool FilesystemTraversalExpected { get; }
         internal bool ResultsEscaped { get; }
         internal bool WasLazy { get; }
         internal bool DriveEnumerating { get; }
@@ -782,6 +827,7 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationCategoryObservation[] categories,
             EvaluationRequestObservation request,
             IReadOnlyCollection<EvaluationProjectSourceObservation> projectSources,
+            IReadOnlyCollection<EvaluationFilesystemTimestampObservation> filesystemTimestamps,
             IReadOnlyCollection<EvaluationPathProbeObservation> pathProbes,
             IReadOnlyCollection<EvaluationDirectoryEnumerationObservation> directoryEnumerations,
             IReadOnlyCollection<EvaluationMetadataObservation> metadataReads,
@@ -805,6 +851,7 @@ namespace Microsoft.Build.Evaluation.Context
             Categories = categories;
             Request = request;
             ProjectSources = new EvaluationObservationCollection<EvaluationProjectSourceObservation>(projectSources);
+            FilesystemTimestamps = new EvaluationObservationCollection<EvaluationFilesystemTimestampObservation>(filesystemTimestamps);
             PathProbes = new EvaluationObservationCollection<EvaluationPathProbeObservation>(pathProbes);
             DirectoryEnumerations = new EvaluationObservationCollection<EvaluationDirectoryEnumerationObservation>(directoryEnumerations);
             MetadataReads = new EvaluationObservationCollection<EvaluationMetadataObservation>(metadataReads);
@@ -829,6 +876,7 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationCategoryObservation[] Categories { get; }
         internal EvaluationRequestObservation Request { get; }
         internal EvaluationObservationCollection<EvaluationProjectSourceObservation> ProjectSources { get; }
+        internal EvaluationObservationCollection<EvaluationFilesystemTimestampObservation> FilesystemTimestamps { get; }
         internal EvaluationObservationCollection<EvaluationPathProbeObservation> PathProbes { get; }
         internal EvaluationObservationCollection<EvaluationDirectoryEnumerationObservation> DirectoryEnumerations { get; }
         internal EvaluationObservationCollection<EvaluationMetadataObservation> MetadataReads { get; }

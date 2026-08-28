@@ -418,6 +418,9 @@ internal partial class Expander<P, I>
             object[] observationArguments = null;
             object[] usageArguments = null;
             string observationPathBaseDirectory = null;
+            EvaluationPropertyFunctionEffect? observationEffects = null;
+            EvaluationObservationSession observationSession =
+                EvaluationObservationSession.Current;
 
             try
             {
@@ -486,7 +489,7 @@ internal partial class Expander<P, I>
                     }
                 }
 
-                if (EvaluationObservationSession.Current is not null)
+                if (observationSession is not null)
                 {
                     usageArguments = (object[])args.Clone();
                 }
@@ -556,6 +559,13 @@ internal partial class Expander<P, I>
 
                 observationArguments = args;
                 observationPathBaseDirectory = GetObservationPathBaseDirectory(args);
+                observationEffects =
+                    observationSession?.RecordPropertyFunctionFilesystemTimestamp(
+                        _receiverType,
+                        _methodMethodName,
+                        objectInstance,
+                        args,
+                        observationPathBaseDirectory);
 
                 // If we've been asked to construct an instance, then we
                 // need to locate an appropriate constructor and invoke it
@@ -600,7 +610,7 @@ internal partial class Expander<P, I>
                     catch (Exception ex)
                     {
                         string partiallyEvaluated = GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args);
-                        EvaluationObservationSession.Current?.RecordPropertyFunction(
+                        observationSession?.RecordPropertyFunction(
                             _receiverType,
                             _methodMethodName,
                             objectInstance,
@@ -608,14 +618,16 @@ internal partial class Expander<P, I>
                             result: null,
                             succeeded: false,
                             pathBaseDirectory: observationPathBaseDirectory,
-                            usageArguments: usageArguments);
-                        EvaluationObservationSession.Current?.RecordPropertyFunctionFailure(
+                            usageArguments: usageArguments,
+                            classifiedEffects: observationEffects);
+                        observationSession?.RecordPropertyFunctionFailure(
                             _receiverType,
                             _methodMethodName,
                             objectInstance,
                             observationArguments ?? args,
                             observationPathBaseDirectory,
-                            ex);
+                            ex,
+                            observationEffects);
                         if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
                         {
                             return partiallyEvaluated;
@@ -660,14 +672,15 @@ internal partial class Expander<P, I>
                     }
                 }
 
-                EvaluationObservationSession.Current?.RecordPropertyFunction(
+                observationSession?.RecordPropertyFunction(
                     _receiverType,
                     _methodMethodName,
                     objectInstance,
                     observationArguments,
                     functionResult,
                     pathBaseDirectory: observationPathBaseDirectory,
-                    usageArguments: usageArguments);
+                    usageArguments: usageArguments,
+                    classifiedEffects: observationEffects);
 
                 // If the result of the function call is a string, then we need to escape the result
                 // so that we maintain the "engine contains escaped data" state.
@@ -700,7 +713,7 @@ internal partial class Expander<P, I>
             // Exceptions coming from the actual function called are wrapped in a TargetInvocationException
             catch (TargetInvocationException ex)
             {
-                EvaluationObservationSession.Current?.RecordPropertyFunction(
+                observationSession?.RecordPropertyFunction(
                     _receiverType,
                     _methodMethodName,
                     objectInstance,
@@ -708,14 +721,16 @@ internal partial class Expander<P, I>
                     result: null,
                     succeeded: false,
                     pathBaseDirectory: observationPathBaseDirectory,
-                    usageArguments: usageArguments);
-                EvaluationObservationSession.Current?.RecordPropertyFunctionFailure(
+                    usageArguments: usageArguments,
+                    classifiedEffects: observationEffects);
+                observationSession?.RecordPropertyFunctionFailure(
                     _receiverType,
                     _methodMethodName,
                     objectInstance,
                     observationArguments ?? args,
                     observationPathBaseDirectory,
-                    ex.InnerException ?? ex);
+                    ex.InnerException ?? ex,
+                    observationEffects);
                 // We ended up with something other than a function expression
                 string partiallyEvaluated = GenerateStringOfMethodExecuted(_expression, objectInstance, _methodMethodName, args);
                 if (options.HasFlag(ExpanderOptions.LeavePropertiesUnexpandedOnError))
@@ -730,7 +745,7 @@ internal partial class Expander<P, I>
             // Any other exception was thrown by trying to call it
             catch (Exception ex) when (!ExceptionHandling.NotExpectedFunctionException(ex))
             {
-                EvaluationObservationSession.Current?.RecordPropertyFunction(
+                observationSession?.RecordPropertyFunction(
                     _receiverType,
                     _methodMethodName,
                     objectInstance,
@@ -738,14 +753,16 @@ internal partial class Expander<P, I>
                     result: null,
                     succeeded: false,
                     pathBaseDirectory: observationPathBaseDirectory,
-                    usageArguments: usageArguments);
-                EvaluationObservationSession.Current?.RecordPropertyFunctionFailure(
+                    usageArguments: usageArguments,
+                    classifiedEffects: observationEffects);
+                observationSession?.RecordPropertyFunctionFailure(
                     _receiverType,
                     _methodMethodName,
                     objectInstance,
                     observationArguments ?? args,
                     observationPathBaseDirectory,
-                    ex);
+                    ex,
+                    observationEffects);
                 // If there's a :: in the expression, they were probably trying for a static function
                 // invocation. Give them some more relevant info in that case
                 if (s_invariantCompareInfo.IndexOf(_expression, "::", CompareOptions.OrdinalIgnoreCase) > -1)

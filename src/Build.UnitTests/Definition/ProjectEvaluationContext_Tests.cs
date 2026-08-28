@@ -1098,7 +1098,7 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
-        public void EvaluationObservationSummaryModeRetainsFingerprintsWithoutMemberArrays()
+        public void EvaluationObservationSummaryModeRetainsFingerprintsAndInvalidationPaths()
         {
             EvaluationObservationReport report = null;
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
@@ -1133,9 +1133,10 @@ namespace Microsoft.Build.UnitTests.Definition
             glob.Results.ShouldBeEmpty();
             glob.ResultCount.ShouldBe(1);
             glob.ResultsFingerprint.ShouldNotBeNullOrEmpty();
+            glob.TraversedDirectories.ShouldNotBeEmpty();
             EvaluationSearchObservation search = report.Searches.Single(
                 observation => observation.Kind == "GetPathOfFileAbove");
-            search.Candidates.ShouldBeEmpty();
+            search.Candidates.Length.ShouldBe(search.CandidateCount);
             search.CandidateCount.ShouldBeGreaterThan(0);
             search.CandidatesFingerprint.ShouldNotBeNullOrEmpty();
         }
@@ -2215,7 +2216,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(17);
+            report.SchemaVersion.ShouldBe(18);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -4642,6 +4643,15 @@ namespace Microsoft.Build.UnitTests.Definition
                 string secondResult)
             {
                 throw new InvalidOperationException("Test-only observer failure.");
+            }
+
+            public void RecordGlobDirectory(
+                string directory,
+                string filespec,
+                string path,
+                bool exists,
+                string globIdentity = null)
+            {
             }
 
             public void RecordSearch(
