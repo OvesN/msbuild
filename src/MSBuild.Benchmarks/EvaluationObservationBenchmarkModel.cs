@@ -177,8 +177,18 @@ internal sealed class EvaluationObservationNativeMetrics
 
     internal void AddPath(string? path)
     {
+        AddPath(path, baseDirectory: null);
+    }
+
+    internal void AddPath(string? path, string? baseDirectory)
+    {
         if (!string.IsNullOrEmpty(path))
         {
+            if (!Path.IsPathRooted(path) && !string.IsNullOrEmpty(baseDirectory))
+            {
+                path = Path.Combine(baseDirectory, path);
+            }
+
             _uniquePaths.Add(Path.GetFullPath(path));
         }
     }

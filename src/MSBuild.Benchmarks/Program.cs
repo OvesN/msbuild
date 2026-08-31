@@ -11,6 +11,12 @@ using static MSBuild.Benchmarks.Extensions;
 
 var argList = new List<string>(args);
 
+if (EvaluationObservationDetoursHost.TryRun(argList, out int detoursHostExitCode))
+{
+    Environment.Exit(detoursHostExitCode);
+    return detoursHostExitCode;
+}
+
 if (EvaluationObservationBenchmarkHost.TryRun(argList, out int hostExitCode))
 {
     return hostExitCode;

@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Microsoft.Build.Evaluation.Context;
+using Microsoft.Build.Shared;
 
 namespace MSBuild.Benchmarks;
 
@@ -48,7 +49,7 @@ internal static class EvaluationObservationNativeBridge
                             metrics.AddPath(observation.Path);
                             foreach (string entry in observation.Entries)
                             {
-                                metrics.AddPath(entry);
+                                metrics.AddPath(entry, observation.Path);
                             }
                         }
 
@@ -72,7 +73,20 @@ internal static class EvaluationObservationNativeBridge
                             metrics.AddPath(observation.Directory);
                             foreach (string result in observation.Results)
                             {
-                                metrics.AddPath(result);
+                                string unescapedResult = observation.ResultsEscaped
+                                    ? EscapingUtilities.UnescapeAll(result)
+                                    : result;
+                                if (FileMatcher.HasWildcards(unescapedResult))
+                                {
+                                    throw new InvalidOperationException(
+                                        $"Cannot compare non-concrete glob result '{unescapedResult}' " +
+                                        $"for role '{observation.Role}', root '{observation.Directory}', " +
+                                        $"and include '{observation.Include}'.");
+                                }
+
+                                metrics.AddPath(
+                                    unescapedResult,
+                                    observation.Directory);
                             }
                         }
 
