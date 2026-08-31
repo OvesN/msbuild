@@ -4,12 +4,15 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Evaluation;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using Shouldly;
 using Xunit;
 
 #nullable disable
@@ -173,16 +176,23 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 });
         }
 
-        [Fact]
-        public void ImportFromExtensionsPathWithWildCard()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void ImportFromExtensionsPathWithWildCard(bool retainDetails)
         {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport,
+                retainDetails);
             string mainTargetsFileContent = @"
                 <Project>
                     <Target Name='Main'>
                         <Message Text='Running Main'/>
                     </Target>
 
-                    <Import Project='$(MSBuildExtensionsPath)\foo\*.proj'/>
+                    <Import Project='$(MSBuildExtensionsPath)\foo\*.proj;$(MSBuildExtensionsPath)\foo\missing.proj'/>
                 </Project>";
 
             string extnTargetsFileContent = @"
@@ -214,11 +224,27 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     Console.WriteLine("checking logcontains");
                     logger.AssertLogDoesntContain("MSB4057"); // Should not contain TargetDoesNotExist
                 });
+
+            report.ShouldNotBeNull();
+            EvaluationSearchObservation search = report.Searches.Single(
+                observation => observation.Kind == "ImportFallback");
+            search.SelectedPathCount.ShouldBe(2);
+            search.SelectedPaths.Length.ShouldBe(search.SelectedPathCount);
+            search.SelectedPaths.ShouldBe(
+            [
+                Path.Combine(extnDir1, "foo", "extn.proj"),
+                Path.Combine(extnDir2, "foo", "extn.proj"),
+            ]);
+            search.SelectedPathsFingerprint.ShouldNotBeNullOrEmpty();
         }
 
         [Fact]
         public void ImportFromExtensionsPathWithWildCardAndSelfImport()
         {
+            EvaluationObservationReport report = null;
+            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
+                enabled: true,
+                createdReport => report = createdReport);
             string mainTargetsFileContent = @"
                 <Project>
                     <Target Name='Main'>
@@ -267,6 +293,19 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     Assert.True(project.Build("FromExtn3"));
                     logger.AssertLogContains("MSB4210");
                 });
+
+            report.ShouldNotBeNull();
+            EvaluationSearchObservation search = report.Searches.Single(
+                observation => observation.Kind == "ImportFallback");
+            search.SelectedPathCount.ShouldBe(4);
+            search.SelectedPaths.Length.ShouldBe(search.SelectedPathCount);
+            search.SelectedPaths.ShouldBe(
+            [
+                Path.Combine(extnDir1, "circularwildcardtest", "extn.proj"),
+                Path.Combine(extnDir2, "circularwildcardtest", "extn.proj"),
+                mainProjectPath,
+                Path.Combine(extnDir3, "circularwildcardtest", "extn3.proj"),
+            ]);
         }
 
         [Fact]

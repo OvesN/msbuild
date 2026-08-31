@@ -128,8 +128,10 @@ retained.
   optional retained members.
 - **Globs:** semantic root, include, excludes, lazy/drive-enumerating state,
   result count/fingerprint, and optional retained members.
-- **Searches:** ordered candidate sequence/fingerprint and selected path or
-  miss.
+- **Searches:** ordered candidate sequence/fingerprint and ordered selected
+  path sequence/count/fingerprint. Candidate details are optional; selected
+  paths are retained because they are direct dependencies. An empty selected
+  sequence represents a miss, while ignored wildcard matches remain selected.
 - **Failures:** affected category, operation, canonical path and provider when
   applicable, exception type, HRESULT, and diagnostic-only message.
 

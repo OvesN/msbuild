@@ -83,7 +83,10 @@ internal static class EvaluationObservationNativeBridge
                                 metrics.AddPath(candidate);
                             }
 
-                            metrics.AddPath(observation.Selected);
+                            foreach (string selectedPath in observation.SelectedPaths)
+                            {
+                                metrics.AddPath(selectedPath);
+                            }
                         }
 
                         foreach (EvaluationSdkResolutionObservation observation in report.SdkResolutions)

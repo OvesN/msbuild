@@ -2023,43 +2023,22 @@ namespace Microsoft.Build.Evaluation
             // paths will be returned (union of all files that match).
             var allProjects = new List<ProjectRootElement>();
             List<string> fallbackCandidates = _observationSession is null ? null : [];
-            string selectedFallbackPath = null;
+            List<string> selectedFallbackPaths = _observationSession is null ? null : [];
             bool containsWildcards = FileMatcher.HasWildcards(importElement.Project);
             bool missingDirectoryDespiteTrueCondition = false;
 
-            void RecordFallbackSearch(IReadOnlyList<ProjectRootElement> selectedProjects)
+            void RecordFallbackSearch()
             {
                 if (_observationSession is null)
                 {
                     return;
                 }
 
-                string selected = null;
-                if (selectedProjects is { Count: > 0 })
-                {
-                    var selectedBuilder = new StringBuilder();
-                    for (int i = 0; i < selectedProjects.Count; i++)
-                    {
-                        if (i > 0)
-                        {
-                            selectedBuilder.Append(';');
-                        }
-
-                        selectedBuilder.Append(selectedProjects[i].FullPath);
-                    }
-
-                    selected = selectedBuilder.ToString();
-                }
-                else
-                {
-                    selected = selectedFallbackPath;
-                }
-
                 _observationSession.RecordSearch(
                     "ImportFallback",
                     importElement.Project,
                     fallbackCandidates,
-                    selected,
+                    selectedFallbackPaths,
                     complete: true);
             }
 
@@ -2132,15 +2111,22 @@ namespace Microsoft.Build.Evaluation
                 _evaluationLoggingContext.LogComment(MessageImportance.Low, "TryingExtensionsPath", newExpandedImportPath, extensionPathExpanded);
 
                 List<ProjectRootElement> projects;
-                var result = ExpandAndLoadImportsFromUnescapedImportExpression(directoryOfImportingFile, importElement, newExpandedImportPath, false, out projects);
+                List<string> matchedImportPaths = _observationSession is null ? null : [];
+                var result = ExpandAndLoadImportsFromUnescapedImportExpression(
+                    directoryOfImportingFile,
+                    importElement,
+                    newExpandedImportPath,
+                    false,
+                    out projects,
+                    matchedImportPaths);
 
                 if (result == LoadImportsResult.ProjectsImported)
                 {
-                    selectedFallbackPath = newExpandedImportPath;
+                    selectedFallbackPaths?.AddRange(matchedImportPaths);
                     // If we don't have a wildcard and we had a match, we're done.
                     if (!containsWildcards)
                     {
-                        RecordFallbackSearch(projects);
+                        RecordFallbackSearch();
                         return projects;
                     }
 
@@ -2152,7 +2138,7 @@ namespace Microsoft.Build.Evaluation
 
                 if (result == LoadImportsResult.FoundFilesToImportButIgnored)
                 {
-                    selectedFallbackPath = newExpandedImportPath;
+                    selectedFallbackPaths?.AddRange(matchedImportPaths);
                     // Circular, Self import cases are usually ignored
                     // Since we have a semi-success here, we stop looking at
                     // other paths
@@ -2160,7 +2146,7 @@ namespace Microsoft.Build.Evaluation
                     // If we don't have a wildcard and we had a match, we're done.
                     if (!containsWildcards)
                     {
-                        RecordFallbackSearch(projects);
+                        RecordFallbackSearch();
                         return projects;
                     }
 
@@ -2184,11 +2170,11 @@ namespace Microsoft.Build.Evaluation
                 (atleastOneExactFilePathWasLookedAtAndNotFound || missingDirectoryDespiteTrueCondition) &&
                 (_loadSettings & ProjectLoadSettings.IgnoreMissingImports) == 0)
             {
-                RecordFallbackSearch(allProjects);
+                RecordFallbackSearch();
                 ThrowForImportedProjectWithSearchPathsNotFound(fallbackSearchPathMatch, importElement);
             }
 
-            RecordFallbackSearch(allProjects);
+            RecordFallbackSearch();
             return allProjects;
         }
 
@@ -2544,8 +2530,13 @@ namespace Microsoft.Build.Evaluation
         /// Caches the parsed import into the provided collection, so future
         /// requests can be satisfied without re-parsing it.
         /// </summary>
-        private LoadImportsResult ExpandAndLoadImportsFromUnescapedImportExpression(string directoryOfImportingFile, ProjectImportElement importElement, string unescapedExpression,
-                                            bool throwOnFileNotExistsError, out List<ProjectRootElement> imports)
+        private LoadImportsResult ExpandAndLoadImportsFromUnescapedImportExpression(
+            string directoryOfImportingFile,
+            ProjectImportElement importElement,
+            string unescapedExpression,
+            bool throwOnFileNotExistsError,
+            out List<ProjectRootElement> imports,
+            List<string> matchedImportPaths = null)
         {
             imports = null;
 
@@ -2660,6 +2651,7 @@ namespace Microsoft.Build.Evaluation
                     // and issue a warning to that effect.
                     if (string.Equals(_projectRootElement.FullPath, importFileUnescaped, StringComparison.OrdinalIgnoreCase) /* We are trying to import ourselves */)
                     {
+                        matchedImportPaths?.Add(importFileUnescaped);
                         _evaluationLoggingContext.LogWarning(null, new BuildEventFileInfo(importLocationInProject), "SelfImport", importFileUnescaped);
                         atleastOneImportIgnored = true;
 
@@ -2674,6 +2666,7 @@ namespace Microsoft.Build.Evaluation
                         // Check if this import introduces circularity.
                         if (IntroducesCircularity(importFileUnescaped, importElement))
                         {
+                            matchedImportPaths?.Add(importFileUnescaped);
                             // Get the full path of the MSBuild file that has this import.
                             string importedBy = importElement.ContainingProject.FullPath ?? string.Empty;
 
@@ -2733,6 +2726,8 @@ namespace Microsoft.Build.Evaluation
                                     explicitlyLoaded,
                                     sourceLoadCapture);
 
+                        matchedImportPaths?.Add(importFileUnescaped);
+
                         if (duplicateImport)
                         {
                             // Only record the data if we want to record duplicate imports
@@ -2791,6 +2786,11 @@ namespace Microsoft.Build.Evaluation
 
                         // There's a specific message for file not existing
                         bool importExists = FileSystems.Default.FileExists(importFileUnescaped);
+                        if (importExists)
+                        {
+                            matchedImportPaths?.Add(importFileUnescaped);
+                        }
+
                         _observationSession?.RecordProbe(
                             importFileUnescaped,
                             EvaluationPathKind.File,

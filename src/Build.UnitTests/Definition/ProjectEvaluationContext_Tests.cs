@@ -2080,7 +2080,8 @@ namespace Microsoft.Build.UnitTests.Definition
                 observation.Kind == "GetPathOfFileAbove" &&
                 observation.Candidates.Any(candidate =>
                     candidate.EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase)) &&
-                observation.Selected.EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase));
+                observation.SelectedPaths.Length == 1 &&
+                observation.SelectedPaths[0].EndsWith("settings.txt", StringComparison.OrdinalIgnoreCase));
             report.MetadataReads.ShouldContain(observation =>
                 observation.Kind == EvaluationMetadataKind.ItemModifiedTime &&
                 FileUtilities.PathsEqual(
@@ -2093,7 +2094,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(16);
+            report.SchemaVersion.ShouldBe(17);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }
@@ -3356,6 +3357,19 @@ namespace Microsoft.Build.UnitTests.Definition
             report.MetadataReads.Count.ShouldBe(2);
             (report.Reasons & EvaluationObservationReason.ConflictingObservation)
                 .ShouldBe(EvaluationObservationReason.None);
+        }
+
+        [Fact]
+        public void EvaluationObservationDetectsReorderedSearchSelections()
+        {
+            EvaluationObservationSession session = EvaluationObservationSession.CreateForTests();
+            session.RecordSearch("Search", "request", ["candidate"], ["first", "second"], complete: true);
+            session.RecordSearch("Search", "request", ["candidate"], ["second", "first"], complete: true);
+
+            EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
+
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.ConflictingObservation);
         }
 
         [Fact]

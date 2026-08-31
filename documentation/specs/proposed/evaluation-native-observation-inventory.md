@@ -119,7 +119,7 @@ independently interpreted as additional dependencies.
 | --- | --- | --- |
 | Root or imported XML consumed | `ProjectSourceObservation` | File-content read, probe, PRE cache entry |
 | Glob result | `GlobObservation` | Enumerations, probes, `FileMatcher` cache result |
-| Upward/import/fallback selection | `SearchObservation` | Ordered path probes; selected `ProjectSourceObservation` |
+| Upward/import/fallback selection | `SearchObservation` | Ordered path probes; consumed selected sources have `ProjectSourceObservation` support |
 | Selected toolset | `ToolsetObservation` | Registry/config reads and environment inputs |
 | SDK resolution | `SdkResolutionObservation` | SDK request record and generated SDK-result source |
 | Effective `UsingTask` registration | `TaskRegistrationObservation` | Project source, property/item expansion, assembly-path probes |
@@ -344,14 +344,16 @@ Search results depend on every candidate checked before the selected result.
 | `GetPathOfFileAbove` | classified intrinsic / `FileUtilities` | Start directory, target name, ordered candidate probes, selected path/none |
 | `GetDirectoryNameOfFileAbove` | same | Same |
 | `Directory.Build.props` / `Directory.Build.targets` | common props/targets search owner | Ordered candidates and selected source |
-| Import fallback paths | evaluator import search, `ProjectImportPathMatch` tables | Ordered roots/candidates and selected import |
+| Import fallback paths | evaluator import search, `ProjectImportPathMatch` tables | Ordered roots/candidates and ordered selected imports/count/fingerprint |
 | Toolset/SDK location ascent | owning provider helper | Ordered probes and selected result |
 | Fallback-root directory memo | `Evaluator._fallbackSearchPathsCache` / `EngineFileUtilities.IOCache` | Supporting `PathProbeObservation` with expanded extension root, memoized Boolean, default-filesystem identity, and first-observation/stale-across-evaluations state |
 | `Directory.Parse.config` discovery | `ParserIgnoreConfiguration`, project-directory ascent, `MSBUILD_PARSE_CONFIG` paths | Ordered explicit/upward candidates, default-filesystem probes, selected files/none |
 
-The selected file is separately owned by `ProjectSourceObservation`. Negative nearer
-candidates remain part of the `SearchObservation` because creating one can change the
-selected source.
+Selected paths are retained by `SearchObservation`, including wildcard matches ignored as
+self, circular, or duplicate imports. A selected file consumed as XML is separately owned
+by `ProjectSourceObservation`; ignored matches need not have a source observation.
+Negative nearer candidates remain part of the search because creating one can change the
+selected sequence.
 
 `_fallbackSearchPathsCache` is a process-static directory-existence memo, not a cached
 search result. If its Boolean cannot be replayed with provenance, the supporting probe is

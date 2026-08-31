@@ -488,7 +488,9 @@ namespace Microsoft.Build.Evaluation.Context
             string[] candidates,
             int candidateCount,
             string candidatesFingerprint,
-            string selected,
+            string[] selectedPaths,
+            int selectedPathCount,
+            string selectedPathsFingerprint,
             bool complete)
         {
             Kind = kind;
@@ -496,7 +498,9 @@ namespace Microsoft.Build.Evaluation.Context
             Candidates = candidates;
             CandidateCount = candidateCount;
             CandidatesFingerprint = candidatesFingerprint;
-            Selected = selected;
+            SelectedPaths = selectedPaths;
+            SelectedPathCount = selectedPathCount;
+            SelectedPathsFingerprint = selectedPathsFingerprint;
             Complete = complete;
         }
 
@@ -505,7 +509,9 @@ namespace Microsoft.Build.Evaluation.Context
         internal string[] Candidates { get; }
         internal int CandidateCount { get; }
         internal string CandidatesFingerprint { get; }
-        internal string Selected { get; }
+        internal string[] SelectedPaths { get; }
+        internal int SelectedPathCount { get; }
+        internal string SelectedPathsFingerprint { get; }
         internal bool Complete { get; }
     }
 

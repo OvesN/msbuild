@@ -352,7 +352,7 @@ not create a second independently validated dependency for the same consumed val
 | Observed | Imported project XML | Import loader / PRE provider | One source identity plus version or consumed content hash |
 | Observed | Non-PRE file content | `RecordingFileSystem` or provider | Full consumed-content identity |
 | Observed | File/directory existence | `RecordingFileSystem` or typed bypass | Present/missing/failure |
-| Observed | Upward and fallback searches | Search helper | Ordered candidate probes and selected result |
+| Observed | Upward and fallback searches | Search helper | Ordered candidate probes and ordered selected results |
 | Observed | Glob membership | `FileMatcher.GetFiles` boundary | Pattern plus returned membership fingerprint |
 | Observed | Raw directory enumeration | `RecordingFileSystem` | Request, members, completion |
 | Observed | File metadata and link identity | Filesystem/provider | Exact returned fields and provider semantics |
@@ -445,8 +445,12 @@ Upward searches such as `GetPathOfFileAbove` and import fallback searches record
 
 - ordered candidate paths;
 - every negative probe that affected selection;
-- the selected path, if any;
+- the ordered selected-path sequence, count, and fingerprint;
 - the search semantics.
+
+The selected sequence is retained even when candidate details are omitted because those
+paths are direct dependencies. An empty sequence is a miss. Wildcard matches remain in
+the sequence when evaluation ignores them as self, circular, or duplicate imports.
 
 A newly created nearer file invalidates the old result.
 

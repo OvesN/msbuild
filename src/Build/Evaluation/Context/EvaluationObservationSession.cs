@@ -25,7 +25,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 16;
+        private const int ObservationSchemaVersion = 17;
         private const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -387,13 +387,16 @@ namespace Microsoft.Build.Evaluation.Context
             string candidatesFingerprint,
             string selected)
         {
+            string[] selectedPaths = string.IsNullOrEmpty(selected) ? [] : [selected];
             RecordSearch(
                 kind,
                 request,
                 _retainDetails ? CopyStrings(candidates) : [],
                 candidateCount,
                 candidatesFingerprint,
-                selected,
+                selectedPaths,
+                selectedPaths.Length,
+                ComputeStringSequenceHash(selectedPaths),
                 complete: true);
         }
 
@@ -795,10 +798,27 @@ namespace Microsoft.Build.Evaluation.Context
             RecordSearch(
                 kind,
                 request,
+                candidates,
+                string.IsNullOrEmpty(selected) ? [] : [selected],
+                complete);
+        }
+
+        internal void RecordSearch(
+            string kind,
+            string request,
+            IReadOnlyList<string> candidates,
+            IReadOnlyList<string> selectedPaths,
+            bool complete)
+        {
+            RecordSearch(
+                kind,
+                request,
                 _retainDetails ? CopyStrings(candidates) : [],
                 candidates?.Count ?? 0,
                 ComputeStringSequenceHash(candidates),
-                selected,
+                CopyStrings(selectedPaths),
+                selectedPaths?.Count ?? 0,
+                ComputeStringSequenceHash(selectedPaths),
                 complete);
         }
 
@@ -808,7 +828,9 @@ namespace Microsoft.Build.Evaluation.Context
             string[] candidates,
             int candidateCount,
             string candidatesFingerprint,
-            string selected,
+            string[] selectedPaths,
+            int selectedPathCount,
+            string selectedPathsFingerprint,
             bool complete)
         {
             MarkCategory(
@@ -825,14 +847,17 @@ namespace Microsoft.Build.Evaluation.Context
                         candidates,
                         candidateCount,
                         candidatesFingerprint,
-                        selected,
+                        selectedPaths,
+                        selectedPathCount,
+                        selectedPathsFingerprint,
                         complete);
                     string key = string.Concat(kind, "\0", request);
 
                     if (_searches.TryGetValue(key, out EvaluationSearchObservation prior) &&
-                        (!string.Equals(prior.Selected, selected, StringComparison.Ordinal) ||
-                         prior.CandidateCount != candidateCount ||
-                         !string.Equals(prior.CandidatesFingerprint, candidatesFingerprint, StringComparison.Ordinal)))
+                        (prior.CandidateCount != candidateCount ||
+                         prior.SelectedPathCount != selectedPathCount ||
+                         !string.Equals(prior.CandidatesFingerprint, candidatesFingerprint, StringComparison.Ordinal) ||
+                         !string.Equals(prior.SelectedPathsFingerprint, selectedPathsFingerprint, StringComparison.Ordinal)))
                     {
                         AddReason(EvaluationObservationReason.ConflictingObservation);
                     }
