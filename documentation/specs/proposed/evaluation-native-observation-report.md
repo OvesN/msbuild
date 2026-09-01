@@ -4,8 +4,10 @@ BuildXL differential validation is documented in
 [evaluation-native-observation-buildxl-validation.md](evaluation-native-observation-buildxl-validation.md).
 The adversarial follow-up and confirmed counterexamples are documented in
 [evaluation-native-observation-buildxl-adversarial-report.md](evaluation-native-observation-buildxl-adversarial-report.md).
-The post-fix six-scenario comparison and current overhead snapshot are documented in
+The post-fix six-scenario comparison is documented in
 [evaluation-native-observation-buildxl-post-fix-report.md](evaluation-native-observation-buildxl-post-fix-report.md).
+Current total overhead is documented in
+[evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md).
 
 ## Current scope and claims
 
@@ -96,91 +98,58 @@ current across evaluations; neither lifetime supplies resolver dependency validi
 The implementation does not yet persist evaluated projects, validate reports, or perform
 cache lookup/invalidation.
 
-## Orchard Core Measurements
+## Current Total Overhead
 
-Measured with `OrchardCoreNoOpBuildBenchmark` against
-`src/OrchardCore/OrchardCore/OrchardCore.csproj` (`net10.0`). Restore and the initial
-Release build run before measurement; each sample is an external
-`dotnet build --no-restore` with unchanged inputs.
+Measured on September 1, 2026 at PR head `77a2590fd4` using .NET SDK
+`11.0.100-preview.7.26360.111` on a Windows Hyper-V VM.
 
-Before zero-copy report finalization, three independent 12-iteration runs measured
-**+3.7%, +3.8%, and +5.2%**. Their aggregate means were 4.910 s baseline and
-5.107 s with observation: **approximately +4.0% / +197 ms**.
+### Synthetic evaluation benchmark
 
-After transferring completed collections directly to the report, two independent
-12-iteration runs measured:
+`EvaluationObservationBenchmark` used BenchmarkDotNet `MediumRun` with two launches,
+10 warmups, 15 measured iterations, and 50 independent evaluations per child process.
+Its child accumulator includes two jitting, ten warmup, and fifteen measured invocations
+per launch, for 27 fresh child-process samples per launch. The primary time is the child
+host's timed evaluation loop; BenchmarkDotNet's outer method also includes child-process
+startup and semantic preflight.
 
-| Run | Observation disabled | Observation enabled | Delta |
-| --- | ---: | ---: | ---: |
-| 1 | 4.859 s | 4.992 s | +133 ms / +2.7% |
-| 2 | 4.889 s | 4.980 s | +91 ms / +1.9% |
-| **Aggregate means** | **4.874 s** | **4.986 s** | **+112 ms / +2.3%** |
+The `±` values are pooled standard deviations of the 54 child-process samples per cell.
 
-The aggregate delta is **85 ms / 43% lower**, while the stronger signal is that the
-post-change range (**+1.9% to +2.7%**) does not overlap the earlier range
-(**+3.7% to +5.2%**). These are unpaired Hyper-V VM runs, not exact attribution.
-
-Caching process-constant request values and reading `Traits.Instance` once per evaluation
-then measured:
-
-| Run | Observation disabled | Observation enabled | Delta |
-| --- | ---: | ---: | ---: |
-| 1 | 5.018 s | 5.141 s | +123 ms / +2.4% |
-| 2 | 4.882 s | 4.956 s | +74 ms / +1.5% |
-| **Aggregate means** | **4.950 s** | **5.049 s** | **+99 ms / +2.0%** |
-
-The single fresh pre-change comparator measured 5.008 s -> 5.149 s
-(**+141 ms / +2.8%**). The post-change range overlaps the earlier post-zero-copy range,
-and the differences are below the VM noise floor. No wall-time improvement is claimed.
-
-### Observer Allocation Attribution
-
-The earlier per-activity allocation telemetry was measured before zero-copy finalization.
-Scopes are inclusive, overlap, and are not additive.
-
-| Activity | Per evaluation |
-| --- | ---: |
-| Property lookup | 144 KB |
-| Environment records | 112 KB |
-| Task registration | 93 KB |
-| Project-source records | 87 KB |
-| Property-function records | 84 KB |
-| Filesystem records | 75 KB |
-| Report finalization | 44 KB |
-
-Removing sorting reduced report-finalization allocation from 259 KB to 44 KB per
-evaluation (-83%, -215 KB). Zero-copy finalization then removed the remaining collection
-array projections.
-
-The separate synthetic child-process benchmark compares observation disabled and enabled
-across 50 evaluations:
-
-| Scenario | Disabled allocation | Enabled allocation | Added per evaluation | Post-GC retained delta |
+| Scenario | Disabled mean ± SD, 50 evaluations | Enabled mean ± SD, 50 evaluations | Total time overhead | Added allocation per evaluation |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 17.67 MB | 18.47 MB | 15.7 KiB | 0.0 KiB/process |
-| Glob-heavy | 78.95 MB | 79.66 MB | 14.0 KiB | 0.3 KiB/process |
-| Ambient/SDK | 21.37 MB | 22.73 MB | 26.7 KiB | -0.3 KiB/process |
+| Typical | 256.473 ± 12.751 ms | 271.104 ± 13.129 ms | +14.632 ms / **+5.7%** | 15.0 KiB / +4.1% |
+| Glob-heavy | 497.000 ± 36.151 ms | 518.490 ± 33.917 ms | +21.490 ms / **+4.3%** | 15.4 KiB / +1.0% |
+| Ambient/SDK | 343.631 ± 21.307 ms | 375.711 ± 15.468 ms | +32.080 ms / **+9.3%** | 34.0 KiB / +7.7% |
 
-Per-evaluation deltas use the unrounded byte counters; this table is not directly
-comparable with the earlier inclusive Orchard activity scopes.
-Compared with the earlier run, Typical and Ambient/SDK decreased while Glob-heavy
-increased. These unpaired differences and the near-zero retained deltas are treated as
-run-to-run noise, not attributed to the request-snapshot change.
+BenchmarkDotNet's process-level ratios were 1.02, 1.03, and 1.04 respectively. They are
+only a cross-check because fixed process startup and preflight dilute the observation
+cost. Both Baseline launches ran before both Native launches for each scenario, so
+fixed-order drift remains a limitation.
 
-Reports are consumed and discarded in this benchmark. The small post-GC deltas confirm
-bounded process retention and are consistent with the regression test that completed
-sessions detach their populated collections.
+### Orchard Core warm no-op build
+
+`OrchardCoreNoOpBuildBenchmark` measured
+`src/OrchardCore/OrchardCore/OrchardCore.csproj` at OrchardCore commit
+`e3f8acb327a95f1dec6e75cefccaef2ad5eefb45` for `net10.0`. Both cells used the same
+Release bootstrap SDK and differed only by
+`MSBUILDPROTOTYPEEVALUATIONOBSERVATION`. Each independent run used three warmups and
+12 measured external `dotnet build --no-restore` invocations with MSBuild Server and node
+reuse disabled. In each run BenchmarkDotNet executed the disabled cell before the
+enabled cell, so the samples are unpaired and susceptible to VM drift.
+
+| Run | Observation disabled | Observation enabled | Delta |
+| --- | ---: | ---: | ---: |
+| 1 | 5.218 s | 5.245 s | +27 ms / +0.5% |
+| 2 | 4.970 s | 5.179 s | +209 ms / +4.2% |
+| 3 | 5.004 s | 5.177 s | +173 ms / +3.5% |
+| **Aggregate means** | **5.064 s** | **5.200 s** | **+136 ms / +2.7%** |
+
+The Hyper-V run-to-run range is wide and fixed-order drift remains a confounder. The
+aggregate is a descriptive central estimate; no per-category or precise causal
+attribution is inferred. Isolated synthetic evaluation loops measured 4.3-9.3% of
+evaluation-loop time. The three-run Orchard aggregate measured 2.7% of total warm no-op
+build wall time, with individual run deltas from +0.5% to +4.2%; the aggregate is not
+treated as a statistically established across-run effect. These percentages have
+different denominators and are not directly comparable.
 
 See [evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md)
-for per-activity CPU-time attribution, self-overhead controls, rejected noisy
-subtractive measurements, and optimization priorities.
-
-## Improvement Areas
-
-- Reduce allocation in property lookup and environment records.
-- Reuse normalized project-source identities and source records.
-- Compact task-registration, property-function, and filesystem records.
-- Materialize compact arrays only when a report is persisted in a cache entry.
-- Lazily create request and category data.
-- Define and implement the SDK resolver dependency contract; keep complete request
-  identity distinct from the existing narrower cache key and recorded entry lifetime.
+for exact commands, raw run summaries, and measurement limitations.

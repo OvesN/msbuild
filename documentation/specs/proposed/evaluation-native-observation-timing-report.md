@@ -1,132 +1,159 @@
-# Native Evaluation Observation Timing Report
+# Native Evaluation Observation Total Overhead Report
 
-## Scenario
+## Scope
 
-- Benchmark: `OrchardCoreNoOpBuildBenchmark`
-- Project: `src/OrchardCore/OrchardCore/OrchardCore.csproj`
-- Framework: `net10.0`
-- Command: warm external `dotnet build --no-restore`
-- Before zero-copy report finalization: 4.910 s -> 5.107 s
-  (**approximately +4.0%, +197 ms**)
-- After zero-copy report finalization, two independent runs:
-  - 4.859 s -> 4.992 s (**+2.7%, +133 ms**)
-  - 4.889 s -> 4.980 s (**+1.9%, +91 ms**)
-- New aggregate means: 4.874 s -> 4.986 s
-  (**approximately +2.3%, +112 ms**)
-- Before request-snapshot optimization: 5.008 s -> 5.149 s
-  (**+2.8%, +141 ms**)
-- After request-snapshot optimization, two isolated runs:
-  - 5.018 s -> 5.141 s (**+2.4%, +123 ms**)
-  - 4.882 s -> 4.956 s (**+1.5%, +74 ms**)
-- Post-change aggregate means: 4.950 s -> 5.049 s
-  (**approximately +2.0%, +99 ms**)
+This report measures only the total cost of enabling the native evaluation observation
+layer. It does not attribute cost to individual observation categories. The synthetic
+enabled cell also includes the benchmark callback that counts report records.
 
-## Method for the pre-zero-copy attribution
+Measurements were collected on September 1, 2026 from PR head `77a2590fd4` with:
 
-Temporary `Stopwatch.GetTimestamp()` scopes recorded inclusive and exclusive CPU time.
-Five no-op builds produced 65 evaluation reports across 30 MSBuild processes. CPU time is
-summed across parallel nodes and therefore does not equal wall-clock time.
+- Windows 11 `10.0.26200.9106` under Hyper-V;
+- AMD EPYC 7763 virtual CPU, 8 cores and 16 logical processors;
+- x64 .NET `11.0.0`;
+- SDK `11.0.100-preview.7.26360.111`.
 
-Timing self-overhead was noisy but bounded. BenchmarkDotNet reported ratio 1.00
-(5.016 s vs 5.053 s median). A six-pair spot check had an 84 ms median increase
-(about 1.7%) with one large outlier. Treat individual activity values as approximate;
-the ranking was stable across five repeated telemetry runs.
+The synthetic benchmark toggles observation through its test-only
+`EvaluationObservationNativeBridge`. The Orchard benchmark toggles only
+`MSBUILDPROTOTYPEEVALUATIONOBSERVATION`.
 
-### Subtractive Wall-Time Cross-Check
+## Synthetic Evaluation Benchmark
 
-A separate diagnostic build disabled one activity at a time with no timing scopes.
-Twenty paired external builds were collected for the three strongest candidates:
+`EvaluationObservationBenchmark` runs a semantic-equivalence preflight, then times 50
+independent evaluations in a child process. BenchmarkDotNet used `MediumRun`:
 
-| Disabled activity | Median saving | Mean saving | Saving standard deviation | Faster runs |
+- two launches;
+- ten warmup iterations;
+- fifteen measured iterations.
+
+The benchmark's child-metric accumulator includes every method invocation in each
+launch: two jitting, ten warmup, and fifteen measured invocations, for 27 child-process
+samples per launch. Every invocation starts a fresh child and times 50 evaluations. The
+table averages the two launch summaries. It excludes child-process startup and semantic
+preflight while retaining the complete evaluation and observation work.
+
+The `±` values are pooled standard deviations of the 54 child-process samples per cell.
+
+| Scenario | Disabled mean ± SD, 50 evaluations | Enabled mean ± SD, 50 evaluations | Delta | Added allocation per evaluation |
 | --- | ---: | ---: | ---: | ---: |
-| Report finalization | 23 ms | 73 ms | 602 ms | 11/20 |
-| Filesystem records | 27 ms | 55 ms | 112 ms | 13/20 |
-| Source observation | -2 ms | -71 ms | 200 ms | 10/20 |
+| Typical | 256.473 ± 12.751 ms | 271.104 ± 13.129 ms | +14.632 ms / **+5.7%** | 15.0 KiB / +4.1% |
+| Glob-heavy | 497.000 ± 36.151 ms | 518.490 ± 33.917 ms | +21.490 ms / **+4.3%** | 15.4 KiB / +1.0% |
+| Ambient/SDK | 343.631 ± 21.307 ms | 375.711 ± 15.468 ms | +32.080 ms / **+9.3%** | 34.0 KiB / +7.7% |
 
-These marginal wall-time effects are below the external-process/VM noise floor and are
-**not** used as attributable savings in this report. They do not contradict the CPU
-timings: evaluation runs across several parallel MSBuild processes, while the subtractive
-test measures one noisy end-to-end wall clock.
+The corresponding BenchmarkDotNet method ratios were 1.02, 1.03, and 1.04. Those ratios
+include fixed child-process startup and preflight, so they are only a process-level
+cross-check rather than the primary observation-overhead result.
 
-## Pre-zero-copy Exclusive Time
+BenchmarkDotNet executed both Baseline launches before both Native launches for each
+scenario. Fixed-order drift therefore remains a limitation for the synthetic comparison
+as well.
 
-| Activity | ms/evaluation | Calls/evaluation | Share of instrumented CPU |
+The table is backed by the local, uncommitted
+`synthetic-bdn-project\MSBuild.Benchmarks.EvaluationObservationBenchmark-20260901-183841.log`
+and its exported results. An earlier direct-DLL attempt under `synthetic-bdn` executed
+zero benchmarks and is excluded.
+
+## Orchard Core Warm No-Op Build
+
+`OrchardCoreNoOpBuildBenchmark` measured:
+
+- repository: `OrchardCMS/OrchardCore`;
+- commit: `e3f8acb327a95f1dec6e75cefccaef2ad5eefb45`;
+- project: `src/OrchardCore/OrchardCore/OrchardCore.csproj`;
+- target framework: `net10.0`;
+- configuration: `Release`;
+- command under measurement: external `dotnet build --no-restore`;
+- MSBuild Server and node reuse: disabled.
+
+Both cells used the same locally built Release bootstrap SDK. The disabled cell removed
+`MSBUILDPROTOTYPEEVALUATIONOBSERVATION`; the enabled cell set it to `1`. Each independent
+run used one launch, three warmups, and twelve measured iterations. BenchmarkDotNet
+executed all disabled iterations before all enabled iterations in each run, so the cells
+are unpaired and susceptible to time-dependent VM drift.
+
+The `±` values below are BenchmarkDotNet `Error` values: half-widths of its 99.9%
+confidence intervals, not standard deviations.
+
+| Run | Disabled mean ± error | Enabled mean ± error | Delta |
 | --- | ---: | ---: | ---: |
-| Report finalization | 7.20 | 1 | 19.1% |
-| Filesystem records | 5.19 | 243 | 13.8% |
-| Initial request snapshot | 4.71 | 1 | 12.5% |
-| XML source hashing | 4.70 | 834 | 12.5% |
-| Session creation | 3.13 | 1 | 8.3% |
-| Property-function observation | 3.13 | 197 | 8.3% |
-| Project-source records | 2.36 | 85 | 6.3% |
-| Environment records | 2.04 | 705 | 5.4% |
-| Glob records | 1.15 | 6 | 3.1% |
-| External inputs | 1.03 | 65 | 2.7% |
-| SDK result records | 0.96 | 2 | 2.6% |
-| Property lookup | 0.82 | 703 | 2.2% |
-| Task registration | 0.82 | 79 | 2.2% |
-| Other | 0.38 | - | 1.0% |
-| **Total instrumented CPU** | **37.62** | **2,922** | **100%** |
+| 1 | 5.218 s ± 0.171 s | 5.245 s ± 0.486 s | +27 ms / +0.5% |
+| 2 | 4.970 s ± 0.122 s | 5.179 s ± 0.195 s | +209 ms / +4.2% |
+| 3 | 5.004 s ± 0.119 s | 5.177 s ± 0.223 s | +173 ms / +3.5% |
+| **Aggregate means** | **5.064 s** | **5.200 s** | **+136 ms / +2.7%** |
 
-At 13 evaluations per build this is approximately 489 ms of observer CPU work. Parallel
-evaluation reduced its pre-zero-copy observed wall-clock contribution to about 180 ms.
+The three runs show substantial Hyper-V noise and fixed-order drift remains a confounder.
+The individual deltas range from +0.5% to +4.2%, with run 1 carrying substantially wider
+uncertainty. The equal-sample aggregate is a descriptive central estimate, not precise
+causal attribution or a statistically established across-run effect.
 
-## Findings
+## Reproduction
 
-1. **Report finalization was the largest measured cost in this telemetry snapshot.**
-   Collection array creation/copying has since been removed by transferring ownership to
-   the report. The post-change overhead range is +1.9% to +2.7%, versus +3.7% to +5.2%
-   before the change. Activity attribution should be remeasured before choosing the next
-   optimization.
-2. **Filesystem recording is the largest repeated-record cost.** Path normalization,
-   locking, key hashing, and dictionary updates occur about 243 times per evaluation.
-3. **The request snapshot mixes process constants and per-evaluation values.**
-   Engine/runtime/OS/architecture strings are now process-static, and one coherent
-   `Traits` snapshot is used per evaluation. SDK, toolset, provider, culture, directory,
-   feature-switch, and request values remain per evaluation.
-4. **Raw XML hashing is material.** The observer hashes project/import bytes across about
-   834 stream reads per evaluation.
-5. **Property-function classification runs frequently.** Around 197 calls per evaluation
-   enter the observation classifier, including calls that are ultimately classified pure.
-6. **Environment tracking is high-cardinality.** Environment recording and lookup paths
-   are entered roughly 700 times per evaluation.
+From a clean MSBuild clone, build the repository bootstrap as described in
+[Bootstrap](../../wiki/Bootstrap.md):
 
-## Remaining candidates from pre-zero-copy attribution
+```powershell
+.\build.cmd -configuration Release -msbuildEngine dotnet -v quiet
+```
 
-1. Reduce low-level filesystem records under semantic owners and batch keyed updates.
-2. Reuse authoritative PRE/source hashes and avoid hashing the same source more than once.
-3. Cache property-function classifications and bypass observer dispatch for known-pure calls.
-4. Lazily allocate category dictionaries and short-circuit environment recording before
-   normalization/locking.
+The bootstrap directory is not configuration-scoped. Run this from a clean clone or
+ensure the complete Release build finishes; a prior Debug build can otherwise leave a
+mixed bootstrap.
 
-Zero-copy report finalization and the narrow process-constant request optimization are
-complete. Filesystem recording was the next candidate in the old ranking, but fresh
-exclusive attribution is required before selecting another optimization.
+Both Orchard cells must use:
 
-## Confidence
+```text
+<msbuild-root>\artifacts\bin\bootstrap\core\dotnet.exe
+```
 
-The report publishes only:
+Build the benchmark project:
 
-- pre-change whole-build overhead reproduced in three independent BenchmarkDotNet runs;
-- post-change whole-build overhead reproduced in two independent BenchmarkDotNet runs;
-- request-snapshot wall time measured in one pre-change and two isolated post-change
-  runs, with no improvement claimed above the VM noise floor;
-- exclusive activity CPU time stable across five runs, 65 evaluations, and 30 processes;
-- allocation attribution collected across all MSBuild processes.
+```powershell
+.\.dotnet\dotnet.exe msbuild .\src\MSBuild.Benchmarks\MSBuild.Benchmarks.csproj `
+  -restore -v:q -p:Configuration=Release -p:TargetFramework=net11.0
+```
 
-Per-category subtractive wall-time estimates are retained only as a noise-floor check.
+Run the synthetic benchmark:
 
-## Rejected optimization experiments
+```powershell
+.\.dotnet\dotnet.exe run -c Release -f net11.0 --no-build `
+  --project .\src\MSBuild.Benchmarks\MSBuild.Benchmarks.csproj -- `
+  --filter "*EvaluationObservationBenchmark*" --job medium `
+  --artifacts "C:\benchmarks\observer-total\synthetic-bdn-project"
+```
 
-Each experiment was reviewed, tested on `net11.0` and `net472`, measured, and then
-reverted when it did not show a trustworthy improvement.
+Create the Orchard configuration described in
+[`OrchardCoreNoOpBuildBenchmark.md`](../../../src/MSBuild.Benchmarks/OrchardCoreNoOpBuildBenchmark.md),
+using the same bootstrap `dotnet.exe` in both cells, then run:
 
-| Candidate | Experiment | Result |
-| --- | --- | --- |
-| Filesystem records | Moved normalization/key construction outside the lock, cached key hashes, and used single-lookup dictionary insertion | No repeatable Orchard or in-process CPU improvement |
-| XML hashing | Tried symmetric/adaptive reader buffers and observer-only pooled SHA-256 batching | Reader buffering increased default-path allocation; adaptive/pooling lost the timing signal |
-| Session creation | Lazily allocated observation collections and removed capturing closures from environment/property-function recording | Glob-heavy allocation improved, but other scenarios were mixed and Orchard was unchanged |
-| Property-function classification | Added a bounded, versioned, successful-only process cache | Small allocation reduction; Orchard overhead worsened in both runs |
+```powershell
+$env:MSBUILD_ORCHARD_NOOP_BUILD_CONFIG = "C:\benchmarks\orchard-noop-build.json"
+$artifactNames = "orchard-release-bdn", "orchard-release-bdn-run2", "orchard-release-bdn-run3"
+foreach ($artifactName in $artifactNames) {
+  .\.dotnet\dotnet.exe run -c Release -f net11.0 --no-build `
+    --project .\src\MSBuild.Benchmarks\MSBuild.Benchmarks.csproj -- `
+    --filter "*OrchardCoreNoOpBuildBenchmark*" `
+    --artifacts "C:\benchmarks\observer-total\$artifactName"
+}
+```
 
-No code from these experiments was retained. Further optimization should begin with fresh
-profiling rather than another speculative change.
+The local, uncommitted backing result directories for this report are
+`orchard-release-bdn`, `orchard-release-bdn-run2`, and
+`orchard-release-bdn-run3`.
+
+## Interpretation
+
+- Total observation overhead is scenario-dependent.
+- Isolated synthetic evaluation loops measured **+4.3% to +9.3% of evaluation-loop
+  time**.
+- Orchard run deltas ranged from +27 ms to +209 ms. Their descriptive mean was +136 ms
+  / +2.7% of total warm no-op build wall time, but it is not treated as a statistically
+  established across-run effect.
+- Synthetic allocation increased by approximately **15-34 KiB per evaluation**.
+- These totals do not identify which observation category should be optimized.
+
+The synthetic and Orchard percentages have different denominators and are not directly
+comparable.
+
+The measurements cover observation only. They exclude cache lookup, validation,
+serialization, result materialization, concurrency effects, SDK resolver dependency
+validation, and validation/materialization races.
