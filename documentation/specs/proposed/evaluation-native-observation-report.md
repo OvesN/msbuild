@@ -7,11 +7,39 @@ The adversarial follow-up and confirmed counterexamples are documented in
 The post-fix six-scenario comparison and current overhead snapshot are documented in
 [evaluation-native-observation-buildxl-post-fix-report.md](evaluation-native-observation-buildxl-post-fix-report.md).
 
+## Current scope and claims
+
+This is an observation prototype, not a cache-admission decision. It records the value or
+semantic result consumed at MSBuild-owned interception points and separately reports
+known incomplete, unsupported, conflicting, or unverifiable inputs.
+
+SDK observation is complete only at the MSBuild/resolver boundary: the report contains
+the complete request, returned `SdkResult`, hit/miss, and cache
+owner/scope/epoch/key/entry identity. Resolver discovery and resolver-internal file,
+environment, Registry, network, workload, manifest, and host dependencies are not
+observed. A live SDK cache entry proves that the same boundary result remains stored; it
+does not prove those internal dependencies are unchanged.
+
+Until resolvers expose a complete dependency manifest or an authoritative validity
+token/generation with defined scope, lifetime, and invalidation semantics, any
+correctness-capable evaluation cache, including a process-local MSBuild Server cache,
+must reject SDK-bearing evaluations.
+
+A measurement-only experiment may bind to the exact SDK entry while it remains current.
+Normal build entries are submission- or node-build-scoped, but a retained
+`EvaluationContext` can keep its own entry current across independent evaluations.
+Currentness is never sufficient for correctness-capable admission: the policy rejects a
+cross-build Server candidate without the resolver contract. A shared-context SDK
+benchmark is an invalidation-disabled upper-bound measurement, not submission-cache
+behavior or cache correctness. See
+[SDK boundary and future dependency contract](evaluation-observation-layer-design-details.md#sdk-boundary-and-future-dependency-contract).
+
 ## Session lifecycle
 
-1. File-based `Project` and `ProjectInstance` loads pass a source capture into root
-   acquisition. A malformed root produces a minimal failed report before `Evaluator`
-   exists; its request category is incomplete.
+1. File-based `Project` and `ProjectInstance` loads hash and stamp successful root
+   sources on the resulting `ProjectRootElement`; a temporary capture retains metadata
+   for load or parse failures. A malformed root produces a minimal failed report before
+   `Evaluator` exists; its request category is incomplete.
 2. `Evaluator` calls `EvaluationObservationSession.TryCreate`. When the feature is
    disabled it returns `null`, so the normal evaluator path is unchanged.
 3. The session is passed to `PropertyTrackingEvaluatorDataWrapper`. The active evaluation
@@ -39,14 +67,14 @@ The post-fix six-scenario comparison and current overhead snapshot are documente
 | --- | --- | --- | --- |
 | Request | Global properties, load/evaluation settings, toolset, runtime/OS/culture, feature switches, escape hatches, working directories, provider/cache modes | `Evaluator.RecordInitialObservationSnapshot` | Effective evaluator state, `BuildEnvironmentHelper`, `Traits`, toolset provider, global-property dictionary |
 | Project/import sources | Root, imported, linked, generated, and in-memory sources; parsed/parse-failure/load-failure outcome, path/provider, PRE version, content identity, consumed last-write time | `Evaluator` root/import processing and `ProjectRootElement` load paths | PRE/link versions, load-time timestamps, and cached source hashes; malformed imports finish hashing through the same open stream rather than reopening the file |
-| File probes and reads | Canonical absolute positive/negative file and directory probes, Windows extended-path alias normalization, content hashes, failures, provider identity; raw `Directory.Parse.config` bytes and parse outcome | `RecordingFileSystem` over the active evaluation `IFileSystem`; direct evaluator/intrinsic/parser hooks only where no filesystem call exists | Existing filesystem or parser result, effective base directory, and provider; no validation-time reprobe |
+| File probes and reads | Canonical absolute positive/negative file and directory probes, Windows extended-path alias normalization, content hashes, failures, provider identity; raw-byte `Directory.Parse.config` content hash and parse outcome | `RecordingFileSystem` over the active evaluation `IFileSystem`; direct evaluator/intrinsic/parser hooks only where no filesystem call exists | Existing filesystem or parser result, effective base directory, and provider; no validation-time reprobe |
 | Metadata | Filesystem times, lengths, attributes, returned value/failure | `RecordingFileSystem`, time-based `ItemSpecModifiers`, and classified property functions | Existing metadata result used by evaluation; lexical path calculations are ambient path-resolution records |
 | Enumerations and globs | Request pattern, recursion, complete `EnumerationOptions` identity where applicable, excludes, completion, count, ordered result fingerprint, optional retained details | `RecordingFileSystem`, classified property functions, and `EngineFileUtilities`/`FileMatcher` semantic completion | The enumeration/glob result already produced for evaluation; no second enumeration |
 | Searches | Ordered candidates/fingerprint and ordered selected paths/count/fingerprint; an empty selected sequence is a miss, while ignored wildcard matches remain selected | `FileUtilities` through `IEvaluationInputObserver`, plus evaluator import/toolset searches | Existing candidate sequence and selected results; selected paths remain retained when candidate details are omitted |
 | Environment | Imported, missing imported, SDK-injected, and live process values | `PropertyTrackingEvaluatorDataWrapper`; `Environment` property-function interception | Existing property lookup or property-function result |
 | Registry and ambient inputs | Registry requests/results/failures, culture/time/runtime/tool-location values, lexical item/path-member results, `MakeRelative` resolved base/path, volatile values | `ItemSpecModifiers`, intrinsic expansion, path-normalization seams, and post-execution property-function interception | Actual input/base/instance and returned value consumed by expansion |
 | Property functions | Receiver/member, classified effect, arguments/result or failure | `Expander.Function` after dispatch | Existing invocation result; known-pure calls are omitted |
-| SDK resolution | Complete resolver request, returned `SdkResult`, hit/miss, and cache owner/scope/key/epoch/entry identity with a live-entry validator | `CachingSdkResolverService` and out-of-proc SDK service | Existing SDK cache result while that exact entry remains live; resolver-internal files are intentionally opaque |
+| SDK resolution | Complete resolver request, returned `SdkResult`, hit/miss, and cache owner/scope/key/epoch/entry identity with a live-entry validator | `CachingSdkResolverService` and out-of-proc SDK service | Exact boundary result and cache-entry lifetime; resolver-internal dependencies remain opaque and block correctness-capable reuse without a resolver contract |
 | Tasks and toolsets | Effective `UsingTask` registration and selected toolset/provider identity | `TaskRegistry` and evaluator initialization | Resolved task registration and toolset already selected |
 | Side effects and issues | Mutations, partial operations, typed failures with category/operation/path/provider/error, conflicts, unsupported or unverifiable inputs; localized failure messages are diagnostic-only | Evaluator, intrinsic/property-function hooks, and recorder conflict handling | Existing operation outcome; observation-internal failures cannot replace evaluation exceptions |
 
@@ -59,6 +87,11 @@ selection, and SDK cache results.
 
 SDK resolver dependencies are not observed. The current SDK cache returns the stored
 `SdkResult` for the same SDK name within its cache scope until that cache is cleared.
+The recorded live-entry validator can bind a measurement to that exact entry only for
+its owner-defined lifetime. It is not sufficient for correctness-capable evaluation
+reuse, including process-local Server reuse. Normal build entries do not survive
+submission or node-build teardown, while a retained `EvaluationContext` entry can remain
+current across evaluations; neither lifetime supplies resolver dependency validity.
 
 The implementation does not yet persist evaluated projects, validate reports, or perform
 cache lookup/invalidation.
@@ -149,4 +182,5 @@ subtractive measurements, and optimization priorities.
 - Compact task-registration, property-function, and filesystem records.
 - Materialize compact arrays only when a report is persisted in a cache entry.
 - Lazily create request and category data.
-- Define the complete SDK request key and cache lifetime.
+- Define and implement the SDK resolver dependency contract; keep complete request
+  identity distinct from the existing narrower cache key and recorded entry lifetime.

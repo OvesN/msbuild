@@ -70,7 +70,7 @@ the boundaries omitted by that run.
 | Empty globs, empty enumeration, positive/negative probes | Semantic records were present; internal traversed directories were BuildXL-only under literal comparison | Semantic-comparer requirement |
 | Supported file and directory property functions | Reads, metadata, `GetFiles`, and `GetDirectories` were recorded; all relative identities remained incomplete | Partially correct |
 | Wildcard imports and upward searches | Selected files and ordered candidates were recorded | Negative control |
-| Malformed parser configuration | Raw bytes and malformed parse outcome were recorded | Negative control |
+| Malformed parser configuration | Raw-byte content hash and malformed parse outcome were recorded | Negative control |
 | Custom SDK resolver | Resolver sidecar file was read but absent from native file records | Intentional SDK opacity |
 | Custom filesystem provider | Provider sidecar file was read but absent from native file records | Explicitly incomplete custom-provider boundary |
 | Shared evaluation context | Cached probe/glob values were replayed, with `UnversionedSharedCache` | Fail closed |
@@ -195,9 +195,13 @@ BuildXL reported the config read. Native observation recorded:
 - SDK props and targets;
 - no file read or probe for `resolver.config`.
 
-The report had no resolver-file reason; this is consistent with the current
-policy that SDK resolver internals are opaque and the SDK cache owns
-validity. It still proves that the file observation layer is incomplete.
+The report had no resolver-file reason because SDK resolver internals are
+opaque. The recorded SDK cache identity describes only the request/result
+boundary and entry lifetime; it does not validate resolver dependencies. This
+scenario therefore remains outside cache-correctness claims until resolvers
+provide dependency manifests or authoritative validity tokens. It is evidence
+for the resolver-contract exclusion, not evidence that the supported filesystem
+observation boundary is incomplete.
 
 #### Custom filesystem provider
 
@@ -415,14 +419,17 @@ to provide useful cache coverage for normal SDK projects.
    incomplete.
 4. Record failed operations with path, operation kind, provider, and exact
    outcome instead of only a global failure bit.
-5. Start source observation before root parsing and retain raw bytes and
-   parse outcome for malformed imports as well as parser configuration.
+5. Hash and stamp successful sources during acquisition, finish hashing malformed
+   imports through the original stream, and retain hash/outcome/failure metadata for
+   root loads that fail before `Evaluator` exists.
 6. Correct category states when evaluation fails before a source/content
    dependency was captured.
 7. Either:
    - instrument built-in SDK/workload/tool-location file dependencies, or
-   - state explicitly that SDK cache identity is the only validity contract
-     and keep all non-cache-owned tool-location paths blocked.
+   - require resolvers to provide a complete dependency manifest or authoritative
+     validity token and keep SDK/tool-location paths without such provenance blocked.
+
+   SDK cache identity is cache-entry lifetime evidence only.
 8. Resolve `ConflictingObservation` and classify pure SDK target operations
    such as `String[]::GetValue`.
 9. Land a repeatable semantic BuildXL comparer. Raw path intersection is

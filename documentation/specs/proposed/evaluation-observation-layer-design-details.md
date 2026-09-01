@@ -21,7 +21,9 @@ dependencies afterward from the evaluated `ProjectInstance`.
 
 The production design uses:
 
-- one explicitly passed `EvaluationObservationSession` per evaluation;
+- one isolated `EvaluationObservationSession` per evaluation, with explicit transport
+  where practical and narrowly scoped current-observer access for existing static and
+  extension seams;
 - evaluator-native semantic interception;
 - existing MSBuild filesystem, property, property-function, source, SDK, and host seams;
 - default-deny coverage states;
@@ -41,8 +43,8 @@ three groups separately.
 ### Proposed commitments for approval
 
 - Observation is evaluator-native and fail closed.
-- Per-evaluation state is passed explicitly, not stored on shared context or ambient
-  process state.
+- Per-evaluation state is owned by the session and is not stored on shared context or by
+  a process-global owner; scoped current-observer access is transport only.
 - Coverage is default deny.
 - Opaque third-party code and unclassified property functions are non-cacheable.
 - Shared caches must replay dependencies, expose an authoritative generation, or make
@@ -56,9 +58,13 @@ Phase 1 must:
 
 - keep observation off by default;
 - preserve evaluation and logging behavior;
-- produce one isolated report per evaluation;
-- record only filesystem operations reached through the current evaluator seam;
-- declare filesystem and all later categories incomplete;
+- hash and stamp file-based root sources while they are acquired, retain failure
+  metadata when loading fails, and produce one isolated report per evaluation from the
+  session created in `Evaluator`;
+- record typed observations across the implemented request, source, filesystem,
+  environment, Registry, property-function, SDK-boundary, toolset, registration,
+  side-effect, and failure seams;
+- keep every non-completion implementation category `Partial`;
 - measure disabled and enabled overhead;
 - keep cache hits disabled.
 
@@ -68,13 +74,14 @@ Phase 1 must not add:
 - persistence;
 - watcher/journal code;
 - a public extension API;
-- environment or Registry interception hidden behind process-global state.
+- environment or Registry interception hidden behind process-global state that outlives
+  the active evaluation.
 
-### Proposed later mechanisms
+### Implemented seams and proposed contracts
 
-The detailed source, property-function, environment, Registry, SDK, host, validation, and
-invalidation mechanisms below are proposals for later phases. They do not become
-implementation commitments until their corresponding phase is approved.
+The detailed sections below define the target contract. The current-status and
+implementation-phase sections distinguish the observation seams already present from
+provider contracts, validation, admission, invalidation, and reuse that remain proposed.
 
 ### Deferred designs
 
@@ -88,9 +95,14 @@ Separate proposals are required for:
 ### Decisions required now
 
 1. Confirm the process-local MSBuild Server as the first production target.
-2. Approve default non-cacheable behavior for opaque code.
-3. Approve the phase ordering.
-4. Select benchmark workloads and the process for setting CPU/allocation/memory budgets.
+2. Confirm that SDK-bearing entries require the resolver dependency contract even for
+   process-local correctness-capable reuse.
+3. Approve default non-cacheable behavior for opaque code.
+4. Approve the phase ordering.
+5. Select benchmark workloads and the process for setting CPU/allocation/memory budgets.
+
+Accepting decision 2 means normal SDK-style .NET projects remain measurement workloads,
+not correctness-capable cache candidates, until the resolver contract exists.
 
 ## Scope
 
@@ -101,24 +113,27 @@ all categories in one pull request.
 
 The current prototype milestone is limited to:
 
-- per-evaluation session lifetime;
-- filesystem records visible through the existing evaluator filesystem;
+- load-time source hashing/stamping and failure capture followed by one per-evaluation
+  session in `Evaluator`;
+- typed request, source, filesystem, environment, Registry, property-function,
+  SDK-boundary, toolset, registration, side-effect, and failure records;
 - explicit coverage and non-cacheable reasons;
-- semantic and concurrency tests;
-- overhead measurement.
+- semantic and concurrency tests plus BuildXL-differential and overhead benchmark
+  harnesses.
 
-`ReadyForCacheHits` remains false.
+The prototype has no eligibility computation, cache admission, or cache-hit path. Every
+non-completion implementation category remains `Partial`.
 
 ### Later milestones
 
 Later pull requests add:
 
-- root and import source identity;
-- complete filesystem call-site routing;
-- environment and Registry observation;
-- SDK request/result cache semantics, toolset provenance, and host-source identity;
+- remaining shared-cache, provider, toolset, host, and SDK resolver dependency contracts;
+- coverage evidence required to promote supported categories from `Partial` to
+  `Complete`;
 - validation and an in-memory MSBuild Server cache;
-- live invalidation and persistence.
+- non-filesystem and filesystem invalidation;
+- persistence.
 
 ## Non-goals
 
@@ -132,7 +147,9 @@ The initial observation work does not provide:
 - transparent sandboxing of arbitrary managed code.
 
 Until a public extension contract is designed, opaque property-function and host
-extension code is non-cacheable. SDK resolvers follow the separate cache-owned policy.
+extension code is non-cacheable. SDK resolver request/result data is observed at the
+MSBuild boundary, but resolver-internal dependencies require a separate resolver
+contract before correctness-capable cache admission.
 
 ## Technical reference
 
@@ -180,7 +197,7 @@ Examples:
 - a partial stream read without an authoritative content token;
 - a Boolean probe that cannot distinguish failure from missing;
 - unclassified property functions;
-- opaque extension execution outside the SDK result-cache boundary;
+- opaque extension execution, including SDK resolver internals;
 - time, random, network, or arbitrary host callbacks without a stable token;
 - shared-cache results without replayable provenance.
 
@@ -208,12 +225,14 @@ CategoryObservationState
   NotExercised
   Observed
   Incomplete
-  NonCacheable
+  Unsupported
 ```
 
-An operation in a category whose implementation coverage is not `Complete` sets that
-report category to `Incomplete`. Platform-specific `NotExercised` is permitted only when
-the semantic snapshot proves that category cannot affect evaluation on that platform.
+Implementation coverage and the per-evaluation state are independent. Future admission
+rejects an applicable category whose implementation coverage is not `Complete`; it does
+not rewrite an otherwise exact `Observed` operation to `Incomplete`. Platform-specific
+`NotExercised` is permitted only when the semantic snapshot proves that category cannot
+affect evaluation on that platform.
 
 The report exposes:
 
@@ -229,13 +248,21 @@ The cache, not the observer, derives eligibility:
 eligible =
   evaluation succeeded
   AND every applicable category has implementation coverage Complete
-  AND no report category is Incomplete or NonCacheable
+  AND no report category is Incomplete or Unsupported
   AND no non-cacheable reason exists
+  AND every SDK resolution has an accepted dependency manifest or authoritative
+      validity token
   AND ObservationIncomplete is absent
   AND no observation was dropped or truncated
 ```
 
-The prototype hard-codes cache eligibility to false.
+The current prototype records no resolver dependency contract, computes no eligibility,
+implements no admission path, and keeps every non-completion implementation category
+`Partial`, so the predicate cannot be satisfied. `SdkResolutionWithoutCacheLifetime` is
+only an additional blocker for a resolution performed with the existing SDK cache
+disabled. Its absence is not resolver dependency provenance. Before production admission
+exists, the report or admission schema must represent the accepted contract for each
+resolution and fail the predicate when it is missing.
 
 ## Session creation and transport
 
@@ -252,24 +279,29 @@ It must not be stored on:
 
 ### Creation
 
-The session is created at each internal evaluation entry point before root source
-acquisition:
+File-based `Project` and `ProjectInstance` root acquisition computes a raw-content hash
+and publishes the hash, timestamp, encoding, source kind, and stability metadata on the
+resulting `ProjectRootElement`. An `EvaluationProjectSourceLoadCapture` retains the hash
+and related metadata only so a failed load or parse can produce a report; it does not
+retain the source bytes.
 
-- `Project` initialization or reevaluation;
-- `ProjectInstance` construction;
-- backend `BuildRequestConfiguration` project loading.
+After a `ProjectRootElement` exists, `Evaluator` creates the
+`EvaluationObservationSession`. Successful root observation reads the retained
+`ProjectRootElement` source stamp. When root loading throws, the entry-point catch uses
+the temporary capture to create a minimal failure report because no evaluator session
+exists.
 
-The session is passed explicitly to:
+During evaluation, the session is passed to or made current for:
 
-- project source acquisition;
 - `Evaluator`;
 - `PropertyTrackingEvaluatorDataWrapper`;
 - `Expander`;
 - `Expander.Function`;
-- an SDK resolver decorator;
+- SDK resolver services;
 - host/source providers.
 
-Static helper and well-known-function paths receive the observer as an explicit argument.
+Existing static and extension seams use the narrowly scoped current observer only while
+the evaluation is active.
 
 ### Filesystem composition
 
@@ -330,7 +362,7 @@ source versions, and shared-provider generations.
 | `Expander` and `Expander.Function` | Observe property functions before MSBuild escapes returned strings. |
 | `PropertyExpander.ExpandRegistryValue` | Observe classic `$(Registry:...)` syntax. |
 | `IntrinsicFunctions.GetRegistryValue*` | Observe `[MSBuild]::GetRegistryValue*` operations. |
-| `ISdkResolverService`, `SdkReference`, `SdkResult` | Decorate canonical SDK request/result processing. |
+| `ISdkResolverService`, `SdkReference`, `SdkResult` | Record inline at the canonical SDK request/result boundary. |
 | `BuildParameters` and `ProjectCollection.EnvironmentProperties` | Reuse the effective environment sources evaluations already consume. |
 | `BuildEventContext.EvaluationId` | Correlate one report with one evaluation. |
 | `FileUtilities` and MSBuild name comparers | Preserve platform and MSBuild comparison semantics. |
@@ -366,7 +398,7 @@ not create a second independently validated dependency for the same consumed val
 | Observed | Classic Registry expression | `PropertyExpander.ExpandRegistryValue` | Exact request and returned string/outcome |
 | Observed | Registry intrinsic | `Expander.Function` and `IntrinsicFunctions` | Exact request and typed returned value/outcome |
 | Observed | Built-in Registry discovery | Typed Registry provider | Value or enumeration result |
-| Observed | SDK resolution | SDK service decorator | Request, final result, and cache hit/miss |
+| Observed | SDK resolution | SDK resolver services with scoped current-observer access | Request, final result, and cache hit/miss |
 | Observed | Toolset discovery | Toolset provider | Selected result and source generation |
 | Observed | Stable ambient value | Property-function/host observer | Typed value |
 | Observed | Unsaved IDE/object-model source | Host source provider | Document identity and monotonic version |
@@ -589,8 +621,8 @@ A whole-environment snapshot does not cover those other inputs and cannot prove 
 value consumed during concurrent mutation.
 
 Therefore opaque property-function and host extension code is non-cacheable until a
-separate dependency-reporting contract exists. SDK resolvers are exempt because the SDK
-result cache owns their reuse validity.
+separate dependency-reporting contract exists. SDK resolvers are not exempt: their
+result cache proves only entry lifetime, not resolver dependency validity.
 
 Built-in extensions become cacheable only after their ambient reads are routed through
 observable providers and covered by tests.
@@ -682,7 +714,8 @@ MSBuild semantic returned on that platform.
 
 ## SDK and toolset observation
 
-Decorate `ISdkResolverService` per evaluation.
+Record inline at the canonical `ISdkResolverService` request/result boundary through the
+scoped current observer.
 
 Record:
 
@@ -697,10 +730,10 @@ SdkResolutionObservation
   cache hit/miss
 ```
 
-### SDK cache ownership
+### SDK boundary and future dependency contract
 
 Resolver discovery, manifests, assemblies, file probes, and internal dependencies are not
-observed. The SDK cache owns reuse validity.
+observed.
 
 The observer records:
 
@@ -708,11 +741,36 @@ The observer records:
 - the final `SdkResult`; and
 - whether the existing SDK cache returned the result.
 
-The current cache is primarily keyed by SDK name within its existing scope. Defining a
-complete request key and explicit cache lifetime/epoch is separate work.
+The current cache is primarily keyed by SDK name within its existing scope. The observer
+records the complete request separately from that narrower effective key; changing the
+SDK cache key or its production lifetime policy is separate work.
 
 In-process, custom, and out-of-process resolver internals are treated identically as
-opaque implementations behind this cache boundary.
+opaque implementations behind this cache boundary. The recorded owner, scope, epoch,
+key, and entry identity can prove only that the same `SdkResult` cache entry remains
+live. It cannot prove that the resolver's files, environment, Registry, network, or
+other inputs are unchanged.
+
+A correctness-capable resolver contract must provide either:
+
+1. a complete dependency manifest expressed in the observation taxonomy; or
+2. an authoritative validity token/generation with explicit scope, lifetime, and
+   invalidation semantics.
+
+Until then, any correctness-capable evaluation cache, including a process-local MSBuild
+Server cache, rejects SDK-bearing evaluations.
+
+A measurement-only experiment may bind to the exact live cache entry for its
+owner-defined lifetime. Normal main-node build entries are submission-scoped and cleared
+at submission completion; worker-node entries are node-build-scoped. A cache owned by a
+retained `EvaluationContext` can remain current across independent evaluations because
+it is not automatically cleared between them.
+
+Entry currentness is therefore necessary only for an exact-entry measurement and is
+never sufficient for correctness-capable admission. The admission policy rejects a
+cross-build Server candidate without the resolver contract even if a context-owned entry
+still reports current. Such a shared-context benchmark is an invalidation-disabled
+upper-bound experiment, not submission-cache behavior or cache-correctness evidence.
 
 ## Shared cache provenance
 
@@ -735,7 +793,8 @@ This applies to:
 
 Any sharing policy or process-global cache that reuses one of those caches remains
 non-cacheable until that cache satisfies this contract. SDK result caches follow the
-separate cache-owned policy above.
+same rule; their live-entry identity is correlation and lifetime evidence, not resolver
+dependency provenance.
 
 ## Validation and invalidation
 
@@ -756,7 +815,7 @@ Validation on lookup is sufficient for correctness:
 | Full environment enumeration | Compare canonical snapshots. |
 | Stable ambient value | Repeat the same ambient read, including live current directory. |
 | Registry value/enumeration | Repeat the same operation and compare typed result. |
-| SDK | Reissue the request through the same SDK cache scope and compare the returned `SdkResult`. |
+| SDK | Validate the resolver dependency manifest or authoritative validity token. Without that contract, reject the candidate; an exact-entry check is measurement-only and limited to the entry's current owner-defined lifetime. |
 | Toolset | Compare provider generation or replayed dependencies. |
 | Host document | Compare host document version. |
 
@@ -792,7 +851,7 @@ search/glob root -> entries
 environment property name -> entries
 Registry key/value/view -> entries
 source document -> entries
-SDK request/cache epoch -> entries
+resolver dependency or validity-token identity -> entries
 toolset generation -> entries
 ```
 
@@ -937,63 +996,58 @@ Portable coverage tests should also assert or detect evaluation-affecting direct
 
 ## Implementation phases
 
-### Phase 1: current prototype
+### Phase 1: current observation prototype
 
-- Per-evaluation session in `Evaluator`.
-- Outer recording filesystem.
-- Typed filesystem records.
-- Atomic completion.
-- Default-deny reasons.
-- `ReadyForCacheHits = false`.
+- Load-time root source hashing/stamping and failure capture, followed by one isolated
+  session in `Evaluator`.
+- Typed records across the implemented observation taxonomy.
+- Atomic completion, default-deny reasons, and all non-completion implementation
+  categories `Partial`.
+- No eligibility computation, cache admission, or cache-hit path.
 
-### Phase 2: source and filesystem completeness
+### Phase 2: observation completeness and provider contracts
 
-- Move session creation before root source acquisition.
-- Explicit session transport.
-- Root/import source records.
-- Property-function filesystem interception.
-- Direct filesystem bypass inventory.
-- Semantic glob and search records.
-- Shared filesystem/PRE provenance.
+- Close remaining direct-read and shared-cache provenance gaps.
+- Add dependency contracts for SDK resolvers and other opaque providers.
+- Complete toolset provenance and host document versions.
+- Promote a category to `Complete` only after static checks, mutation tests, and
+  differential evidence cover its supported boundary.
 
-### Phase 3: environment, Registry, and ambient inputs
+### Phase 3: performance and eligibility
 
-- Independent property-read observation gate.
-- `PropertiesUseTracker` negative environment records.
-- `System.Environment` classification.
-- SDK-injected environment records.
-- Both Registry syntaxes.
-- Built-in Registry provider.
-- Stable/unstable ambient classification.
+- Accept disabled/enabled overhead on representative workloads.
+- Encode provider and resolver contract state in the report or admission predicate.
+- Derive cache eligibility from coverage, reasons, and required contract state.
+- Keep cache hits opt-in.
 
-### Phase 4: SDK, toolset, and hosts
+### Phase 4: decision-grade filesystem validation spike
 
-- SDK resolver decorator.
-- Request/result/cache-hit recording.
-- Complete SDK request-key and cache-lifetime definition.
-- Toolset source generations.
-- Host document versions.
+- Measure timestamp-only filesystem validation against full reevaluation.
+- Verify tracked mutations reject stale candidates.
+- Keep cache admission and result reuse disabled; this measures validation cost only.
 
-### Phase 5: performance and eligibility
-
-- All required categories complete.
-- Disabled/enabled overhead accepted.
-- Cache eligibility derived from coverage/reasons.
-- Cache hits remain opt-in.
-
-### Phase 6: in-memory server cache
+### Phase 5: in-memory server cache and non-filesystem validation
 
 - Candidate key and entry store.
-- Immutable evaluation baseline.
-- Validation epochs.
-- Mutable execution copy/overlay.
-- Eviction and memory budgets.
+- Implement the required validators for every admitted non-filesystem category.
+- Admit a candidate only when its coverage, reasons, resolver/provider contracts, and
+  validators satisfy the Phase 3 predicate.
+- Do not admit disk-backed candidates unless a production filesystem validator exists;
+  any earlier disk-backed hit remains experimental, opt-in, and not
+  correctness-complete.
+- Immutable evaluation baseline and mutable execution copy/overlay.
+- Validation epochs, eviction, and memory budgets.
 
-### Phase 7: live invalidation and persistence
+### Phase 6: production filesystem validation and invalidation
 
+- Implement the shared filesystem change service with correctness-preserving fallback
+  validation.
 - Reverse dependency index.
 - Watcher/journal acceleration.
 - Overflow recovery.
+
+### Phase 7: persistence
+
 - Serialization/versioning/security design.
 
 ## Compatibility
@@ -1019,12 +1073,17 @@ New warnings require separate compatibility treatment because warnings can break
 
 Draft PR #14689 currently:
 
-- creates one isolated session per evaluator;
-- records selected filesystem probes, enumerations, metadata, and reads;
+- hashes and stamps file-based root sources during acquisition, retains failure metadata,
+  then creates one isolated session per evaluation in `Evaluator`;
+- records typed request, source, filesystem, environment, Registry,
+  property-function, SDK-boundary, toolset, task-registration, side-effect, and failure
+  observations;
 - remains off by default behind
   `MSBUILDPROTOTYPEEVALUATIONOBSERVATION=1`;
 - preserves shared-context concurrency isolation;
 - never declares an entry ready for cache hits;
 - has no production report sink;
-- explicitly flags incomplete project XML and shared-cache provenance;
-- does not yet implement the later phases in this document.
+- explicitly flags incomplete, unsupported, conflicting, and unverifiable inputs;
+- records SDK cache identity but not resolver-internal dependencies;
+- has no report-level dependency validator, invalidation algorithm, cache admission, or
+  result reuse; `ISdkResolverCacheValidator` validates SDK cache-entry lifetime only.

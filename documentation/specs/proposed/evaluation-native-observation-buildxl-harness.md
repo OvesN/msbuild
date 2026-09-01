@@ -140,10 +140,14 @@ Do not classify directories as harmless merely because they are traversal
 intermediates: directory membership can affect a glob.
 
 SDK resolver internals are outside the prototype contract until resolvers can
-report their dependencies. The semantic check compares observer-disabled and
-observer-enabled evaluations in the same child process; it isolates the native
-observer's effect, but does not prove equivalence between sandboxed and
-unsandboxed processes.
+report a complete dependency manifest or authoritative validity token. The
+`AmbientAndSdk` scenario exercises an SDK-bearing evaluation, adds the returned SDK path
+to the native path set, and checks the resulting imports and evaluated state. It does not
+assert the SDK request/result record fields, establish resolver-internal dependency
+completeness, or authorize a correctness-capable cache hit. The
+semantic check compares observer-disabled and observer-enabled evaluations in
+the same child process; it isolates the native observer's effect, but does not
+prove equivalence between sandboxed and unsandboxed processes.
 
 See also:
 

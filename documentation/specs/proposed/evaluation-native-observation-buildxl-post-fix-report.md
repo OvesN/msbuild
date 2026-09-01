@@ -107,8 +107,8 @@ member because it affects evaluation.
 
 The malformed-import path was already superficially present in the old
 native path set because of its positive probe. The important correction is
-the record shape: raw bytes, source role/outcome, and typed failure are now
-retained.
+the record shape: the raw-byte content hash, source role/outcome, and typed
+failure are now retained.
 
 ## What the native layer tracks
 

@@ -16,13 +16,24 @@ It is not persistent or shared across processes, users, or machines.
 
 The initial supported scenario is a CLI build of a disk-backed project. Unsaved project
 XML, host-owned in-memory sources, IDE/project-system evaluation, and object-model
-remoting are out of scope.
+remoting are out of scope. SDK-bearing projects remain outside correctness-capable cache
+admission until their resolvers provide dependency manifests or authoritative validity
+tokens. They may still be used in performance experiments that explicitly identify
+whether they stay within an existing SDK entry lifetime or bypass SDK admission to
+measure an invalidation-disabled upper bound.
+
+Consequently, normal SDK-style .NET projects are measurement workloads rather than
+correctness-capable cache candidates until the resolver contract exists.
 
 The work is split into three stages:
 
 1. measure the maximum benefit with invalidation disabled;
 2. add non-filesystem invalidation;
 3. add filesystem invalidation with BuildXL.
+
+Before stage 2, a separate decision-grade spike may measure timestamp-only filesystem
+validation against full reevaluation. It keeps admission and reuse disabled and does not
+change the production correctness sequence.
 
 The October milestone is a partial invalidation prototype, not yet a correctness-complete
 cache for normal disk-backed projects.
@@ -39,6 +50,8 @@ the result stale when an input changes.
   change the evaluated `ProjectInstance`: project/import files, other file reads and
   probes, globs, environment variables, Registry values, property-function results, SDK
   requests, and SDK results.
+- At the SDK boundary, this records the complete request and returned result, not
+  resolver-internal dependencies; those require the resolver contract described below.
 - For file-content reads, store the normalized path and SHA-256 of the exact bytes consumed
   by evaluation; for text-only APIs, hash the exact returned text encoded as UTF-8. Hash
   the buffer already returned to evaluation; do not read the file again.
@@ -58,8 +71,19 @@ the result stale when an input changes.
 ### Shared evaluation context
 
 Keep a shared `EvaluationContext` on the server so cache misses can reuse existing
-file-probe, glob-expansion, and SDK-resolution caches. Measure this separately. Once
-invalidation exists, tie its lifetime to the same epochs as the evaluation-result cache.
+file-probe and glob-expansion caches. Do not reuse its SDK-resolution cache across build
+requests until the resolver dependency contract exists.
+
+The current sharing policies do not separate those caches: `Shared` also retains the
+context-owned SDK resolver service, while `SharedSDKCache` retains only that service.
+Before correctness-capable Server reuse, add internal cache composition that gives each
+build request a fresh SDK resolver service, or explicitly clear and epoch-advance the
+context-owned service between requests. Until then, a server-held shared context is
+benchmark-only. A retained SDK entry can remain current across evaluations, but that
+currentness is not admission evidence.
+
+Once invalidation exists, tie the supported shared caches to the same epochs as the
+evaluation-result cache.
 
 ### No-invalidation benchmark
 
@@ -117,8 +141,25 @@ Compare it with the next build request's environment snapshot.
 
 - Treat SDK resolver internals as opaque.
 - Match the complete SDK request.
-- Bind evaluation entries to the same SDK-result-cache instance or epoch.
-- Clear dependent evaluation entries when that SDK cache is cleared.
+- Record and validate the exact SDK-result-cache owner, scope, epoch, key, and entry
+  identity for controlled process-local experiments.
+- Do not treat a live cache entry as resolver dependency validation.
+- Require each resolver to provide either a complete dependency manifest or an
+  authoritative validity token/generation with defined scope, lifetime, and invalidation
+  semantics before correctness-capable admission.
+- Until that contract exists, any correctness-capable evaluation cache, including the
+  process-local MSBuild Server prototype, rejects SDK-bearing candidates.
+- Use the exact SDK entry in a measurement only while its owner reports that entry
+  current. Normal main-node build entries are submission-scoped and cleared at
+  submission completion; worker-node entries are node-build-scoped. A retained
+  `EvaluationContext` can keep its own entry current across evaluations.
+- Treat currentness as necessary only for an exact-entry measurement, never as
+  correctness-capable admission evidence. Label any shared-context or otherwise
+  cross-build SDK benchmark as an invalidation-disabled upper-bound measurement, not
+  submission-cache behavior or cache-correctness evidence.
+
+The normative resolver contract is defined in
+[SDK boundary and future dependency contract](evaluation-observation-layer-design-details.md#sdk-boundary-and-future-dependency-contract).
 
 ### Toolset and server state
 
@@ -134,7 +175,8 @@ Compare it with the next build request's environment snapshot.
 - bounded cache and eviction;
 - hit, miss, stale, and ineligible diagnostics;
 - PerfStar measurements for partially validated hits;
-- report showing how many real evaluations remain blocked by filesystem observations.
+- report showing how many real evaluations remain blocked by filesystem observations,
+  SDK resolver contracts, and other non-filesystem reasons.
 
 Until filesystem invalidation exists, cache hits for ordinary disk-backed projects remain
 experimental and must not be described as correctness-complete.
@@ -157,8 +199,10 @@ It must cover:
 Root/import files are part of this phase. Handling them earlier would require rereading
 or rehashing them on every hit, which is the overhead this design is intended to avoid.
 
-The filesystem milestone turns the partial prototype into the first correctness-capable
-cache prototype for normal projects.
+The filesystem milestone turns the partial prototype into the first
+correctness-capable cache prototype only for projects whose non-filesystem dependencies
+also satisfy their contracts. SDK-bearing projects remain excluded until the resolver
+dependency contract above is implemented.
 
 ## Decision metrics
 

@@ -44,12 +44,20 @@ The final future-reuse disposition is composed from those states:
 | --- | --- |
 | `Observed` with stable provenance and no side effect | `NoKnownReuseBlocker` |
 | `Observed` with missing provenance or an unreplayable side effect | `Blocked(NonCacheableReason)` |
+| SDK boundary observed without an accepted resolver dependency contract | `Blocked` by SDK admission policy |
 | `Incomplete`, dropped, truncated, or conflicting observation | `Blocked(IncompleteObservationReason)` |
 | `Unsupported` operation | `Blocked(UnsupportedReason)` |
 
 A provider generation is therefore not required to say what evaluation consumed. It is
 required only when that provider's result cannot otherwise be validated safely by a
 future cache.
+
+The current code emits `SdkResolutionWithoutCacheLifetime` only when SDK caching is
+disabled. That is an additional cache-entry-lifetime blocker; its absence is not
+resolver dependency provenance. Before production admission exists, the report or
+admission schema must represent the accepted contract for each SDK resolution and fail
+closed when it is missing. The current prototype instead keeps all non-completion
+implementation categories `Partial` and implements no eligibility or admission path.
 
 No unsupported or incomplete case should produce a user-facing warning. The report
 records a typed internal reason and evaluation continues normally.
@@ -62,7 +70,7 @@ The intended supported set is:
 - disk-backed sources and MSBuild-owned in-memory sources with content identity;
 - standard filesystem operations routed through observable providers;
 - members in the closed property-function classification;
-- SDK resolution treated as an opaque cache-owned request/result operation;
+- SDK request/result and existing cache-entry identity observed at the MSBuild boundary;
 - standard shared caches after their consumed semantic result and required provenance can
   be replayed.
 
@@ -71,10 +79,14 @@ The following always block future reuse:
 - `EnableAllPropertyFunctions` or its legacy environment escape hatch;
 - an invoked property-function member that is not in the closed classification;
 - an opaque external operation whose consumed result was not captured;
-- an evaluation-time side effect that cannot be replayed safely.
+- an evaluation-time side effect that cannot be replayed safely;
+- SDK resolution without a resolver dependency manifest or authoritative validity token.
 
-MSBuild Server and worker-node evaluation reuse the SDK result returned by their existing
-SDK caches. The observation layer does not validate resolver-internal dependencies.
+Existing SDK caches may reuse a result only within their owner-defined lifetime.
+Recording that cache entry reproduces the existing boundary behavior, but the
+observation layer does not validate resolver-internal dependencies. A separate
+correctness-capable evaluation cache, including a process-local MSBuild Server cache,
+must reject the SDK-bearing candidate until the resolver contract exists.
 
 A custom filesystem, directory cache, or source provider can be observed when its exact
 returned value reaches the native boundary. It remains non-cacheable unless the provider
@@ -135,8 +147,10 @@ not.
 
 ### 1. Evaluation request and process semantic snapshot
 
-These values are already known when evaluation starts. Record one effective snapshot
-before root source acquisition rather than intercepting repeated reads.
+These values are already known when evaluation starts. The target contract records one
+effective snapshot at the evaluation entry point rather than intercepting repeated
+reads. The current prototype attaches that snapshot in `Evaluator` after load-time root
+source capture.
 
 | Input | Kind | Observation seam | Record |
 | --- | --- | --- | --- |
@@ -217,8 +231,8 @@ reuse remains blocked until load-time source provenance is available.
 
 File-based `Project` and `ProjectInstance` entry points begin a source-load capture before
 root acquisition. If root parsing fails before `Evaluator` exists, the load owner creates
-a minimal failed report containing the root bytes and typed failure; request coverage is
-marked incomplete because the normal evaluator snapshot was never reached.
+a minimal failed report containing the raw-byte content hash and typed failure; request
+coverage is marked incomplete because the normal evaluator snapshot was never reached.
 
 ### 3. File content reads
 
@@ -521,7 +535,7 @@ records on paths where MSBuild did not use Registry.
 
 ### 15. SDK request and result
 
-`SdkResolutionObservation` treats SDK resolution as an opaque request-keyed cache.
+`SdkResolutionObservation` records SDK resolution as an opaque boundary operation.
 Resolver discovery, manifests, assemblies, file probes, and internal dependencies are not
 observed.
 
@@ -534,19 +548,39 @@ observed.
 | SDK-result host-path compatibility probe | evaluator `dotnet.exe` probe before `DOTNET_HOST_PATH` injection | Candidate path, positive/negative default-filesystem result, and injected value if any |
 | SDK-injected properties/items/environment values | evaluator data | Exact values and whether evaluation later consumed them |
 
-The SDK result cache owns reuse validity. MSBuild returns the stored `SdkResult` for the
-same cache key until that cache entry is cleared. Each observation records the complete
-resolver request separately from the narrower effective cache key, and
+MSBuild returns the stored `SdkResult` for the same cache key until that cache entry is
+cleared. Each observation records the complete resolver request separately from the
+narrower effective cache key, and
 `ISdkResolverCacheValidator.IsCacheEntryCurrent` validates that the exact owner, scope,
 epoch, key, and entry ID are still live. Clearing a submission, all caches, or an
-out-of-proc node cache makes the prior identity invalid.
+out-of-proc node cache makes the prior identity invalid. This validates cache-entry
+lifetime only; it does not validate resolver-internal dependencies.
 
 The current caches key primarily by SDK name with MSBuild-name case semantics; version,
 minimum version, project/solution path, interactivity, Visual Studio mode, failure mode,
 submission, and reference location remain request identity but do not falsely appear in
-the effective SDK-cache key. Disabling SDK caching leaves no validity owner and therefore
-marks the SDK observation incomplete. Resolver installation, workload, NuGet, manifest,
-and resolver-internal dependencies remain intentionally opaque within that cache lifetime.
+the effective SDK-cache key. Disabling SDK caching leaves no cache-entry lifetime owner,
+adds the `SdkResolutionWithoutCacheLifetime` reuse blocker, and marks the SDK category
+`Incomplete`. Resolver installation, workload, NuGet, manifest, and resolver-internal
+dependencies remain intentionally opaque.
+
+Future correctness-capable reuse requires the resolver to return either a complete
+dependency manifest or an authoritative validity token/generation with defined scope,
+lifetime, and invalidation semantics. Until then, any correctness-capable evaluation
+cache, including a process-local MSBuild Server cache, rejects SDK-bearing evaluations.
+
+A measurement-only experiment may bind to the exact SDK entry while its owner reports
+that entry current. Normal main-node build entries are submission-scoped and cleared at
+submission completion; worker-node entries are node-build-scoped. A retained
+`EvaluationContext` can keep its own entry current across independent evaluations
+because that service is not automatically cleared between them.
+
+Currentness is never sufficient for correctness-capable admission. The policy rejects a
+cross-build Server candidate without the resolver contract even if a context-owned entry
+still reports current. Such a shared-context benchmark is an invalidation-disabled
+upper-bound measurement, not submission-cache behavior or a resolver-dependency
+correctness claim. See
+[SDK boundary and future dependency contract](evaluation-observation-layer-design-details.md#sdk-boundary-and-future-dependency-contract).
 
 ### 16. Shared caches and provider provenance
 
@@ -563,16 +597,17 @@ can still be a future reuse blocker.
 | Host `IDirectoryCache` | Exact returned members, provider/cache identity, optional generation | Observed but non-cacheable without stable identity |
 | `ProjectRootElementCache` | PRE object/version and load-time `ProjectSourceStamp` | Object observed; disk reuse blocked without source stamp |
 | `Evaluator._fallbackSearchPathsCache` | Expanded extension root and memoized default-filesystem directory-existence Boolean | Incomplete when the process-static probe bypasses observation |
-| `CachingSdkResolverService` | Full SDK request, exact cached `SdkResult`, and hit/miss | Existing cache lifetime owns validity |
-| `OutOfProcNodeSdkResolverService` response cache | Full request/result and hit/miss | Existing cross-node cache lifetime owns validity |
+| `CachingSdkResolverService` | Full SDK request, exact cached `SdkResult`, hit/miss, and live entry identity | Boundary observed; correctness-capable reuse blocked without resolver dependency contract |
+| `OutOfProcNodeSdkResolverService` response cache | Full request/result, hit/miss, and live entry identity | Boundary observed; correctness-capable reuse blocked without resolver dependency contract |
 | Toolset/configuration caches | Effective toolset plus source records/generation | Non-cacheable without source provenance |
 | `ToolLocationHelper` static caches | Exact helper result plus underlying dependency manifest | Non-cacheable until instrumented |
 | Imported-environment snapshot/cache | Snapshot identity and exact property reads | Non-cacheable if the actual snapshot cannot be identified |
 
 Shared `EvaluationContext` use, including `ProjectGraph`, must not suppress observations.
 Cache hits either replay the original semantic record or let the owning boundary record
-the final result and attach an appropriate reuse blocker. SDK result caches are the
-exception: their existing cache lifetime owns validity.
+the final result and attach an appropriate reuse blocker. SDK result caches are not an
+exception: their entry lifetime is recorded, while resolver dependency provenance remains
+required for correctness-capable reuse.
 
 ### 17. Custom hosts and providers
 
@@ -671,7 +706,7 @@ candidates retain the order consumed by evaluation.
 | --- | --- |
 | Session lifetime | Per-evaluation session plus load-time source stamps; source loading occurs before the evaluator session but hashes bytes as they are consumed |
 | Request snapshot | Typed immutable snapshot includes global properties, load/evaluation policy, host/runtime semantics, feature waves, and result-affecting escape hatches |
-| Root/import sources | Parsed/parse-failure/load-failure outcome, raw-byte hash, encoding, and consumed last-write time for disk sources; malformed imports retain bytes through the original stream; object/link identity and version for in-memory/linked sources; opaque reader providers block reuse |
+| Root/import sources | Parsed/parse-failure/load-failure outcome, raw-byte hash, encoding, and consumed last-write time for disk sources; malformed imports finish hashing the remaining bytes through the original stream; object/link identity and version for in-memory/linked sources; opaque reader providers block reuse |
 | Full text/byte reads | Typed hash domains distinguish raw bytes, decoded text, decoded line sequences, and parsed XML |
 | Streams/readers | Marked incomplete unless a semantic owner or provider supplies full-content identity |
 | Probes | Provider-tagged file/directory/file-or-directory outcomes; swallowed I/O failures are recorded as ambiguous |
@@ -682,7 +717,7 @@ candidates retain the order consumed by evaluation.
 | `UsingTask` / project-cache registrations | Effective task registrations and VS project-cache registration side effects are recorded |
 | Environment and Registry | Imported/live/missing environment reads and both Registry expression/function paths are recorded; raw values remain internal |
 | Toolset | Effective toolset and properties are recorded; pre-session Registry/config provenance remains an explicit reuse blocker |
-| SDK | Complete request, final result payload, effective cache key, owner/scope/epoch/entry identity, hit/miss, and live-entry validator are recorded; resolver internals are opaque |
+| SDK | Complete request, final result payload, effective cache key, owner/scope/epoch/entry identity, hit/miss, and live-entry validator are recorded; resolver internals are opaque, so this is boundary completeness rather than cache-eligibility evidence |
 | Shared caches/providers | Final consumed values are recorded; caches/providers without replayable provenance or stable identity block reuse |
 | Property-function classification | Per-member fail-closed classifier records external effects, volatile values, side effects, and unknown members; pure calls are omitted |
 | Unsupported/coverage reporting | Schema/classification versions, per-category coverage/state, typed reasons, conflicts, partial operations, and atomic completion are present |
@@ -700,11 +735,14 @@ The native observer does not record:
 Those belong to execution/build caching or diagnostics, not project evaluation
 observation.
 
-## Recommended implementation order
+## Implementation sequence and remaining work
 
-This order closes the largest native gaps while keeping each step measurable:
+Steps 1-10 describe observation seams present in the current prototype. Their categories
+remain `Partial` until all supported call paths and required provenance are covered.
+Steps 11-14 describe remaining or ongoing contract and completeness work:
 
-1. Start the session at the evaluation entry point and capture the request/process
+1. Hash and stamp file-based roots during source acquisition, retain load-failure
+   metadata, then create the session in `Evaluator` and attach the request/process
    semantic snapshot.
 2. Add root/import source identities, parser/load-policy inputs, and PRE source-stamp
    replay.
@@ -716,13 +754,17 @@ This order closes the largest native gaps while keeping each step measurable:
 6. Add always-on imported-environment property lookup observation.
 7. Generate the closed per-member property-function classification and instrument
    filesystem, live-environment, ambient, volatile, and side-effect members.
-8. Add Registry expressions/functions and toolset Registry/configuration provenance.
+8. Add Registry expressions/functions and selected toolset observation; retain missing
+   pre-session Registry/configuration provenance as a blocker.
 9. Add SDK request/result/cache-hit observation and synthetic SDK sources.
-10. Keep the complete SDK request identity distinct from the effective SDK cache key and validate the recorded owner/scope/epoch/entry lifetime.
-11. Add shared-cache provenance for PRE, filesystem, glob, search, directory,
+10. Keep the complete SDK request identity distinct from the effective SDK cache key and
+    validate the recorded owner/scope/epoch/entry lifetime.
+11. Add the resolver dependency-manifest or authoritative-validity-token contract and
+    represent its acceptance for each SDK resolution.
+12. Add shared-cache provenance for PRE, filesystem, glob, search, directory,
     toolset, environment, and `ToolLocationHelper` caches.
-12. Add custom-provider contracts where custom-host support is required.
-13. Enforce the closed taxonomy with static checks, mutation tests, internal coverage
+13. Add custom-provider contracts where custom-host support is required.
+14. Enforce the closed taxonomy with static checks, mutation tests, internal coverage
     counters, and native/Detours differential tests.
 
 At every step, rerun the benchmark and report marginal and cumulative overhead. No cache,
