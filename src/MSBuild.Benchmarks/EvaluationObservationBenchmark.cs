@@ -77,8 +77,10 @@ public partial class EvaluationObservationBenchmark
             ? "<Project Sdk=\"Observed.Sdk\">"
             : "<Project>");
         project.AppendLine("  <Import Project=\"imported.props\" />");
+        project.AppendLine("  <Import Project=\"imported.props\" />");
         project.AppendLine("  <PropertyGroup>");
         project.AppendLine("    <RequestedProperty>$(ImportedProperty)</RequestedProperty>");
+        project.AppendLine("    <EscapedProperty>property%3Bvalue</EscapedProperty>");
         project.AppendLine("    <PresentMarker Condition=\"Exists('present.marker')\">true</PresentMarker>");
         project.AppendLine("    <MissingMarker Condition=\"Exists('missing.marker')\">true</MissingMarker>");
         if (Scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk)
@@ -87,15 +89,22 @@ public partial class EvaluationObservationBenchmark
             project.AppendLine("    <LiveEnvironment>$([System.Environment]::GetEnvironmentVariable('EVALUATION_OBSERVATION_BENCHMARK_ENV'))</LiveEnvironment>");
             project.AppendLine("    <Settings>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)settings.txt'))</Settings>");
             project.AppendLine("    <Above>$([MSBuild]::GetPathOfFileAbove('settings.txt', '$(MSBuildThisFileDirectory)'))</Above>");
-            project.AppendLine("    <Volatile>$([System.DateTime]::UtcNow)</Volatile>");
+            project.AppendLine("    <Volatile>$([System.DateTime]::UtcNow.Kind)</Volatile>");
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 project.AppendLine("    <Registry>$([MSBuild]::GetRegistryValue('HKEY_CURRENT_USER\\Software\\MSBuildObservationMissing', 'Value', 'fallback'))</Registry>");
             }
         }
         project.AppendLine("  </PropertyGroup>");
+        project.AppendLine("  <ItemDefinitionGroup>");
+        project.AppendLine("    <Ordered><Inherited>definition</Inherited><Override>default</Override></Ordered>");
+        project.AppendLine("  </ItemDefinitionGroup>");
         project.AppendLine("  <ItemGroup>");
         project.AppendLine("    <Compile Include=\"src/**/*.cs\" />");
+        project.AppendLine("    <Ordered Include=\"first\"><Position>1</Position></Ordered>");
+        project.AppendLine("    <Ordered Include=\"second\"><Position>2</Position><Override>item</Override></Ordered>");
+        project.AppendLine("    <Ordered Include=\"first\"><Position>3</Position></Ordered>");
+        project.AppendLine("    <Escaped Include=\"semi%3Bcolon\"><EscapedMetadata>metadata%3Bvalue</EscapedMetadata></Escaped>");
         if (Scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk)
         {
             project.AppendLine("    <Input Include=\"settings.txt\" />");
@@ -147,6 +156,7 @@ public partial class EvaluationObservationBenchmark
     {
         EvaluationObservationBenchmarkResult result = EvaluationObservationBenchmarkProcess.Run(
             mode,
+            Scenario,
             _projectPath,
             _root,
             EvaluationsPerProcess);
@@ -180,6 +190,11 @@ public partial class EvaluationObservationBenchmark
         private long _nativeFileReads;
         private long _nativeSemanticObservations;
         private long _nativeUniquePaths;
+        private long _semanticComparisons;
+        private long _semanticImports;
+        private long _semanticProperties;
+        private long _semanticItems;
+        private long _semanticMetadata;
         private long _detoursAccesses;
         private long _detoursUniquePaths;
         private long _nativeDetoursOverlap;
@@ -208,6 +223,11 @@ public partial class EvaluationObservationBenchmark
             _nativeFileReads += result.NativeFileReads;
             _nativeSemanticObservations += result.NativeSemanticObservations;
             _nativeUniquePaths += result.NativeUniquePaths;
+            _semanticComparisons += result.SemanticComparisons;
+            _semanticImports += result.SemanticImports;
+            _semanticProperties += result.SemanticProperties;
+            _semanticItems += result.SemanticItems;
+            _semanticMetadata += result.SemanticMetadata;
             _detoursAccesses += result.DetoursAccesses;
             _detoursUniquePaths += result.DetoursUniquePaths;
             _nativeDetoursOverlap += result.NativeDetoursOverlap;
@@ -241,6 +261,11 @@ public partial class EvaluationObservationBenchmark
                 Pair("NativeFileReads", Average(_nativeFileReads)),
                 Pair("NativeSemanticObservations", Average(_nativeSemanticObservations)),
                 Pair("NativeUniquePaths", Average(_nativeUniquePaths)),
+                Pair("SemanticComparisons", Average(_semanticComparisons)),
+                Pair("SemanticImports", Average(_semanticImports)),
+                Pair("SemanticProperties", Average(_semanticProperties)),
+                Pair("SemanticItems", Average(_semanticItems)),
+                Pair("SemanticMetadata", Average(_semanticMetadata)),
                 Pair("DetoursAccesses", Average(_detoursAccesses)),
                 Pair("DetoursUniquePaths", Average(_detoursUniquePaths)),
                 Pair("NativeDetoursOverlap", Average(_nativeDetoursOverlap)),

@@ -149,6 +149,11 @@ The same tip was measured with the existing evaluation-only benchmark:
 50 evaluations per child process, 10 aggregate samples, baseline versus native
 observation.
 
+These timing and allocation figures predate the semantic-equivalence preflight,
+duplicate-import fixture, and uniform duplicate-import recording now used by
+the harness. They remain historical observer-overhead evidence but are not
+directly reproducible with the current benchmark shape.
+
 | Scenario | Baseline, ms | Native, ms | Time overhead | Added allocation | Added per evaluation |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Typical | 239.946 | 263.569 | 23.623 ms / 9.85% | 715,373 B / 4.07% | 14,307 B |

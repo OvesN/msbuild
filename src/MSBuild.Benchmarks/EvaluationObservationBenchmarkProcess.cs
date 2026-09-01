@@ -12,6 +12,7 @@ internal static class EvaluationObservationBenchmarkProcess
 
     internal static EvaluationObservationBenchmarkResult Run(
         EvaluationObservationBenchmarkMode mode,
+        EvaluationObservationBenchmarkScenario scenario,
         string projectPath,
         string scenarioRoot,
         int iterations)
@@ -22,13 +23,13 @@ internal static class EvaluationObservationBenchmarkProcess
 
 #if NETFRAMEWORK
         executable = Path.ChangeExtension(assemblyPath, ".exe");
-        arguments = CreateHostArguments(projectPath, iterations, mode);
+        arguments = CreateHostArguments(projectPath, iterations, mode, scenario);
 #else
         executable = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
         arguments = string.Concat(
             Quote(assemblyPath),
             " ",
-            CreateHostArguments(projectPath, iterations, mode));
+            CreateHostArguments(projectPath, iterations, mode, scenario));
 #endif
 
         if ((mode & EvaluationObservationBenchmarkMode.Detours) != 0)
@@ -70,7 +71,8 @@ internal static class EvaluationObservationBenchmarkProcess
     private static string CreateHostArguments(
         string projectPath,
         int iterations,
-        EvaluationObservationBenchmarkMode mode)
+        EvaluationObservationBenchmarkMode mode,
+        EvaluationObservationBenchmarkScenario scenario)
     {
         return string.Join(
             " ",
@@ -80,7 +82,9 @@ internal static class EvaluationObservationBenchmarkProcess
             "--iterations",
             iterations.ToString(CultureInfo.InvariantCulture),
             "--mode",
-            mode.ToString());
+            mode.ToString(),
+            "--scenario",
+            scenario.ToString());
     }
 
     internal static string Quote(string value) => string.Concat("\"", value.Replace("\"", "\\\""), "\"");

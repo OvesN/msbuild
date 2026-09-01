@@ -50,6 +50,11 @@ internal sealed class EvaluationObservationBenchmarkResult
     internal int NativeFileReads { get; init; }
     internal int NativeSemanticObservations { get; init; }
     internal int NativeUniquePaths { get; init; }
+    internal int SemanticComparisons { get; init; }
+    internal int SemanticImports { get; init; }
+    internal int SemanticProperties { get; init; }
+    internal int SemanticItems { get; init; }
+    internal int SemanticMetadata { get; init; }
     internal int DetoursAccesses { get; init; }
     internal int DetoursUniquePaths { get; init; }
     internal int NativeDetoursOverlap { get; init; }
@@ -76,6 +81,11 @@ internal sealed class EvaluationObservationBenchmarkResult
             Pair(nameof(NativeFileReads), NativeFileReads),
             Pair(nameof(NativeSemanticObservations), NativeSemanticObservations),
             Pair(nameof(NativeUniquePaths), NativeUniquePaths),
+            Pair(nameof(SemanticComparisons), SemanticComparisons),
+            Pair(nameof(SemanticImports), SemanticImports),
+            Pair(nameof(SemanticProperties), SemanticProperties),
+            Pair(nameof(SemanticItems), SemanticItems),
+            Pair(nameof(SemanticMetadata), SemanticMetadata),
             Pair(nameof(DetoursAccesses), DetoursAccesses),
             Pair(nameof(DetoursUniquePaths), DetoursUniquePaths),
             Pair(nameof(NativeDetoursOverlap), NativeDetoursOverlap),
@@ -133,6 +143,11 @@ internal sealed class EvaluationObservationBenchmarkResult
             NativeFileReads = checked((int)Get(nameof(NativeFileReads))),
             NativeSemanticObservations = checked((int)Get(nameof(NativeSemanticObservations))),
             NativeUniquePaths = checked((int)Get(nameof(NativeUniquePaths))),
+            SemanticComparisons = checked((int)Get(nameof(SemanticComparisons))),
+            SemanticImports = checked((int)Get(nameof(SemanticImports))),
+            SemanticProperties = checked((int)Get(nameof(SemanticProperties))),
+            SemanticItems = checked((int)Get(nameof(SemanticItems))),
+            SemanticMetadata = checked((int)Get(nameof(SemanticMetadata))),
             DetoursAccesses = checked((int)Get(nameof(DetoursAccesses))),
             DetoursUniquePaths = checked((int)Get(nameof(DetoursUniquePaths))),
             NativeDetoursOverlap = checked((int)Get(nameof(NativeDetoursOverlap))),

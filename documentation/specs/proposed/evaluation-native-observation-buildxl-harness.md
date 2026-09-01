@@ -51,10 +51,46 @@ Run the combined native and Detours benchmark:
 ```
 
 The benchmark creates deterministic synthetic projects for the `Typical`,
-`GlobHeavy`, and `AmbientAndSdk` scenarios. Each child process performs one
-unobserved warmup before the marked measurement window. The Detours broker
-fails if injection fails, either marker is missing, the child fails, or no
-filesystem accesses are reported.
+`GlobHeavy`, and `AmbientAndSdk` scenarios. Before the marked measurement
+window, every child process performs one observer-disabled reference
+evaluation and one observer-enabled evaluation, then compares their semantic
+results. All preflight and measured evaluations use
+`RecordDuplicateButNotCircularImports`. The comparison is outside
+`EvaluationTicks`, and its snapshots become unreachable before the forced GC
+and measurement. Baseline and native modes therefore receive the same
+preflight and JIT preparation. The Detours broker fails if injection fails,
+either marker is missing, the child fails, or no filesystem accesses are
+reported.
+
+The semantic comparison covers:
+
+- import paths in evaluation order, including duplicate imports;
+- all evaluated properties, sorted by MSBuild name semantics;
+- item types in deterministic name order, preserving item order and duplicates
+  within each type; and
+- effective custom metadata for every item, sorted by MSBuild name semantics.
+
+Values are compared in their escaped form. A mismatch fails with its category
+and location. Property, item, and metadata values are represented only by
+length and first-difference position rather than copied into logs; import
+mismatches also identify the file names. The fixtures assert two recorded
+imports of the same project, ordered duplicate items, and escaped property,
+item, and metadata values so those checks cannot pass vacuously.
+`SemanticComparisons` is `1` for every mode, and the `SemanticImports`,
+`SemanticProperties`, `SemanticItems`, and `SemanticMetadata` fields report the
+compared cardinalities. Benchmark setup also verifies that the comparer
+detects independent mutations in each category. Targets and target bodies,
+`UsingTask` registrations, and `ItemDefinitionGroup` declarations themselves
+are outside this semantic comparison; effective item-definition metadata is
+included. The duplicate import deliberately adds the same symmetric
+duplicate-detection and recording work to every measured mode so the
+import-multiplicity check is non-vacuous.
+
+For Detours modes, the observer-enabled preflight also retains and processes
+detailed paths, matching the higher-risk observation configuration used by the
+combined measurement. The host rejects process-wide file-existence or
+enumeration caches because they could make the second evaluation depend on
+state populated by the first.
 
 The harness itself performs a literal comparison of normalized path sets. It
 does not infer semantic ownership. In particular, BuildXL commonly reports
@@ -89,6 +125,12 @@ multiple iterations do not inflate the path set.
 `NativeAndDetours` retains detailed native paths and therefore is a coverage
 diagnostic, not a native-observer overhead measurement. Use the same-job
 `Baseline` versus `Native` benchmarks to measure observation overhead.
+`PrivateBytes` and `PeakWorkingSetBytes` are whole-process values and include
+the common observer-enabled semantic preflight in every mode; do not use those
+two fields to infer incremental observer memory. `EvaluationTicks` excludes
+the preflight. `RetainedManagedBytes` is measured around the evaluation loop.
+`AllocatedManagedBytes` is also a loop delta on .NET, but is unavailable and
+reported as `0` on `net472`.
 
 ## Interpretation
 
@@ -98,9 +140,10 @@ Do not classify directories as harmless merely because they are traversal
 intermediates: directory membership can affect a glob.
 
 SDK resolver internals are outside the prototype contract until resolvers can
-report their dependencies. The harness does not yet compare complete evaluated
-imports, properties, items, and metadata; that semantic equivalence check is a
-separate requirement.
+report their dependencies. The semantic check compares observer-disabled and
+observer-enabled evaluations in the same child process; it isolates the native
+observer's effect, but does not prove equivalence between sandboxed and
+unsandboxed processes.
 
 See also:
 

@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
 using Microsoft.Build.BackEnd.SdkResolution;
+using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Definition;
 using Microsoft.Build.Engine.UnitTests.InstanceFromRemote;
@@ -361,23 +362,47 @@ namespace Microsoft.Build.UnitTests.Definition
         [Fact]
         public void EvaluationObservationDoesNotChangeEvaluatedState()
         {
+            _env.SetEnvironmentVariable("MsBuildCacheFileExistence", null);
+            _env.SetEnvironmentVariable("MsBuildCacheFileEnumerations", null);
             _env.SetEnvironmentVariable("OBSERVATION_EQUIVALENCE_ENV", "equivalent");
             _env.CreateFile("state.marker", string.Empty);
             _env.CreateFile("State.cs", string.Empty);
             _env.CreateFile("state.txt", "state-content");
+            string importedProject = _env.CreateFile(
+                "state.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <ImportedState>imported</ImportedState>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
             string projectFile = _env.CreateFile(
                 "state.proj",
                 """
                 <Project>
+                  <Import Project="state.props" />
+                  <Import Project="state.props" />
                   <PropertyGroup Condition="Exists('state.marker')">
                     <Observed>true</Observed>
                     <Environment>$(OBSERVATION_EQUIVALENCE_ENV)</Environment>
                     <Content>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)state.txt'))</Content>
+                    <EscapedProperty>property%3Bvalue</EscapedProperty>
                   </PropertyGroup>
+                  <ItemDefinitionGroup>
+                    <Ordered>
+                      <Inherited>definition</Inherited>
+                      <Override>default</Override>
+                    </Ordered>
+                  </ItemDefinitionGroup>
                   <ItemGroup>
                     <Compile Include="*.cs" />
                     <Input Include="state.txt" />
                     <MetadataValue Include="@(Input->'%(ModifiedTime)')" />
+                    <Ordered Include="first"><Position>1</Position></Ordered>
+                    <Ordered Include="second"><Position>2</Position><Override>item</Override></Ordered>
+                    <Ordered Include="first"><Position>3</Position></Ordered>
+                    <Escaped Include="semi%3Bcolon"><EscapedMetadata>metadata%3Bvalue</EscapedMetadata></Escaped>
                   </ItemGroup>
                 </Project>
                 """.Cleanup()).Path;
@@ -388,6 +413,7 @@ namespace Microsoft.Build.UnitTests.Definition
                 baseline = Project.FromFile(projectFile, new ProjectOptions
                 {
                     ProjectCollection = _env.CreateProjectCollection().Collection,
+                    LoadSettings = ProjectLoadSettings.RecordDuplicateButNotCircularImports,
                 });
             }
 
@@ -400,42 +426,110 @@ namespace Microsoft.Build.UnitTests.Definition
                 observed = Project.FromFile(projectFile, new ProjectOptions
                 {
                     ProjectCollection = _env.CreateProjectCollection().Collection,
+                    LoadSettings = ProjectLoadSettings.RecordDuplicateButNotCircularImports,
                 });
             }
 
             report.ShouldNotBeNull();
-            observed.Properties
-                .Select(property => string.Concat(property.Name, "=", property.EvaluatedValue))
-                .OrderBy(static property => property, StringComparer.OrdinalIgnoreCase)
-                .ShouldBe(
-                    baseline.Properties
-                        .Select(property => string.Concat(property.Name, "=", property.EvaluatedValue))
-                        .OrderBy(static property => property, StringComparer.OrdinalIgnoreCase));
-            observed.Items
-                .Select(item => string.Concat(
-                    item.ItemType,
-                    "|",
-                    item.EvaluatedInclude,
-                    "|",
-                    string.Join(
-                        ";",
-                        item.Metadata
-                            .Select(metadata => string.Concat(metadata.Name, "=", metadata.EvaluatedValue))
-                            .OrderBy(static metadata => metadata, StringComparer.OrdinalIgnoreCase))))
-                .OrderBy(static item => item, StringComparer.OrdinalIgnoreCase)
-                .ShouldBe(
-                    baseline.Items
-                        .Select(item => string.Concat(
-                            item.ItemType,
-                            "|",
-                            item.EvaluatedInclude,
-                            "|",
-                            string.Join(
-                                ";",
-                                item.Metadata
-                                    .Select(metadata => string.Concat(metadata.Name, "=", metadata.EvaluatedValue))
-                                    .OrderBy(static metadata => metadata, StringComparer.OrdinalIgnoreCase))))
-                        .OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+            report.ProjectSources.ShouldNotBeEmpty();
+            baseline.ImportsIncludingDuplicates
+                .Select(static import => import.ImportedProject.FullPath)
+                .ShouldBe([importedProject, importedProject]);
+            baseline.GetItems("Ordered")
+                .Select(static item => item.EvaluatedInclude)
+                .ShouldBe(["first", "second", "first"]);
+            baseline.GetItems("Ordered")
+                .Select(static item => item.GetMetadataValue("Position"))
+                .ShouldBe(["1", "2", "3"]);
+            baseline.GetItems("Ordered")
+                .Select(static item => item.GetMetadataValue("Inherited"))
+                .ShouldBe(["definition", "definition", "definition"]);
+            baseline.GetItems("Ordered")
+                .Select(static item => item.GetMetadataValue("Override"))
+                .ShouldBe(["default", "item", "default"]);
+            ((IProperty)baseline.GetProperty("EscapedProperty"))
+                .EvaluatedValueEscaped.ShouldBe("property%3Bvalue");
+            ProjectItem escapedItem = baseline.GetItems("Escaped").ShouldHaveSingleItem();
+            ((IItem)escapedItem).EvaluatedIncludeEscaped.ShouldBe("semi%3Bcolon");
+            ((IItem)escapedItem).GetMetadataValueEscaped("EscapedMetadata").ShouldBe("metadata%3Bvalue");
+
+            AssertEquivalentEvaluatedState(baseline, observed);
+        }
+
+        private static void AssertEquivalentEvaluatedState(Project reference, Project observed)
+        {
+            observed.ImportsIncludingDuplicates
+                .Select(static import => import.ImportedProject.FullPath)
+                .ShouldBe(reference.ImportsIncludingDuplicates.Select(static import => import.ImportedProject.FullPath));
+
+            ProjectProperty[] referenceProperties = reference.Properties
+                .OrderBy(static property => property.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(static property => property.Name, StringComparer.Ordinal)
+                .ToArray();
+            ProjectProperty[] observedProperties = observed.Properties
+                .OrderBy(static property => property.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(static property => property.Name, StringComparer.Ordinal)
+                .ToArray();
+            observedProperties.Length.ShouldBe(referenceProperties.Length);
+            for (int propertyIndex = 0; propertyIndex < referenceProperties.Length; propertyIndex++)
+            {
+                ProjectProperty referenceProperty = referenceProperties[propertyIndex];
+                ProjectProperty observedProperty = observedProperties[propertyIndex];
+                MSBuildNameIgnoreCaseComparer.Default
+                    .Equals(observedProperty.Name, referenceProperty.Name)
+                    .ShouldBeTrue();
+                ((IProperty)observedProperty).EvaluatedValueEscaped
+                    .ShouldBe(((IProperty)referenceProperty).EvaluatedValueEscaped);
+            }
+
+            string[] referenceItemTypes = reference.ItemTypes
+                .OrderBy(static itemType => itemType, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(static itemType => itemType, StringComparer.Ordinal)
+                .ToArray();
+            string[] observedItemTypes = observed.ItemTypes
+                .OrderBy(static itemType => itemType, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(static itemType => itemType, StringComparer.Ordinal)
+                .ToArray();
+            observedItemTypes.Length.ShouldBe(referenceItemTypes.Length);
+            for (int itemTypeIndex = 0; itemTypeIndex < referenceItemTypes.Length; itemTypeIndex++)
+            {
+                string referenceItemType = referenceItemTypes[itemTypeIndex];
+                string observedItemType = observedItemTypes[itemTypeIndex];
+                MSBuildNameIgnoreCaseComparer.Default
+                    .Equals(observedItemType, referenceItemType)
+                    .ShouldBeTrue();
+
+                ProjectItem[] referenceItems = reference.GetItems(referenceItemType).ToArray();
+                ProjectItem[] observedItems = observed.GetItems(observedItemType).ToArray();
+                observedItems.Length.ShouldBe(referenceItems.Length);
+                for (int itemIndex = 0; itemIndex < referenceItems.Length; itemIndex++)
+                {
+                    ProjectItem referenceItem = referenceItems[itemIndex];
+                    ProjectItem observedItem = observedItems[itemIndex];
+                    ((IItem)observedItem).EvaluatedIncludeEscaped
+                        .ShouldBe(((IItem)referenceItem).EvaluatedIncludeEscaped);
+
+                    ProjectMetadata[] referenceMetadata = referenceItem.Metadata
+                        .OrderBy(static metadata => metadata.Name, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(static metadata => metadata.Name, StringComparer.Ordinal)
+                        .ToArray();
+                    ProjectMetadata[] observedMetadata = observedItem.Metadata
+                        .OrderBy(static metadata => metadata.Name, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(static metadata => metadata.Name, StringComparer.Ordinal)
+                        .ToArray();
+                    observedMetadata.Length.ShouldBe(referenceMetadata.Length);
+                    for (int metadataIndex = 0; metadataIndex < referenceMetadata.Length; metadataIndex++)
+                    {
+                        ProjectMetadata referenceMetadatum = referenceMetadata[metadataIndex];
+                        ProjectMetadata observedMetadatum = observedMetadata[metadataIndex];
+                        MSBuildNameIgnoreCaseComparer.Default
+                            .Equals(observedMetadatum.Name, referenceMetadatum.Name)
+                            .ShouldBeTrue();
+                        observedMetadatum.EvaluatedValueEscaped
+                            .ShouldBe(referenceMetadatum.EvaluatedValueEscaped);
+                    }
+                }
+            }
         }
 
         [WindowsFullFrameworkOnlyFact]
