@@ -1,6 +1,7 @@
 # In-memory evaluation cache prototype roadmap
 
-Status: proposed  
+Status: proposed
+
 Target: partial invalidation prototype by October 20
 
 Related:

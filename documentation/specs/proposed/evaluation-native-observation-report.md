@@ -100,8 +100,9 @@ cache lookup/invalidation.
 
 ## Current Total Overhead
 
-Measured on September 1, 2026 at PR head `77a2590fd4` using .NET SDK
-`11.0.100-preview.7.26360.111` on a Windows Hyper-V VM.
+Measured on September 1, 2026 after rebasing the PR onto `main` at `c4d2a5f766`, using
+.NET SDK `11.0.100-rc.1.26420.103` on a Windows Hyper-V VM. Only report documentation
+changed after measurement.
 
 ### Synthetic evaluation benchmark
 
@@ -113,17 +114,20 @@ host's timed evaluation loop; BenchmarkDotNet's outer method also includes child
 startup and semantic preflight.
 
 The `±` values are pooled standard deviations of the 54 child-process samples per cell.
+They are not standard errors or confidence intervals for the cell means or deltas.
 
 | Scenario | Disabled mean ± SD, 50 evaluations | Enabled mean ± SD, 50 evaluations | Total time overhead | Added allocation per evaluation |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 256.473 ± 12.751 ms | 271.104 ± 13.129 ms | +14.632 ms / **+5.7%** | 15.0 KiB / +4.1% |
-| Glob-heavy | 497.000 ± 36.151 ms | 518.490 ± 33.917 ms | +21.490 ms / **+4.3%** | 15.4 KiB / +1.0% |
-| Ambient/SDK | 343.631 ± 21.307 ms | 375.711 ± 15.468 ms | +32.080 ms / **+9.3%** | 34.0 KiB / +7.7% |
+| Typical | 251.891 ± 13.198 ms | 258.035 ± 9.156 ms | +6.144 ms / **+2.4%** | 15.9 KiB / +4.4% |
+| Glob-heavy | 409.882 ± 14.486 ms | 439.238 ± 18.084 ms | +29.355 ms / **+7.2%** | 12.2 KiB / +0.8% |
+| Ambient/SDK | 313.047 ± 11.691 ms | 350.710 ± 17.192 ms | +37.663 ms / **+12.0%** | 32.0 KiB / +7.3% |
 
-BenchmarkDotNet's process-level ratios were 1.02, 1.03, and 1.04 respectively. They are
-only a cross-check because fixed process startup and preflight dilute the observation
-cost. Both Baseline launches ran before both Native launches for each scenario, so
-fixed-order drift remains a limitation.
+BenchmarkDotNet's process-level ratios were 0.99, 1.03, and 1.06 respectively. Relative
+to the child-loop deltas, non-loop time shifted by approximately -14 ms, -2 ms, and
++20 ms. That variation is treated as process-level noise, not corroboration; the Typical
+process-level comparison is slightly negative. Both Baseline launches ran before both
+Native launches for each scenario, so fixed-order drift remains a limitation and
+statistical significance is not assessed.
 
 ### Orchard Core warm no-op build
 
@@ -138,18 +142,22 @@ enabled cell, so the samples are unpaired and susceptible to VM drift.
 
 | Run | Observation disabled | Observation enabled | Delta |
 | --- | ---: | ---: | ---: |
-| 1 | 5.218 s | 5.245 s | +27 ms / +0.5% |
-| 2 | 4.970 s | 5.179 s | +209 ms / +4.2% |
-| 3 | 5.004 s | 5.177 s | +173 ms / +3.5% |
-| **Aggregate means** | **5.064 s** | **5.200 s** | **+136 ms / +2.7%** |
+| 1 | 5.567 s | 5.791 s | +224 ms / +4.0% |
+| 2 | 5.619 s | 5.781 s | +162 ms / +2.9% |
+| 3 | 5.791 s | 5.761 s | -30 ms / -0.5% |
+| **Aggregate means** | **5.659 s** | **5.778 s** | **+119 ms / +2.1%** |
 
 The Hyper-V run-to-run range is wide and fixed-order drift remains a confounder. The
 aggregate is a descriptive central estimate; no per-category or precise causal
-attribution is inferred. Isolated synthetic evaluation loops measured 4.3-9.3% of
-evaluation-loop time. The three-run Orchard aggregate measured 2.7% of total warm no-op
-build wall time, with individual run deltas from +0.5% to +4.2%; the aggregate is not
+attribution is inferred. Isolated synthetic evaluation loops measured 2.4-12.0% of
+evaluation-loop time. The three-run Orchard aggregate measured 2.1% of total warm no-op
+build wall time, with individual run deltas from -0.5% to +4.0%; the aggregate is not
 treated as a statistically established across-run effect. These percentages have
 different denominators and are not directly comparable.
+
+Monitoring mode retained outliers. Median-based Orchard deltas were +202 ms, +173 ms,
+and +130 ms across the three runs. Run 3's negative mean delta is caused by two retained
+baseline stalls at 6.18 s and 7.31 s; its median delta is +130 ms.
 
 See [evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md)
 for exact commands, raw run summaries, and measurement limitations.

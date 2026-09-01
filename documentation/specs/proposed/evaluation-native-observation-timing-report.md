@@ -6,12 +6,14 @@ This report measures only the total cost of enabling the native evaluation obser
 layer. It does not attribute cost to individual observation categories. The synthetic
 enabled cell also includes the benchmark callback that counts report records.
 
-Measurements were collected on September 1, 2026 from PR head `77a2590fd4` with:
+Measurements were collected on September 1, 2026 after rebasing the PR onto `main` at
+`c4d2a5f766`. Only report documentation changed after measurement.
 
 - Windows 11 `10.0.26200.9106` under Hyper-V;
 - AMD EPYC 7763 virtual CPU, 8 cores and 16 logical processors;
 - x64 .NET `11.0.0`;
-- SDK `11.0.100-preview.7.26360.111`.
+- SDK `11.0.100-rc.1.26420.103`;
+- BenchmarkDotNet `0.16.0-preview.1`.
 
 The synthetic benchmark toggles observation through its test-only
 `EvaluationObservationNativeBridge`. The Orchard benchmark toggles only
@@ -36,22 +38,29 @@ The `±` values are pooled standard deviations of the 54 child-process samples p
 
 | Scenario | Disabled mean ± SD, 50 evaluations | Enabled mean ± SD, 50 evaluations | Delta | Added allocation per evaluation |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 256.473 ± 12.751 ms | 271.104 ± 13.129 ms | +14.632 ms / **+5.7%** | 15.0 KiB / +4.1% |
-| Glob-heavy | 497.000 ± 36.151 ms | 518.490 ± 33.917 ms | +21.490 ms / **+4.3%** | 15.4 KiB / +1.0% |
-| Ambient/SDK | 343.631 ± 21.307 ms | 375.711 ± 15.468 ms | +32.080 ms / **+9.3%** | 34.0 KiB / +7.7% |
+| Typical | 251.891 ± 13.198 ms | 258.035 ± 9.156 ms | +6.144 ms / **+2.4%** | 15.9 KiB / +4.4% |
+| Glob-heavy | 409.882 ± 14.486 ms | 439.238 ± 18.084 ms | +29.355 ms / **+7.2%** | 12.2 KiB / +0.8% |
+| Ambient/SDK | 313.047 ± 11.691 ms | 350.710 ± 17.192 ms | +37.663 ms / **+12.0%** | 32.0 KiB / +7.3% |
 
-The corresponding BenchmarkDotNet method ratios were 1.02, 1.03, and 1.04. Those ratios
-include fixed child-process startup and preflight, so they are only a process-level
-cross-check rather than the primary observation-overhead result.
+The corresponding BenchmarkDotNet method ratios were 0.99, 1.03, and 1.06. Relative to
+the child-loop deltas, non-loop time shifted by approximately -14 ms, -2 ms, and +20 ms.
+That variation is treated as process-level noise, not corroboration. In particular, the
+Typical process-level comparison is slightly negative and does not corroborate its
++2.4% child-loop delta.
+
+The process-level ratios use measured iterations after BenchmarkDotNet outlier handling;
+the child summaries include all 54 jitting, warmup, and measured invocations per cell.
+The residuals are therefore approximate noise indicators, not a decomposition of
+non-loop work. Statistical significance is not assessed because the cells also ran in
+fixed order.
 
 BenchmarkDotNet executed both Baseline launches before both Native launches for each
 scenario. Fixed-order drift therefore remains a limitation for the synthetic comparison
 as well.
 
 The table is backed by the local, uncommitted
-`synthetic-bdn-project\MSBuild.Benchmarks.EvaluationObservationBenchmark-20260901-183841.log`
-and its exported results. An earlier direct-DLL attempt under `synthetic-bdn` executed
-zero benchmarks and is excluded.
+`synthetic-bdn-project\MSBuild.Benchmarks.EvaluationObservationBenchmark-20260901-210841.log`
+and its exported results.
 
 ## Orchard Core Warm No-Op Build
 
@@ -76,15 +85,19 @@ confidence intervals, not standard deviations.
 
 | Run | Disabled mean ± error | Enabled mean ± error | Delta |
 | --- | ---: | ---: | ---: |
-| 1 | 5.218 s ± 0.171 s | 5.245 s ± 0.486 s | +27 ms / +0.5% |
-| 2 | 4.970 s ± 0.122 s | 5.179 s ± 0.195 s | +209 ms / +4.2% |
-| 3 | 5.004 s ± 0.119 s | 5.177 s ± 0.223 s | +173 ms / +3.5% |
-| **Aggregate means** | **5.064 s** | **5.200 s** | **+136 ms / +2.7%** |
+| 1 | 5.567 s ± 0.063 s | 5.791 s ± 0.176 s | +224 ms / +4.0% |
+| 2 | 5.619 s ± 0.073 s | 5.781 s ± 0.082 s | +162 ms / +2.9% |
+| 3 | 5.791 s ± 0.655 s | 5.761 s ± 0.070 s | -30 ms / -0.5% |
+| **Aggregate means** | **5.659 s** | **5.778 s** | **+119 ms / +2.1%** |
 
 The three runs show substantial Hyper-V noise and fixed-order drift remains a confounder.
-The individual deltas range from +0.5% to +4.2%, with run 1 carrying substantially wider
-uncertainty. The equal-sample aggregate is a descriptive central estimate, not precise
-causal attribution or a statistically established across-run effect.
+The individual deltas range from -0.5% to +4.0%, with run 3 carrying substantially wider
+baseline uncertainty. The equal-sample aggregate is a descriptive central estimate, not
+precise causal attribution or a statistically established across-run effect.
+
+Monitoring mode retains outliers. Median-based deltas were +202 ms, +173 ms, and
++130 ms across the three runs, all positive. Run 3's negative mean delta is caused by two
+retained baseline stalls at 6.18 s and 7.31 s; its median delta is +130 ms.
 
 ## Reproduction
 
@@ -105,6 +118,15 @@ Both Orchard cells must use:
 <msbuild-root>\artifacts\bin\bootstrap\core\dotnet.exe
 ```
 
+From the OrchardCore root, verify that this bootstrap selects the freshly built SDK:
+
+```powershell
+<msbuild-root>\artifacts\bin\bootstrap\core\dotnet.exe --version
+```
+
+The expected output for this measurement is `11.0.100-rc.1.26420.103`, matching the
+MSBuild repository's `global.json`.
+
 Build the benchmark project:
 
 ```powershell
@@ -121,9 +143,55 @@ Run the synthetic benchmark:
   --artifacts "C:\benchmarks\observer-total\synthetic-bdn-project"
 ```
 
-Create the Orchard configuration described in
-[`OrchardCoreNoOpBuildBenchmark.md`](../../../src/MSBuild.Benchmarks/OrchardCoreNoOpBuildBenchmark.md),
-using the same bootstrap `dotnet.exe` in both cells, then run:
+Create the Orchard configuration below, using the same bootstrap `dotnet.exe` in both
+cells:
+
+```powershell
+git -C C:\OrchardCore switch --detach e3f8acb327a95f1dec6e75cefccaef2ad5eefb45
+```
+
+```json
+{
+  "orchardCoreRoot": "C:\\OrchardCore",
+  "buildPath": "src\\OrchardCore\\OrchardCore\\OrchardCore.csproj",
+  "configuration": "Release",
+  "targetFramework": "net10.0",
+  "before": {
+    "dotnetPath": "C:\\path\\to\\msbuild\\artifacts\\bin\\bootstrap\\core\\dotnet.exe",
+    "workingDirectory": "C:\\OrchardCore",
+    "environmentVariables": {
+      "MSBUILDPROTOTYPEEVALUATIONOBSERVATION": null
+    },
+    "restoreArguments": [
+      "-p:RestoreUseStaticGraphEvaluation=false",
+      "--ignore-failed-sources"
+    ],
+    "buildArguments": [
+      "-p:NuGetAudit=false"
+    ],
+    "timeoutMinutes": 30
+  },
+  "after": {
+    "dotnetPath": "C:\\path\\to\\msbuild\\artifacts\\bin\\bootstrap\\core\\dotnet.exe",
+    "workingDirectory": "C:\\OrchardCore",
+    "environmentVariables": {
+      "MSBUILDPROTOTYPEEVALUATIONOBSERVATION": "1"
+    },
+    "restoreArguments": [
+      "-p:RestoreUseStaticGraphEvaluation=false",
+      "--ignore-failed-sources"
+    ],
+    "buildArguments": [
+      "-p:NuGetAudit=false"
+    ],
+    "timeoutMinutes": 30
+  }
+}
+```
+
+The schema is also documented in
+[`OrchardCoreNoOpBuildBenchmark.md`](../../../src/MSBuild.Benchmarks/OrchardCoreNoOpBuildBenchmark.md).
+Then run:
 
 ```powershell
 $env:MSBUILD_ORCHARD_NOOP_BUILD_CONFIG = "C:\benchmarks\orchard-noop-build.json"
@@ -143,16 +211,19 @@ The local, uncommitted backing result directories for this report are
 ## Interpretation
 
 - Total observation overhead is scenario-dependent.
-- Isolated synthetic evaluation loops measured **+4.3% to +9.3% of evaluation-loop
+- Isolated synthetic evaluation loops measured **+2.4% to +12.0% of evaluation-loop
   time**.
-- Orchard run deltas ranged from +27 ms to +209 ms. Their descriptive mean was +136 ms
-  / +2.7% of total warm no-op build wall time, but it is not treated as a statistically
+- Orchard run deltas ranged from -30 ms to +224 ms. Their descriptive mean was +119 ms
+  / +2.1% of total warm no-op build wall time, but it is not treated as a statistically
   established across-run effect.
-- Synthetic allocation increased by approximately **15-34 KiB per evaluation**.
+- Synthetic allocation increased by approximately **12-32 KiB per evaluation**.
 - These totals do not identify which observation category should be optimized.
 
 The synthetic and Orchard percentages have different denominators and are not directly
 comparable.
+
+The synthetic `±` values are sample standard deviations, not standard errors or
+confidence intervals for the cell means or deltas.
 
 The measurements cover observation only. They exclude cache lookup, validation,
 serialization, result materialization, concurrency effects, SDK resolver dependency
