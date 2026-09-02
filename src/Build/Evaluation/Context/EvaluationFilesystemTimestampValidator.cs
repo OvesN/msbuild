@@ -51,7 +51,9 @@ namespace Microsoft.Build.Evaluation.Context
         UnsupportedMetadata,
         FailedFilesystemObservation,
         MissingTimestampObservation,
+        MissingExistenceObservation,
         ConflictingTimestamp,
+        ExistenceChanged,
         FilesystemError,
     }
 
@@ -60,21 +62,18 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationFilesystemTimestampEntry(
             string path,
             long lastWriteTimeUtcTicks,
-            bool exists,
-            EvaluationPathKind kind,
+            EvaluationPathExistence existence,
             EvaluationFilesystemTimestampSource sources)
         {
             Path = path;
             LastWriteTimeUtcTicks = lastWriteTimeUtcTicks;
-            Exists = exists;
-            Kind = kind;
+            Existence = existence;
             Sources = sources;
         }
 
         internal string Path { get; }
         internal long LastWriteTimeUtcTicks { get; }
-        internal bool Exists { get; }
-        internal EvaluationPathKind Kind { get; }
+        internal EvaluationPathExistence Existence { get; }
         internal EvaluationFilesystemTimestampSource Sources { get; }
     }
 
@@ -347,8 +346,7 @@ namespace Microsoft.Build.Evaluation.Context
                 if (!builder.TryAddExpected(
                         observation.Path,
                         observation.LastWriteTimeUtcTicks,
-                        observation.Exists,
-                        observation.Kind,
+                        observation.Existence,
                         observation.Sources,
                         observation.Provider))
                 {
@@ -363,8 +361,9 @@ namespace Microsoft.Build.Evaluation.Context
                     if (!builder.TryAddExpected(
                             observation.Path,
                             observation.Value,
-                            observation.Value != s_missingTimestampUtcTicks,
-                            EvaluationPathKind.FileOrDirectory,
+                            EvaluationPathExistence.Create(
+                                EvaluationPathKind.FileOrDirectory,
+                                observation.Value != s_missingTimestampUtcTicks),
                             EvaluationFilesystemTimestampSource.Metadata,
                             observation.Provider))
                     {
@@ -391,7 +390,9 @@ namespace Microsoft.Build.Evaluation.Context
                         observation.Path,
                         observation.Provider,
                         EvaluationFilesystemTimestampSource.FileRead |
-                            EvaluationFilesystemTimestampSource.ProjectSource))
+                            EvaluationFilesystemTimestampSource.ProjectSource,
+                        EvaluationPathKind.File,
+                        requiredExists: true))
                 {
                     return builder.CreateFailureResult();
                 }
@@ -402,7 +403,9 @@ namespace Microsoft.Build.Evaluation.Context
                 if (!builder.TryRequire(
                         observation.Path,
                         observation.Provider,
-                        EvaluationFilesystemTimestampSource.PathProbe))
+                        EvaluationFilesystemTimestampSource.PathProbe,
+                        observation.Kind,
+                        observation.Exists))
                 {
                     return builder.CreateFailureResult();
                 }
@@ -422,7 +425,9 @@ namespace Microsoft.Build.Evaluation.Context
                 if (!builder.TryRequire(
                         observation.Path,
                         observation.Provider,
-                        EvaluationFilesystemTimestampSource.DirectoryEnumeration))
+                        EvaluationFilesystemTimestampSource.DirectoryEnumeration,
+                        EvaluationPathKind.Directory,
+                        requiredExists: true))
                 {
                     return builder.CreateFailureResult();
                 }
@@ -452,7 +457,9 @@ namespace Microsoft.Build.Evaluation.Context
                     if (!builder.TryRequire(
                             directory,
                             provider: null,
-                            EvaluationFilesystemTimestampSource.Glob))
+                            EvaluationFilesystemTimestampSource.Glob,
+                            EvaluationPathKind.Directory,
+                            requiredExists: null))
                     {
                         return builder.CreateFailureResult();
                     }
@@ -475,10 +482,22 @@ namespace Microsoft.Build.Evaluation.Context
 
                 foreach (string candidate in observation.Candidates)
                 {
+                    bool expectedExists = false;
+                    foreach (string selectedPath in observation.SelectedPaths)
+                    {
+                        if (FileUtilities.PathsEqual(candidate, selectedPath))
+                        {
+                            expectedExists = true;
+                            break;
+                        }
+                    }
+
                     if (!builder.TryRequire(
                             candidate,
                             provider: null,
-                            EvaluationFilesystemTimestampSource.Search))
+                            EvaluationFilesystemTimestampSource.Search,
+                            EvaluationPathKind.File,
+                            expectedExists))
                     {
                         return builder.CreateFailureResult();
                     }
@@ -489,7 +508,9 @@ namespace Microsoft.Build.Evaluation.Context
                     if (!builder.TryRequire(
                             selectedPath,
                             provider: null,
-                            EvaluationFilesystemTimestampSource.Search))
+                            EvaluationFilesystemTimestampSource.Search,
+                            EvaluationPathKind.File,
+                            requiredExists: true))
                     {
                         return builder.CreateFailureResult();
                     }
@@ -655,14 +676,10 @@ namespace Microsoft.Build.Evaluation.Context
             {
                 EvaluationFilesystemTimestampEntry entry = entries[i];
                 long actualTimestamp;
-                bool actualExists;
                 try
                 {
                     actualTimestamp =
                         FileSystems.Default.GetLastWriteTimeUtc(entry.Path).Ticks;
-                    actualExists =
-                        actualTimestamp != s_missingTimestampUtcTicks ||
-                        PathExists(entry.Path, entry.Kind);
                 }
                 catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
                 {
@@ -678,12 +695,48 @@ namespace Microsoft.Build.Evaluation.Context
                         ex.HResult);
                 }
 
-                if (actualTimestamp != entry.LastWriteTimeUtcTicks ||
-                    actualExists != entry.Exists)
+                if (actualTimestamp != entry.LastWriteTimeUtcTicks)
                 {
                     return new EvaluationFilesystemTimestampValidationResult(
                         EvaluationFilesystemTimestampValidationStatus.Changed,
                         EvaluationFilesystemTimestampFailure.ConflictingTimestamp,
+                        checkedReparsePointCount,
+                        i + 1,
+                        entry.Path,
+                        entry.LastWriteTimeUtcTicks,
+                        actualTimestamp,
+                        exceptionType: null,
+                        hResult: 0);
+                }
+
+                bool existenceChanged;
+                try
+                {
+                    existenceChanged =
+                        HasExistenceChanged(
+                            entry.Path,
+                            entry.Existence,
+                            actualTimestamp != s_missingTimestampUtcTicks);
+                }
+                catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                {
+                    return new EvaluationFilesystemTimestampValidationResult(
+                        EvaluationFilesystemTimestampValidationStatus.Failed,
+                        EvaluationFilesystemTimestampFailure.FilesystemError,
+                        checkedReparsePointCount,
+                        i + 1,
+                        entry.Path,
+                        entry.LastWriteTimeUtcTicks,
+                        actualLastWriteTimeUtcTicks: actualTimestamp,
+                        ex.GetType().FullName,
+                        ex.HResult);
+                }
+
+                if (existenceChanged)
+                {
+                    return new EvaluationFilesystemTimestampValidationResult(
+                        EvaluationFilesystemTimestampValidationStatus.Changed,
+                        EvaluationFilesystemTimestampFailure.ExistenceChanged,
                         checkedReparsePointCount,
                         i + 1,
                         entry.Path,
@@ -777,6 +830,13 @@ namespace Microsoft.Build.Evaluation.Context
                 if (!IsCanonicalPath(entry.Path))
                 {
                     failure = EvaluationFilesystemTimestampFailure.NonCanonicalPath;
+                    incompletePath = entry.Path;
+                    return false;
+                }
+
+                if (!entry.Existence.HasAny)
+                {
+                    failure = EvaluationFilesystemTimestampFailure.MalformedSnapshot;
                     incompletePath = entry.Path;
                     return false;
                 }
@@ -903,8 +963,9 @@ namespace Microsoft.Build.Evaluation.Context
                 return TryAddExpected(
                     observation.Path,
                     observation.LastWriteTimeUtcTicks,
-                    true,
-                    EvaluationPathKind.File,
+                    EvaluationPathExistence.Create(
+                        EvaluationPathKind.File,
+                        exists: true),
                     EvaluationFilesystemTimestampSource.ProjectSource,
                     observation.Provider);
             }
@@ -912,8 +973,7 @@ namespace Microsoft.Build.Evaluation.Context
             internal bool TryAddExpected(
                 string path,
                 long timestampUtcTicks,
-                bool exists,
-                EvaluationPathKind kind,
+                EvaluationPathExistence existence,
                 EvaluationFilesystemTimestampSource sources,
                 string provider)
             {
@@ -927,10 +987,28 @@ namespace Microsoft.Build.Evaluation.Context
                     return false;
                 }
 
+                if (!existence.HasAny)
+                {
+                    SetFailure(
+                        EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                        EvaluationFilesystemTimestampFailure.MissingExistenceObservation,
+                        path);
+                    return false;
+                }
+
+                if (!existence.IsConsistentWithTimestamp(
+                        timestampUtcTicks != s_missingTimestampUtcTicks))
+                {
+                    SetFailure(
+                        EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                        EvaluationFilesystemTimestampFailure.ConflictingObservation,
+                        path);
+                    return false;
+                }
+
                 if (_timestamps.TryGetValue(path, out PendingTimestamp pending))
                 {
-                    if (pending.TimestampUtcTicks != timestampUtcTicks ||
-                        pending.Exists != exists)
+                    if (pending.TimestampUtcTicks != timestampUtcTicks)
                     {
                         SetFailure(
                             EvaluationFilesystemTimestampCaptureStatus.Changed,
@@ -939,8 +1017,29 @@ namespace Microsoft.Build.Evaluation.Context
                         return false;
                     }
 
+                    if (!pending.Existence.TryMerge(
+                            existence,
+                            out EvaluationPathExistence combinedExistence))
+                    {
+                        SetFailure(
+                            EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                            EvaluationFilesystemTimestampFailure.ConflictingObservation,
+                            path);
+                        return false;
+                    }
+
+                    if (!combinedExistence.IsConsistentWithTimestamp(
+                            timestampUtcTicks != s_missingTimestampUtcTicks))
+                    {
+                        SetFailure(
+                            EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                            EvaluationFilesystemTimestampFailure.ConflictingObservation,
+                            path);
+                        return false;
+                    }
+
                     pending.Sources |= sources;
-                    pending.Kind = CombinePathKinds(pending.Kind, kind);
+                    pending.Existence = combinedExistence;
                     return true;
                 }
 
@@ -949,8 +1048,7 @@ namespace Microsoft.Build.Evaluation.Context
                     new PendingTimestamp(
                         path,
                         timestampUtcTicks,
-                        exists,
-                        kind,
+                        existence,
                         sources));
                 return true;
             }
@@ -1015,7 +1113,9 @@ namespace Microsoft.Build.Evaluation.Context
             internal bool TryRequire(
                 string path,
                 string provider,
-                EvaluationFilesystemTimestampSource requiredSources)
+                EvaluationFilesystemTimestampSource requiredSources,
+                EvaluationPathKind? requiredKind = null,
+                bool? requiredExists = null)
             {
                 if (!TryValidatePathAndProvider(path, provider))
                 {
@@ -1030,6 +1130,30 @@ namespace Microsoft.Build.Evaluation.Context
                         EvaluationFilesystemTimestampFailure.MissingTimestampObservation,
                         path);
                     return false;
+                }
+
+                if (requiredKind.HasValue)
+                {
+                    if (!pending.Existence.TryGet(
+                            requiredKind.GetValueOrDefault(),
+                            out bool observedExists))
+                    {
+                        SetFailure(
+                            EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                            EvaluationFilesystemTimestampFailure.MissingExistenceObservation,
+                            path);
+                        return false;
+                    }
+
+                    if (requiredExists.HasValue &&
+                        observedExists != requiredExists.GetValueOrDefault())
+                    {
+                        SetFailure(
+                            EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                            EvaluationFilesystemTimestampFailure.ConflictingObservation,
+                            path);
+                        return false;
+                    }
                 }
 
                 return true;
@@ -1049,8 +1173,7 @@ namespace Microsoft.Build.Evaluation.Context
                     entries[index++] = new EvaluationFilesystemTimestampEntry(
                         pending.Path,
                         pending.TimestampUtcTicks,
-                        pending.Exists,
-                        pending.Kind,
+                        pending.Existence,
                         pending.Sources);
                 }
 
@@ -1190,42 +1313,38 @@ namespace Microsoft.Build.Evaluation.Context
             internal PendingTimestamp(
                 string path,
                 long timestampUtcTicks,
-                bool exists,
-                EvaluationPathKind kind,
+                EvaluationPathExistence existence,
                 EvaluationFilesystemTimestampSource sources)
             {
                 Path = path;
                 TimestampUtcTicks = timestampUtcTicks;
-                Exists = exists;
-                Kind = kind;
+                Existence = existence;
                 Sources = sources;
             }
 
             internal string Path { get; }
             internal long TimestampUtcTicks { get; }
-            internal bool Exists { get; }
-            internal EvaluationPathKind Kind { get; set; }
+            internal EvaluationPathExistence Existence { get; set; }
             internal EvaluationFilesystemTimestampSource Sources { get; set; }
         }
 
-        private static EvaluationPathKind CombinePathKinds(
-            EvaluationPathKind first,
-            EvaluationPathKind second) =>
-            first == second
-                ? first
-                : EvaluationPathKind.FileOrDirectory;
-
-        private static bool PathExists(
+        private static bool HasExistenceChanged(
             string path,
-            EvaluationPathKind kind)
+            EvaluationPathExistence existence,
+            bool timestampIndicatesExistence)
         {
-            return kind switch
-            {
-                EvaluationPathKind.File => FileSystems.Default.FileExists(path),
-                EvaluationPathKind.Directory => FileSystems.Default.DirectoryExists(path),
-                _ => FileSystems.Default.FileExists(path) ||
-                    FileSystems.Default.DirectoryExists(path),
-            };
+            return
+                (existence.FileExists.HasValue &&
+                 FileSystems.Default.FileExists(path) !=
+                    existence.FileExists.GetValueOrDefault()) ||
+                (existence.DirectoryExists.HasValue &&
+                 FileSystems.Default.DirectoryExists(path) !=
+                    existence.DirectoryExists.GetValueOrDefault()) ||
+                (existence.FileOrDirectoryExists.HasValue &&
+                 !(timestampIndicatesExistence &&
+                   existence.FileOrDirectoryExists == true) &&
+                 FileSystems.Default.FileOrDirectoryExists(path) !=
+                    existence.FileOrDirectoryExists.GetValueOrDefault());
         }
     }
 }

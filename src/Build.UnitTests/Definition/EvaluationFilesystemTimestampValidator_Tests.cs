@@ -500,6 +500,85 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void FileReadKindReplacementWithPreservedTimestampInvalidates()
+        {
+            string settingsFile = _env.CreateFile("kind-read.txt", "before").Path;
+            EvaluationObservationReport report = Evaluate(
+                "kind-read.proj",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Settings>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)kind-read.txt'))</Settings>
+                  </PropertyGroup>
+                </Project>
+                """);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            EvaluationFilesystemTimestampEntry entry =
+                GetEntry(
+                    capture.Snapshot,
+                    settingsFile,
+                    EvaluationFilesystemTimestampSource.FileRead);
+            entry.Existence.FileExists.ShouldBe(true);
+            DateTime timestamp = File.GetLastWriteTimeUtc(settingsFile);
+
+            File.Delete(settingsFile);
+            Directory.CreateDirectory(settingsFile);
+            Directory.SetLastWriteTimeUtc(settingsFile, timestamp);
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                capture.Snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ExistenceChanged);
+            validation.ExpectedLastWriteTimeUtcTicks.ShouldBe(
+                validation.ActualLastWriteTimeUtcTicks);
+        }
+
+        [Fact]
+        public void DirectoryEnumerationKindReplacementWithPreservedTimestampInvalidates()
+        {
+            string directory = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "enumerated");
+            Directory.CreateDirectory(directory);
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            var recordingFileSystem =
+                new RecordingFileSystem(FileSystems.Default, session);
+            foreach (string _ in recordingFileSystem.EnumerateFiles(directory))
+            {
+            }
+
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            EvaluationFilesystemTimestampEntry entry =
+                capture.Snapshot.Entries.ShouldHaveSingleItem();
+            entry.Existence.DirectoryExists.ShouldBe(true);
+            DateTime timestamp = Directory.GetLastWriteTimeUtc(directory);
+
+            Directory.Delete(directory);
+            File.WriteAllText(directory, string.Empty);
+            File.SetLastWriteTimeUtc(directory, timestamp);
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                capture.Snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ExistenceChanged);
+            validation.ExpectedLastWriteTimeUtcTicks.ShouldBe(
+                validation.ActualLastWriteTimeUtcTicks);
+        }
+
+        [Fact]
         public void CreatedNegativeProbeInvalidates()
         {
             string missingFile = Path.Combine(_env.DefaultTestDirectory.Path, "missing.props");
@@ -526,6 +605,42 @@ namespace Microsoft.Build.UnitTests.Definition
 
             validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
             FileUtilities.PathsEqual(validation.Path, missingFile).ShouldBeTrue();
+        }
+
+        [Fact]
+        public void CreatedMissingGlobRootInvalidates()
+        {
+            string missingDirectory = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "MissingGlobRoot");
+            EvaluationObservationReport report = Evaluate(
+                "missing-glob-root.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <Compile Include="MissingGlobRoot/**/*.cs" />
+                  </ItemGroup>
+                </Project>
+                """);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            EvaluationFilesystemTimestampEntry entry =
+                GetEntry(
+                    capture.Snapshot,
+                    missingDirectory,
+                    EvaluationFilesystemTimestampSource.Glob);
+            entry.Existence.DirectoryExists.ShouldBe(false);
+
+            Directory.CreateDirectory(missingDirectory);
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                capture.Snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
+            FileUtilities.PathsEqual(validation.Path, missingDirectory).ShouldBeTrue();
         }
 
         [Fact]
@@ -780,8 +895,9 @@ namespace Microsoft.Build.UnitTests.Definition
             var timestamp = new EvaluationFilesystemTimestampObservation(
                 invalidPath,
                 DateTime.FromFileTimeUtc(0).Ticks,
-                exists: false,
-                EvaluationPathKind.File,
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.File,
+                    exists: false),
                 EvaluationFilesystemTimestampSource.PathProbe,
                 provider: null);
             EvaluationObservationReport report = CreateReport(
@@ -1188,8 +1304,9 @@ namespace Microsoft.Build.UnitTests.Definition
                     new EvaluationFilesystemTimestampEntry(
                         path,
                         zeroTimestamp,
-                        true,
-                        EvaluationPathKind.File,
+                        EvaluationPathExistence.Create(
+                            EvaluationPathKind.File,
+                            exists: true),
                         EvaluationFilesystemTimestampSource.PathProbe),
                 ],
                 CreatePathComponents(path));
@@ -1198,8 +1315,407 @@ namespace Microsoft.Build.UnitTests.Definition
                 snapshot.Validate();
 
             validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ExistenceChanged);
             validation.ExpectedLastWriteTimeUtcTicks
                 .ShouldBe(validation.ActualLastWriteTimeUtcTicks);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void OppositeKindProbesRemainIndependent(bool isDirectory)
+        {
+            string path = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "opposite-kind");
+            if (isDirectory)
+            {
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                File.WriteAllText(path, string.Empty);
+            }
+
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            session.RecordProbe(
+                path,
+                EvaluationPathKind.File,
+                exists: !isDirectory);
+            session.RecordProbe(
+                path,
+                EvaluationPathKind.Directory,
+                exists: isDirectory);
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.None);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            EvaluationFilesystemTimestampEntry entry =
+                capture.Snapshot.Entries.ShouldHaveSingleItem();
+            entry.Existence.FileExists.ShouldBe(!isDirectory);
+            entry.Existence.DirectoryExists.ShouldBe(isDirectory);
+            entry.Existence.FileOrDirectoryExists.ShouldBeNull();
+            capture.Snapshot.Validate().Status.ShouldBe(
+                EvaluationFilesystemTimestampValidationStatus.Valid);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void KindReplacementWithPreservedTimestampInvalidates(
+            bool initiallyDirectory)
+        {
+            string path = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "kind-replacement");
+            if (initiallyDirectory)
+            {
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                File.WriteAllText(path, string.Empty);
+            }
+
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            session.RecordProbe(
+                path,
+                initiallyDirectory
+                    ? EvaluationPathKind.Directory
+                    : EvaluationPathKind.File,
+                exists: true);
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            DateTime timestamp = initiallyDirectory
+                ? Directory.GetLastWriteTimeUtc(path)
+                : File.GetLastWriteTimeUtc(path);
+
+            if (initiallyDirectory)
+            {
+                Directory.Delete(path);
+                File.WriteAllText(path, string.Empty);
+                File.SetLastWriteTimeUtc(path, timestamp);
+            }
+            else
+            {
+                File.Delete(path);
+                Directory.CreateDirectory(path);
+                Directory.SetLastWriteTimeUtc(path, timestamp);
+            }
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                capture.Snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ExistenceChanged);
+            validation.ExpectedLastWriteTimeUtcTicks.ShouldBe(
+                validation.ActualLastWriteTimeUtcTicks);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void GenericExistenceAllowsKindReplacement(
+            bool initiallyDirectory)
+        {
+            string path = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "generic-kind-replacement");
+            if (initiallyDirectory)
+            {
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                File.WriteAllText(path, string.Empty);
+            }
+
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            session.RecordProbe(
+                path,
+                EvaluationPathKind.FileOrDirectory,
+                exists: true);
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            DateTime timestamp = initiallyDirectory
+                ? Directory.GetLastWriteTimeUtc(path)
+                : File.GetLastWriteTimeUtc(path);
+
+            if (initiallyDirectory)
+            {
+                Directory.Delete(path);
+                File.WriteAllText(path, string.Empty);
+                File.SetLastWriteTimeUtc(path, timestamp);
+            }
+            else
+            {
+                File.Delete(path);
+                Directory.CreateDirectory(path);
+                Directory.SetLastWriteTimeUtc(path, timestamp);
+            }
+
+            capture.Snapshot.Validate().Status.ShouldBe(
+                EvaluationFilesystemTimestampValidationStatus.Valid);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void NegativeTypedProbeKindReplacementInvalidates(
+            bool initiallyDirectory)
+        {
+            string path = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "negative-kind-replacement");
+            if (initiallyDirectory)
+            {
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                File.WriteAllText(path, string.Empty);
+            }
+
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            session.RecordProbe(
+                path,
+                initiallyDirectory
+                    ? EvaluationPathKind.File
+                    : EvaluationPathKind.Directory,
+                exists: false);
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            DateTime timestamp = initiallyDirectory
+                ? Directory.GetLastWriteTimeUtc(path)
+                : File.GetLastWriteTimeUtc(path);
+
+            if (initiallyDirectory)
+            {
+                Directory.Delete(path);
+                File.WriteAllText(path, string.Empty);
+                File.SetLastWriteTimeUtc(path, timestamp);
+            }
+            else
+            {
+                File.Delete(path);
+                Directory.CreateDirectory(path);
+                Directory.SetLastWriteTimeUtc(path, timestamp);
+            }
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                capture.Snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ExistenceChanged);
+            validation.ExpectedLastWriteTimeUtcTicks.ShouldBe(
+                validation.ActualLastWriteTimeUtcTicks);
+        }
+
+        [Fact]
+        public void ContradictoryExistenceMergesAreRejected()
+        {
+            EvaluationPathExistence fileExists =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.File,
+                    exists: true);
+            fileExists.TryMerge(
+                EvaluationPathKind.Directory,
+                exists: true,
+                out _).ShouldBeFalse();
+            fileExists.TryMerge(
+                EvaluationPathKind.File,
+                exists: false,
+                out _).ShouldBeFalse();
+
+            EvaluationPathExistence pathMissing =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.FileOrDirectory,
+                    exists: false);
+            pathMissing.TryMerge(
+                EvaluationPathKind.File,
+                exists: true,
+                out _).ShouldBeFalse();
+
+            EvaluationPathExistence typedMissing =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.File,
+                    exists: false);
+            typedMissing.TryMerge(
+                EvaluationPathKind.Directory,
+                exists: false,
+                out EvaluationPathExistence bothTypedMissing).ShouldBeTrue();
+            bothTypedMissing.FileExists.ShouldBeNull();
+            bothTypedMissing.DirectoryExists.ShouldBeNull();
+            bothTypedMissing.FileOrDirectoryExists.ShouldBe(false);
+            bothTypedMissing.TryMerge(
+                EvaluationPathKind.FileOrDirectory,
+                exists: true,
+                out _).ShouldBeFalse();
+        }
+
+        [Fact]
+        public void EntailedExistencePredicatesAreCollapsed()
+        {
+            EvaluationPathExistence fileExists =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.File,
+                    exists: true);
+            fileExists.TryMerge(
+                EvaluationPathKind.FileOrDirectory,
+                exists: true,
+                out EvaluationPathExistence fileAndGeneric).ShouldBeTrue();
+            fileAndGeneric.FileOrDirectoryExists.ShouldBeNull();
+            fileAndGeneric.TryGet(
+                EvaluationPathKind.FileOrDirectory,
+                out bool genericExists).ShouldBeTrue();
+            genericExists.ShouldBeTrue();
+
+            EvaluationPathExistence pathMissing =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.FileOrDirectory,
+                    exists: false);
+            pathMissing.TryMerge(
+                EvaluationPathKind.File,
+                exists: false,
+                out EvaluationPathExistence genericAndFileMissing).ShouldBeTrue();
+            genericAndFileMissing.FileExists.ShouldBeNull();
+            genericAndFileMissing.TryGet(
+                EvaluationPathKind.File,
+                out bool fileStillMissing).ShouldBeTrue();
+            fileStillMissing.ShouldBeFalse();
+
+            EvaluationPathExistence fileMissing =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.File,
+                    exists: false);
+            fileMissing.TryMerge(
+                EvaluationPathKind.FileOrDirectory,
+                exists: true,
+                out EvaluationPathExistence existingDirectory).ShouldBeTrue();
+            existingDirectory.TryGet(
+                EvaluationPathKind.Directory,
+                out bool directoryExists).ShouldBeTrue();
+            directoryExists.ShouldBeTrue();
+
+            EvaluationPathExistence directoryMissing =
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.Directory,
+                    exists: false);
+            directoryMissing.TryMerge(
+                EvaluationPathKind.FileOrDirectory,
+                exists: true,
+                out EvaluationPathExistence existingFile).ShouldBeTrue();
+            existingFile.TryGet(
+                EvaluationPathKind.File,
+                out bool inferredFileExists).ShouldBeTrue();
+            inferredFileExists.ShouldBeTrue();
+        }
+
+        [Fact]
+        public void TimestampAndGenericExistenceConflictIsRejected()
+        {
+            string path = _env.CreateFile(
+                "timestamp-existence-conflict.txt",
+                string.Empty).Path;
+            var timestamp = new EvaluationFilesystemTimestampObservation(
+                path,
+                File.GetLastWriteTimeUtc(path).Ticks,
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.FileOrDirectory,
+                    exists: false),
+                EvaluationFilesystemTimestampSource.PathProbe,
+                provider: null);
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(),
+                filesystemTimestamps: [timestamp]);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ConflictingObservation);
+            capture.Path.ShouldBe(path);
+        }
+
+        [Fact]
+        public void MissingExistenceEvidenceIsUnsupported()
+        {
+            string path = _env.CreateFile(
+                "missing-existence-evidence.txt",
+                string.Empty).Path;
+            var timestamp = new EvaluationFilesystemTimestampObservation(
+                path,
+                File.GetLastWriteTimeUtc(path).Ticks,
+                existence: default,
+                EvaluationFilesystemTimestampSource.FileRead,
+                provider: null);
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(),
+                filesystemTimestamps: [timestamp]);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.MissingExistenceObservation);
+            capture.Path.ShouldBe(path);
+        }
+
+        [Fact]
+        public void ObservationSessionRejectsTimestampExistenceConflictOnReuse()
+        {
+            string path = _env.CreateFile(
+                "session-timestamp-existence-conflict.txt",
+                string.Empty).Path;
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            session.RecordFilesystemTimestamp(
+                path,
+                EvaluationFilesystemTimestampSource.PathProbe,
+                kind: EvaluationPathKind.File,
+                exists: true);
+            session.RecordFilesystemTimestamp(
+                path,
+                EvaluationFilesystemTimestampSource.PathProbe,
+                kind: EvaluationPathKind.FileOrDirectory,
+                exists: false);
+
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+
+            (report.Reasons & EvaluationObservationReason.ConflictingObservation)
+                .ShouldBe(EvaluationObservationReason.ConflictingObservation);
         }
 
         [Fact]
@@ -1231,8 +1747,9 @@ namespace Microsoft.Build.UnitTests.Definition
                         new EvaluationFilesystemTimestampEntry(
                             path,
                             DateTime.FromFileTimeUtc(0).Ticks,
-                            exists: false,
-                            EvaluationPathKind.File,
+                            EvaluationPathExistence.Create(
+                                EvaluationPathKind.File,
+                                exists: false),
                             EvaluationFilesystemTimestampSource.PathProbe),
                     ],
                     invalidCheckSet);
@@ -1280,8 +1797,9 @@ namespace Microsoft.Build.UnitTests.Definition
             var timestamp = new EvaluationFilesystemTimestampObservation(
                 path,
                 Directory.GetLastWriteTimeUtc(directory).Ticks,
-                exists: true,
-                EvaluationPathKind.Directory,
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.Directory,
+                    exists: true),
                 EvaluationFilesystemTimestampSource.PathProbe,
                 provider: null);
             EvaluationObservationReport report = CreateReport(
@@ -1303,8 +1821,9 @@ namespace Microsoft.Build.UnitTests.Definition
                     new EvaluationFilesystemTimestampEntry(
                         path,
                         timestamp.LastWriteTimeUtcTicks,
-                        exists: true,
-                        EvaluationPathKind.Directory,
+                        EvaluationPathExistence.Create(
+                            EvaluationPathKind.Directory,
+                            exists: true),
                         EvaluationFilesystemTimestampSource.PathProbe),
                 ],
                 [path]);
@@ -1328,8 +1847,9 @@ namespace Microsoft.Build.UnitTests.Definition
             var timestamp = new EvaluationFilesystemTimestampObservation(
                 path,
                 DateTime.FromFileTimeUtc(0).Ticks,
-                exists: false,
-                EvaluationPathKind.File,
+                EvaluationPathExistence.Create(
+                    EvaluationPathKind.File,
+                    exists: false),
                 EvaluationFilesystemTimestampSource.PathProbe,
                 provider: null);
             EvaluationObservationReport report = CreateReport(
@@ -1351,8 +1871,9 @@ namespace Microsoft.Build.UnitTests.Definition
                     new EvaluationFilesystemTimestampEntry(
                         path,
                         timestamp.LastWriteTimeUtcTicks,
-                        exists: false,
-                        EvaluationPathKind.File,
+                        EvaluationPathExistence.Create(
+                            EvaluationPathKind.File,
+                            exists: false),
                         EvaluationFilesystemTimestampSource.PathProbe),
                 ],
                 CreatePathComponents(path));
@@ -1726,6 +2247,24 @@ namespace Microsoft.Build.UnitTests.Definition
 
             components.Reverse();
             return components.ToArray();
+        }
+
+        private static EvaluationFilesystemTimestampEntry GetEntry(
+            EvaluationFilesystemTimestampSnapshot snapshot,
+            string path,
+            EvaluationFilesystemTimestampSource source)
+        {
+            foreach (EvaluationFilesystemTimestampEntry entry in snapshot.Entries)
+            {
+                if (FileUtilities.PathsEqual(entry.Path, path) &&
+                    (entry.Sources & source) != 0)
+                {
+                    return entry;
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"Timestamp entry '{path}' with source '{source}' was not found.");
         }
 
         private sealed class TransientDefaultFileSystem : TransientTestState

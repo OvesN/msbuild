@@ -26,7 +26,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        internal const int ObservationSchemaVersion = 18;
+        internal const int ObservationSchemaVersion = 19;
         internal const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
@@ -414,6 +414,7 @@ namespace Microsoft.Build.Evaluation.Context
                 null,
                 EvaluationPathKind.Directory,
                 exists,
+                recordExistence: true,
                 out _);
             if (string.IsNullOrEmpty(globIdentity))
             {
@@ -976,8 +977,9 @@ namespace Microsoft.Build.Evaluation.Context
                     EvaluationFilesystemTimestampSource.Search,
                     provider: null,
                     baseDirectory: null,
-                    EvaluationPathKind.File,
-                    expectedExists,
+                    kind: EvaluationPathKind.File,
+                    exists: expectedExists,
+                    recordExistence: true,
                     out _);
             }
 
@@ -1004,8 +1006,9 @@ namespace Microsoft.Build.Evaluation.Context
                     EvaluationFilesystemTimestampSource.Search,
                     provider: null,
                     baseDirectory: null,
-                    EvaluationPathKind.File,
+                    kind: EvaluationPathKind.File,
                     exists: true,
+                    recordExistence: true,
                     out _);
             }
         }
@@ -1182,11 +1185,21 @@ namespace Microsoft.Build.Evaluation.Context
                             : (filesystemEffects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0
                                 ? EvaluationFilesystemTimestampSource.DirectoryEnumeration
                                 : EvaluationFilesystemTimestampSource.Metadata;
+                EvaluationPathKind pathKind =
+                    (filesystemEffects & EvaluationPropertyFunctionEffect.FileContent) != 0
+                        ? EvaluationPathKind.File
+                        : (filesystemEffects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0
+                            ? EvaluationPathKind.Directory
+                            : EvaluationPathKind.FileOrDirectory;
                 RecordFilesystemTimestamp(
                     path,
                     source,
                     provider: null,
-                    baseDirectory: pathBaseDirectory);
+                    baseDirectory: pathBaseDirectory,
+                    kind: pathKind,
+                    exists: null,
+                    recordExistence:
+                        pathKind == EvaluationPathKind.FileOrDirectory);
                 return effects;
             }
             catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
@@ -1500,6 +1513,7 @@ namespace Microsoft.Build.Evaluation.Context
                 provider,
                 kind,
                 exists,
+                recordExistence: true,
                 out _);
         }
 
@@ -1509,7 +1523,8 @@ namespace Microsoft.Build.Evaluation.Context
             string provider = null,
             string baseDirectory = null,
             EvaluationPathKind kind = EvaluationPathKind.FileOrDirectory,
-            bool? exists = null)
+            bool? exists = null,
+            bool recordExistence = true)
         {
             TryRecordFilesystemTimestamp(
                 path,
@@ -1518,6 +1533,7 @@ namespace Microsoft.Build.Evaluation.Context
                 baseDirectory,
                 kind,
                 exists,
+                recordExistence,
                 out _);
         }
 
@@ -1528,6 +1544,7 @@ namespace Microsoft.Build.Evaluation.Context
             string baseDirectory,
             EvaluationPathKind kind,
             bool? exists,
+            bool recordExistence,
             out long timestampUtcTicks)
         {
             timestampUtcTicks = 0;
@@ -1554,6 +1571,7 @@ namespace Microsoft.Build.Evaluation.Context
                 provider,
                 kind,
                 exists,
+                recordExistence,
                 out timestampUtcTicks);
         }
 
@@ -1563,6 +1581,7 @@ namespace Microsoft.Build.Evaluation.Context
             string provider,
             EvaluationPathKind kind,
             bool? exists,
+            bool recordExistence,
             out long timestampUtcTicks)
         {
             if (!TryReuseFilesystemTimestampObservation(
@@ -1571,6 +1590,7 @@ namespace Microsoft.Build.Evaluation.Context
                     provider,
                     kind,
                     exists,
+                    recordExistence,
                     out timestampUtcTicks,
                     out bool reused))
             {
@@ -1595,25 +1615,33 @@ namespace Microsoft.Build.Evaluation.Context
                 return false;
             }
 
-            bool pathExists;
-            try
+            EvaluationPathExistence existence = default;
+            if (recordExistence)
             {
-                pathExists = exists ??
-                    (timestampUtcTicks != s_missingTimestampUtcTicks ||
-                     PathExists(normalizedPath, kind));
-            }
-            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
-            {
-                MarkTimestampSourceIncomplete(source);
-                AddReason(EvaluationObservationReason.ObservationIncomplete);
-                return false;
-            }
+                bool pathExists;
+                try
+                {
+                    pathExists = exists ??
+                        PathExists(
+                            normalizedPath,
+                            kind,
+                            timestampUtcTicks);
+                }
+                catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                {
+                    MarkTimestampSourceIncomplete(source);
+                    AddReason(EvaluationObservationReason.ObservationIncomplete);
+                    return false;
+                }
 
-            if (exists == false && timestampUtcTicks != s_missingTimestampUtcTicks)
-            {
-                MarkTimestampSourceIncomplete(source);
-                AddReason(EvaluationObservationReason.ConflictingObservation);
-                return false;
+                existence = EvaluationPathExistence.Create(kind, pathExists);
+                if (!existence.IsConsistentWithTimestamp(
+                        timestampUtcTicks != s_missingTimestampUtcTicks))
+                {
+                    MarkTimestampSourceIncomplete(source);
+                    AddReason(EvaluationObservationReason.ConflictingObservation);
+                    return false;
+                }
             }
 
             string actualProvider = provider ?? s_defaultFileSystemProvider;
@@ -1628,8 +1656,20 @@ namespace Microsoft.Build.Evaluation.Context
                         normalizedPath,
                         out EvaluationFilesystemTimestampObservation prior))
                 {
+                    EvaluationPathExistence combinedExistence = prior.Existence;
                     if (prior.LastWriteTimeUtcTicks != timestampUtcTicks ||
-                        prior.Exists != pathExists)
+                        (recordExistence &&
+                         !prior.Existence.TryMerge(
+                             existence,
+                             out combinedExistence)))
+                    {
+                        MarkTimestampSourceIncomplete(source | prior.Sources);
+                        AddReason(EvaluationObservationReason.ConflictingObservation);
+                        return false;
+                    }
+
+                    if (!combinedExistence.IsConsistentWithTimestamp(
+                            timestampUtcTicks != s_missingTimestampUtcTicks))
                     {
                         MarkTimestampSourceIncomplete(source | prior.Sources);
                         AddReason(EvaluationObservationReason.ConflictingObservation);
@@ -1638,20 +1678,14 @@ namespace Microsoft.Build.Evaluation.Context
 
                     EvaluationFilesystemTimestampSource combinedSources =
                         prior.Sources | source;
-                    EvaluationPathKind combinedKind =
-                        CombinePathKinds(prior.Kind, kind);
-                    if (combinedSources != prior.Sources ||
-                        combinedKind != prior.Kind)
-                    {
-                        _filesystemTimestamps[normalizedPath] =
-                            new EvaluationFilesystemTimestampObservation(
-                                normalizedPath,
-                                timestampUtcTicks,
-                                pathExists,
-                                combinedKind,
-                                combinedSources,
-                                actualProvider);
-                    }
+                    string combinedProvider = provider ?? prior.Provider;
+                    _filesystemTimestamps[normalizedPath] =
+                        new EvaluationFilesystemTimestampObservation(
+                            normalizedPath,
+                            timestampUtcTicks,
+                            combinedExistence,
+                            combinedSources,
+                            combinedProvider);
                 }
                 else
                 {
@@ -1660,8 +1694,7 @@ namespace Microsoft.Build.Evaluation.Context
                         new EvaluationFilesystemTimestampObservation(
                             normalizedPath,
                             timestampUtcTicks,
-                            pathExists,
-                            kind,
+                            existence,
                             source,
                             actualProvider));
                 }
@@ -1676,6 +1709,7 @@ namespace Microsoft.Build.Evaluation.Context
             string provider,
             EvaluationPathKind kind,
             bool? exists,
+            bool recordExistence,
             out long timestampUtcTicks,
             out bool reused)
         {
@@ -1695,53 +1729,78 @@ namespace Microsoft.Build.Evaluation.Context
                     return true;
                 }
 
-                reused = true;
-                timestampUtcTicks = prior.LastWriteTimeUtcTicks;
-                if (exists.HasValue && prior.Exists != exists.GetValueOrDefault())
+                EvaluationPathExistence combinedExistence = prior.Existence;
+                if (recordExistence &&
+                    exists.HasValue)
+                {
+                    if (!prior.Existence.TryMerge(
+                            kind,
+                            exists.GetValueOrDefault(),
+                            out combinedExistence))
+                    {
+                        MarkTimestampSourceIncomplete(source | prior.Sources);
+                        AddReason(EvaluationObservationReason.ConflictingObservation);
+                        return false;
+                    }
+                }
+                else if (recordExistence &&
+                    !prior.Existence.TryGet(kind, out _))
+                {
+                    if (kind != EvaluationPathKind.FileOrDirectory ||
+                        prior.LastWriteTimeUtcTicks == s_missingTimestampUtcTicks ||
+                        !prior.Existence.TryMerge(
+                            EvaluationPathKind.FileOrDirectory,
+                            exists: true,
+                            out combinedExistence))
+                    {
+                        return true;
+                    }
+                }
+
+                if (!combinedExistence.IsConsistentWithTimestamp(
+                        prior.LastWriteTimeUtcTicks != s_missingTimestampUtcTicks))
                 {
                     MarkTimestampSourceIncomplete(source | prior.Sources);
                     AddReason(EvaluationObservationReason.ConflictingObservation);
                     return false;
                 }
 
+                reused = true;
+                timestampUtcTicks = prior.LastWriteTimeUtcTicks;
                 EvaluationFilesystemTimestampSource combinedSources =
                     prior.Sources | source;
-                EvaluationPathKind combinedKind =
-                    CombinePathKinds(prior.Kind, kind);
+                string combinedProvider = provider ?? prior.Provider;
                 if (combinedSources != prior.Sources ||
-                    combinedKind != prior.Kind)
+                    !combinedExistence.Equals(prior.Existence) ||
+                    !string.Equals(
+                        combinedProvider,
+                        prior.Provider,
+                        StringComparison.Ordinal))
                 {
                     _filesystemTimestamps[normalizedPath] =
                         new EvaluationFilesystemTimestampObservation(
                             normalizedPath,
                             prior.LastWriteTimeUtcTicks,
-                            prior.Exists,
-                            combinedKind,
+                            combinedExistence,
                             combinedSources,
-                            provider ?? s_defaultFileSystemProvider);
+                            combinedProvider);
                 }
             }
 
             return true;
         }
 
-        private static EvaluationPathKind CombinePathKinds(
-            EvaluationPathKind first,
-            EvaluationPathKind second) =>
-            first == second
-                ? first
-                : EvaluationPathKind.FileOrDirectory;
-
         private static bool PathExists(
             string path,
-            EvaluationPathKind kind)
+            EvaluationPathKind kind,
+            long timestampUtcTicks)
         {
             return kind switch
             {
                 EvaluationPathKind.File => FileSystems.Default.FileExists(path),
                 EvaluationPathKind.Directory => FileSystems.Default.DirectoryExists(path),
-                _ => FileSystems.Default.FileExists(path) ||
-                    FileSystems.Default.DirectoryExists(path),
+                _ => timestampUtcTicks != s_missingTimestampUtcTicks ||
+                    FileSystems.Default.FileOrDirectoryExists(path),
             };
         }
 
@@ -2534,6 +2593,11 @@ namespace Microsoft.Build.Evaluation.Context
                 if (string.Equals(member, nameof(System.IO.File.ReadAllText), StringComparison.OrdinalIgnoreCase) &&
                     result is string text)
                 {
+                    RecordFilesystemTimestamp(
+                        firstPath,
+                        EvaluationFilesystemTimestampSource.FileRead,
+                        kind: EvaluationPathKind.File,
+                        exists: true);
                     RecordFileRead(
                         firstPath,
                         ComputeTextHash(text),
@@ -2543,6 +2607,11 @@ namespace Microsoft.Build.Evaluation.Context
                 else if (string.Equals(member, nameof(System.IO.File.ReadAllBytes), StringComparison.OrdinalIgnoreCase) &&
                     result is byte[] bytes)
                 {
+                    RecordFilesystemTimestamp(
+                        firstPath,
+                        EvaluationFilesystemTimestampSource.FileRead,
+                        kind: EvaluationPathKind.File,
+                        exists: true);
                     RecordFileRead(
                         firstPath,
                         ComputeBytesHash(bytes),
@@ -2552,6 +2621,11 @@ namespace Microsoft.Build.Evaluation.Context
                 else if (string.Equals(member, "ReadAllLines", StringComparison.OrdinalIgnoreCase) &&
                     result is string[] lines)
                 {
+                    RecordFilesystemTimestamp(
+                        firstPath,
+                        EvaluationFilesystemTimestampSource.FileRead,
+                        kind: EvaluationPathKind.File,
+                        exists: true);
                     RecordFileRead(
                         firstPath,
                         ComputeStringSequenceHash(lines),
@@ -2586,6 +2660,11 @@ namespace Microsoft.Build.Evaluation.Context
                 else if ((effects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0 &&
                          result is ICollection collection)
                 {
+                    RecordFilesystemTimestamp(
+                        firstPath,
+                        EvaluationFilesystemTimestampSource.DirectoryEnumeration,
+                        kind: EvaluationPathKind.Directory,
+                        exists: true);
                     var entries = new List<string>(collection.Count);
                     foreach (object entry in collection)
                     {
@@ -2708,6 +2787,11 @@ namespace Microsoft.Build.Evaluation.Context
                 if ((effects & EvaluationPropertyFunctionEffect.DirectoryEnumeration) != 0 &&
                     result is ICollection collection)
                 {
+                    RecordFilesystemTimestamp(
+                        fileSystemInfo.FullName,
+                        EvaluationFilesystemTimestampSource.DirectoryEnumeration,
+                        kind: EvaluationPathKind.Directory,
+                        exists: true);
                     List<string> entries = [];
                     foreach (object entry in collection)
                     {
@@ -4066,10 +4150,20 @@ namespace Microsoft.Build.Evaluation.Context
                 path,
                 EvaluationFilesystemTimestampSource.FileRead,
                 _providerIdentity,
-                baseDirectory);
+                baseDirectory,
+                EvaluationPathKind.File,
+                exists: null,
+                recordExistence: false);
             try
             {
                 TextReader reader = _inner.ReadFile(path);
+                _session.RecordFilesystemTimestamp(
+                    path,
+                    EvaluationFilesystemTimestampSource.FileRead,
+                    _providerIdentity,
+                    baseDirectory,
+                    EvaluationPathKind.File,
+                    exists: true);
                 _session.RecordFileRead(
                     path,
                     contentHash: null,
@@ -4105,7 +4199,10 @@ namespace Microsoft.Build.Evaluation.Context
                     path,
                     EvaluationFilesystemTimestampSource.FileRead,
                     _providerIdentity,
-                    baseDirectory);
+                    baseDirectory,
+                    EvaluationPathKind.File,
+                    exists: null,
+                    recordExistence: false);
             }
 
             try
@@ -4113,6 +4210,13 @@ namespace Microsoft.Build.Evaluation.Context
                 Stream stream = _inner.GetFileStream(path, mode, access, share);
                 if ((access & FileAccess.Read) != 0)
                 {
+                    _session.RecordFilesystemTimestamp(
+                        path,
+                        EvaluationFilesystemTimestampSource.FileRead,
+                        _providerIdentity,
+                        baseDirectory,
+                        EvaluationPathKind.File,
+                        exists: true);
                     _session.RecordFileRead(
                         path,
                         contentHash: null,
@@ -4171,10 +4275,20 @@ namespace Microsoft.Build.Evaluation.Context
                 path,
                 EvaluationFilesystemTimestampSource.FileRead,
                 _providerIdentity,
-                baseDirectory);
+                baseDirectory,
+                EvaluationPathKind.File,
+                exists: null,
+                recordExistence: false);
             try
             {
                 string content = _inner.ReadFileAllText(path);
+                _session.RecordFilesystemTimestamp(
+                    path,
+                    EvaluationFilesystemTimestampSource.FileRead,
+                    _providerIdentity,
+                    baseDirectory,
+                    EvaluationPathKind.File,
+                    exists: true);
                 try
                 {
                     _session.RecordFileRead(
@@ -4217,10 +4331,20 @@ namespace Microsoft.Build.Evaluation.Context
                 path,
                 EvaluationFilesystemTimestampSource.FileRead,
                 _providerIdentity,
-                baseDirectory);
+                baseDirectory,
+                EvaluationPathKind.File,
+                exists: null,
+                recordExistence: false);
             try
             {
                 byte[] content = _inner.ReadFileAllBytes(path);
+                _session.RecordFilesystemTimestamp(
+                    path,
+                    EvaluationFilesystemTimestampSource.FileRead,
+                    _providerIdentity,
+                    baseDirectory,
+                    EvaluationPathKind.File,
+                    exists: true);
                 try
                 {
                     _session.RecordFileRead(
@@ -4477,7 +4601,10 @@ namespace Microsoft.Build.Evaluation.Context
                 path,
                 EvaluationFilesystemTimestampSource.DirectoryEnumeration,
                 _providerIdentity,
-                baseDirectory);
+                baseDirectory,
+                EvaluationPathKind.Directory,
+                exists: null,
+                recordExistence: false);
             List<string> observedEntries = _session.RetainDetails ? [] : null;
             var entriesHasher = new EvaluationInputFingerprintBuilder();
             int entryCount = 0;
@@ -4527,6 +4654,13 @@ namespace Microsoft.Build.Evaluation.Context
 
                     if (!hasNext)
                     {
+                        _session.RecordFilesystemTimestamp(
+                            path,
+                            EvaluationFilesystemTimestampSource.DirectoryEnumeration,
+                            _providerIdentity,
+                            baseDirectory,
+                            EvaluationPathKind.Directory,
+                            exists: true);
                         completion = EvaluationEnumerationCompletion.Complete;
                         yield break;
                     }

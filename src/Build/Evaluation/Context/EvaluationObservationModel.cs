@@ -51,6 +51,196 @@ namespace Microsoft.Build.Evaluation.Context
         FileOrDirectory,
     }
 
+    internal readonly struct EvaluationPathExistence
+    {
+        internal EvaluationPathExistence(
+            bool? fileExists,
+            bool? directoryExists,
+            bool? fileOrDirectoryExists)
+        {
+            FileExists = fileExists;
+            DirectoryExists = directoryExists;
+            FileOrDirectoryExists = fileOrDirectoryExists;
+        }
+
+        internal bool? FileExists { get; }
+        internal bool? DirectoryExists { get; }
+        internal bool? FileOrDirectoryExists { get; }
+        internal bool HasAny =>
+            FileExists.HasValue ||
+            DirectoryExists.HasValue ||
+            FileOrDirectoryExists.HasValue;
+
+        internal static EvaluationPathExistence Create(
+            EvaluationPathKind kind,
+            bool exists) =>
+            kind switch
+            {
+                EvaluationPathKind.File => new(
+                    fileExists: exists,
+                    directoryExists: null,
+                    fileOrDirectoryExists: null),
+                EvaluationPathKind.Directory => new(
+                    fileExists: null,
+                    directoryExists: exists,
+                    fileOrDirectoryExists: null),
+                _ => new(
+                    fileExists: null,
+                    directoryExists: null,
+                    fileOrDirectoryExists: exists),
+            };
+
+        internal bool TryMerge(
+            EvaluationPathKind kind,
+            bool exists,
+            out EvaluationPathExistence merged) =>
+            TryMerge(Create(kind, exists), out merged);
+
+        internal bool TryMerge(
+            EvaluationPathExistence other,
+            out EvaluationPathExistence merged)
+        {
+            if (!TryMergeValue(FileExists, other.FileExists, out bool? fileExists) ||
+                !TryMergeValue(
+                    DirectoryExists,
+                    other.DirectoryExists,
+                    out bool? directoryExists) ||
+                !TryMergeValue(
+                    FileOrDirectoryExists,
+                    other.FileOrDirectoryExists,
+                    out bool? fileOrDirectoryExists))
+            {
+                merged = default;
+                return false;
+            }
+
+            merged = new EvaluationPathExistence(
+                fileExists,
+                directoryExists,
+                fileOrDirectoryExists);
+            if (!IsConsistent(merged))
+            {
+                merged = default;
+                return false;
+            }
+
+            merged = Normalize(merged);
+            return true;
+        }
+
+        internal bool TryGet(
+            EvaluationPathKind kind,
+            out bool exists)
+        {
+            bool? value = kind switch
+            {
+                EvaluationPathKind.File => FileExists,
+                EvaluationPathKind.Directory => DirectoryExists,
+                _ => FileOrDirectoryExists,
+            };
+            if (!value.HasValue)
+            {
+                value = kind switch
+                {
+                    EvaluationPathKind.File when DirectoryExists == true => false,
+                    EvaluationPathKind.File when FileOrDirectoryExists == false => false,
+                    EvaluationPathKind.File when
+                        DirectoryExists == false &&
+                        FileOrDirectoryExists == true => true,
+                    EvaluationPathKind.Directory when FileExists == true => false,
+                    EvaluationPathKind.Directory when FileOrDirectoryExists == false => false,
+                    EvaluationPathKind.Directory when
+                        FileExists == false &&
+                        FileOrDirectoryExists == true => true,
+                    EvaluationPathKind.FileOrDirectory when FileExists == true => true,
+                    EvaluationPathKind.FileOrDirectory when DirectoryExists == true => true,
+                    _ => null,
+                };
+            }
+
+            exists = value.GetValueOrDefault();
+            return value.HasValue;
+        }
+
+        internal bool IsConsistentWithTimestamp(bool timestampIndicatesExistence) =>
+            !timestampIndicatesExistence ||
+            FileOrDirectoryExists != false;
+
+        internal bool Equals(EvaluationPathExistence other) =>
+            FileExists == other.FileExists &&
+            DirectoryExists == other.DirectoryExists &&
+            FileOrDirectoryExists == other.FileOrDirectoryExists;
+
+        private static bool TryMergeValue(
+            bool? first,
+            bool? second,
+            out bool? merged)
+        {
+            if (first.HasValue &&
+                second.HasValue &&
+                first.GetValueOrDefault() != second.GetValueOrDefault())
+            {
+                merged = null;
+                return false;
+            }
+
+            merged = first ?? second;
+            return true;
+        }
+
+        private static bool IsConsistent(EvaluationPathExistence existence)
+        {
+            if (existence.FileExists == true &&
+                existence.DirectoryExists == true)
+            {
+                return false;
+            }
+
+            if (existence.FileOrDirectoryExists == false &&
+                (existence.FileExists == true ||
+                 existence.DirectoryExists == true))
+            {
+                return false;
+            }
+
+            return existence.FileOrDirectoryExists != true ||
+                existence.FileExists != false ||
+                existence.DirectoryExists != false;
+        }
+
+        private static EvaluationPathExistence Normalize(
+            EvaluationPathExistence existence)
+        {
+            if (existence.FileExists == true ||
+                existence.DirectoryExists == true)
+            {
+                return new EvaluationPathExistence(
+                    existence.FileExists,
+                    existence.DirectoryExists,
+                    fileOrDirectoryExists: null);
+            }
+
+            if (existence.FileOrDirectoryExists == false)
+            {
+                return new EvaluationPathExistence(
+                    fileExists: null,
+                    directoryExists: null,
+                    fileOrDirectoryExists: false);
+            }
+
+            if (existence.FileExists == false &&
+                existence.DirectoryExists == false)
+            {
+                return new EvaluationPathExistence(
+                    fileExists: null,
+                    directoryExists: null,
+                    fileOrDirectoryExists: false);
+            }
+
+            return existence;
+        }
+    }
+
     internal enum EvaluationEnumerationKind
     {
         Files,
@@ -306,23 +496,20 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationFilesystemTimestampObservation(
             string path,
             long lastWriteTimeUtcTicks,
-            bool exists,
-            EvaluationPathKind kind,
+            EvaluationPathExistence existence,
             EvaluationFilesystemTimestampSource sources,
             string provider)
         {
             Path = path;
             LastWriteTimeUtcTicks = lastWriteTimeUtcTicks;
-            Exists = exists;
-            Kind = kind;
+            Existence = existence;
             Sources = sources;
             Provider = provider;
         }
 
         internal string Path { get; }
         internal long LastWriteTimeUtcTicks { get; }
-        internal bool Exists { get; }
-        internal EvaluationPathKind Kind { get; }
+        internal EvaluationPathExistence Existence { get; }
         internal EvaluationFilesystemTimestampSource Sources { get; }
         internal string Provider { get; }
     }

@@ -12,9 +12,9 @@
 >
 > The historical rows also predate strict snapshot admission, the
 > conflicting-observation analysis gate, and reparse-component scanning during capture
-> and validation. Current benchmark setup may reject a blocked report instead of
-> reproducing those rows, and both scan costs have changed; the rows are retained only
-> as prior directional evidence.
+> and validation, as well as independent typed-existence replay. Current benchmark setup
+> may reject a blocked report instead of reproducing those rows, and validation costs
+> have changed; the rows are retained only as prior directional evidence.
 
 ## Historical result
 
@@ -37,7 +37,8 @@ carried forward to the restacked branch.
 
 Timestamp-only invalidation is not sufficient for production correctness. It
 cannot detect timestamp-preserving changes, changes within filesystem timestamp
-granularity, or replacement with the same timestamp.
+granularity, or replacement that preserves both the timestamp and every existence
+predicate evaluation actually consumed.
 
 ## Current restacked mechanism and limitations
 
@@ -46,10 +47,15 @@ observer-active globs through the legacy driver because only that path reports e
 traversed directory. An unobserved evaluation may still use an optimized driver, so the
 existing benchmarks are intentionally historical until graph alignment is implemented.
 
-The observation session records a canonical absolute path, path kind,
-existence, consumed last-write timestamp, and source flags for each filesystem
-identity needed by timestamp validation. Repeated observations of the same path
-reuse one timestamp observation during an evaluation.
+The observation session records a canonical absolute path, independent expected
+results for file existence, directory existence, and generic file-or-directory
+existence, the consumed last-write timestamp, and source flags for each filesystem
+identity needed by timestamp validation. Opposite-kind probes therefore remain
+independent: `File.Exists` can be false while `Directory.Exists` is true for the same
+path. Successful file reads record file existence, and successful enumerations record
+directory existence. Logically entailed predicates are collapsed, so a known file or
+directory does not also retain a redundant generic-existence check. Repeated
+observations reuse one path-level timestamp during an evaluation.
 
 The snapshot includes dependencies from:
 
@@ -138,12 +144,22 @@ Validation performs these operations:
    `ReparsePointTraversal` on the first match or `Failed` with
    `ReparsePointStateUnknown` on any other attribute error.
 2. Read each dependency's current last-write timestamp.
-3. Resolve existence when the timestamp alone cannot distinguish an absent
-   path from an existing path with the missing-value timestamp.
-4. Return `Changed` on the first timestamp or existence mismatch.
+3. Replay each file, directory, and generic-existence predicate that evaluation
+   actually consumed.
+4. Return `Changed` on the first timestamp or typed-existence mismatch.
 
-It does not reread or hash contents, replay probes, or reenumerate globs.
+It does not reread or hash contents, rerun complete probe/search operations, or
+reenumerate globs; it replays only stored existence predicates. After a matching
+timestamp, each entry performs only the non-entailed existence checks retained in its
+snapshot state. This is generally one additional `FileExists` or `DirectoryExists`
+call for typed file and directory dependencies; generic `exists == true` is free when
+the matching timestamp already proves that some path exists. Current historical timing
+rows predate these checks.
 The reported check counts include the operation that found a change or failed.
+
+A negative typed probe can bind the snapshot to the path-level timestamp of an existing
+opposite-kind object. Churn inside that object may therefore invalidate conservatively
+even though the consumed typed predicate remains false.
 
 This prototype covers only filesystem mutations. Environment variables,
 global properties, toolset selection, SDK resolver results, Registry values,
