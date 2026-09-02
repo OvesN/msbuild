@@ -1,39 +1,37 @@
 # Evaluation filesystem timestamp invalidation prototype
 
 > [!IMPORTANT]
-> These measurements were collected on the pre-restack base, before current `main`
-> introduced the optimized FileMatcher drivers. They are retained as historical
-> prototype evidence only and are not decision-grade for the restacked PR.
+> These measurements cover the current restacked prototype, including optimized
+> FileMatcher traversal observation, strict default-deny admission, typed-existence
+> replay, and reparse-component validation.
 >
-> Observer-active globs now retain the selected optimized FileMatcher driver. Both the
-> direct and callback optimized drivers report traversed directories, while unsupported
-> patterns retain their normal legacy fallback. The historical rows predate this change
-> and still cannot support a current continuation decision.
->
-> The historical rows also predate strict snapshot admission, the
-> conflicting-observation analysis gate, and reparse-component scanning during capture
-> and validation, as well as independent typed-existence replay. Current benchmark setup
-> may reject a blocked report instead of reproducing those rows, and validation costs
-> have changed; the rows are retained only as prior directional evidence.
+> The benchmark uses the analysis-only filesystem slice. Current observation coverage
+> remains intentionally ineligible for a real cache hit, and the measurements exclude
+> cache lookup, serialization, loading, result materialization, concurrency, eviction,
+> non-filesystem dependency validation, and the validation-to-materialization race.
 
-## Historical result
+## Current result
 
-On the pre-restack base, the prototype showed that timestamp validation itself was
-substantially cheaper
-than reevaluating the OrchardCore and Roslyn projects exercised here:
+Three-launch BenchmarkDotNet runs on 2026-09-02 show:
 
-- a valid snapshot scan cost 3.656-6.425 ms, about 3-5% of a fresh evaluation;
-- a file mutation detected early cost 0.089-0.313 ms;
-- a glob membership mutation detected late cost 5.864-7.072 ms, about 4-6%
-  of a fresh evaluation;
-- native observation plus filesystem-slice capture cost about 1.13-1.23x a
-  fresh evaluation.
+- complete unchanged validation costs 11.969 ms for OrchardCore Core, 19.342 ms
+  for OrchardCore CMS, and 16.800 ms for Roslyn Workspaces;
+- those scans cost 16.9%, 20.9%, and 14.4% of fresh evaluation respectively,
+  making them approximately 5.9x, 4.8x, and 6.9x faster than reevaluation;
+- project-file and imported-file invalidation costs 7.2-10.5% of fresh
+  evaluation after paying the mandatory complete reparse-component scan;
+- naturally triggered glob-membership invalidation costs 20.6% of fresh
+  OrchardCore CMS evaluation and 13.7% of fresh Roslyn evaluation;
+- observation alone adds approximately 1.04-1.13x evaluation time and
+  1.04-1.05x managed allocation;
+- observation plus snapshot capture costs approximately 1.38-1.54x fresh
+  evaluation time and 1.07-1.08x managed allocation.
 
-Those historical results did not prove that a persistent evaluation cache was worthwhile,
-because cache serialization, loading, materialization, and real hit rates are
-not measured. On that base, the measured validation work was approximately 21-30 times
-cheaper than reevaluation before accounting for cache-load cost. That conclusion is not
-carried forward to the restacked branch.
+The current complete scan does not meet the predeclared continuation target of
+less than 10% of fresh evaluation. It is still substantially cheaper than
+reevaluation, so the result supports a focused optimization experiment, not a
+claim that the present invalidation design is cheap enough or that a complete
+persistent cache will be beneficial.
 
 Timestamp-only invalidation is not sufficient for production correctness. It
 cannot detect timestamp-preserving changes, changes within filesystem timestamp
@@ -56,7 +54,7 @@ evidence.
 Observation adds one synchronized directory record and a first-use timestamp read for
 each optimized directory traversal. The direct optimized driver is otherwise
 callback-free, so this work can be a larger proportional overhead than it was on legacy
-traversal and must be included in future observer-overhead measurements.
+traversal and is included in the current observer-overhead measurements.
 
 The observation session records a canonical absolute path, independent expected
 results for file existence, directory existence, and generic file-or-directory
@@ -164,8 +162,8 @@ reenumerate globs; it replays only stored existence predicates. After a matching
 timestamp, each entry performs only the non-entailed existence checks retained in its
 snapshot state. This is generally one additional `FileExists` or `DirectoryExists`
 call for typed file and directory dependencies; generic `exists == true` is free when
-the matching timestamp already proves that some path exists. Current historical timing
-rows predate these checks.
+the matching timestamp already proves that some path exists. The current timing rows
+include these checks.
 The reported check counts include the operation that found a change or failed.
 
 A negative typed probe can bind the snapshot to the path-level timestamp of an existing
@@ -179,95 +177,145 @@ remain part of the observation report and require cache-key fields or their own
 versioned dependency contracts. SDK resolver filesystem dependencies are
 intentionally deferred to the resolver contract.
 
-## OrchardCore BenchmarkDotNet setup
+## Current BenchmarkDotNet setup
 
 | Property | Value |
 | --- | --- |
-| Date | 2026-08-28 |
-| Platform | Windows |
-| Runtime | .NET 11 preview |
+| Date | 2026-09-02 |
+| Prototype implementation | `981f36c87de4001d6c614bcbe33a32831b51f716` plus benchmark-only batching in this update |
+| Platform | Windows 11 `10.0.26200.9106`, Hyper-V |
+| Processor | AMD EPYC 7763, 8 physical / 16 logical cores |
+| Memory | 63.95 GB |
+| Power plan | High performance |
+| Runtime | .NET 11 RC1, x64 RyuJIT |
+| SDK | `11.0.100-rc.1.26420.103` |
+| BenchmarkDotNet | `0.16.0-preview.1` |
 | Configuration | Release |
-| Job | 1 launch, 3 warmups, 12 measured iterations, 1 invocation |
-| Core project | `src\OrchardCore\OrchardCore\OrchardCore.csproj` |
-| CMS project | `src\OrchardCore.Cms.Web\OrchardCore.Cms.Web.csproj` |
-| Core snapshot | 90 timestamp identities |
-| CMS snapshot | 151 timestamp identities |
+| Job | Monitoring, 3 launches, 3 warmups, 12 measured iterations |
+| Per-invocation batching | 2 evaluations, 8 captures, or 24 validations; reported values are normalized per operation |
 
-The normal suite compares an unobserved evaluation, an observed evaluation,
-an observed evaluation followed by snapshot capture, snapshot capture alone,
-isolated reparse-component validation, benchmark-only timestamp validation without the
-component check, and complete validation of an unchanged snapshot. Snapshot capture
-includes a final full validation pass before returning the snapshot.
+| Workload | Commit | Project | Timestamps | Reparse components | Capture probes |
+| --- | --- | --- | ---: | ---: | ---: |
+| OrchardCore Core | `e3f8acb327a95f1dec6e75cefccaef2ad5eefb45` | `src\OrchardCore\OrchardCore\OrchardCore.csproj` | 90 | 149 | 298 |
+| OrchardCore CMS | `e3f8acb327a95f1dec6e75cefccaef2ad5eefb45` | `src\OrchardCore.Cms.Web\OrchardCore.Cms.Web.csproj` | 151 | 236 | 472 |
+| Roslyn Workspaces | `0f82fdec3c901702ec7fc3f0e9a813330a903ec9` | `src\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj` | 161 | 233 | 466 |
 
-### Filesystem-slice capture and validation costs
+The benchmark checkouts were restored and clean before and after every run.
+BenchmarkDotNet reported no minimum-iteration-time warnings in the final runs.
+It did report the Hyper-V environment and multimodal distributions for some
+evaluation rows, so the direct validation measurements are more stable than
+small differences between independent full evaluations. Errors below are
+BenchmarkDotNet's 99.9% confidence-interval half widths.
 
-| Workload | Core mean | Core vs. fresh | CMS mean | CMS vs. fresh |
-| --- | ---: | ---: | ---: | ---: |
-| Fresh evaluation | 84.169 ms | 1.00x | 136.465 ms | 1.00x |
-| Observed evaluation | 95.773 ms | 1.14x | 153.426 ms | 1.12x |
-| Observed evaluation and snapshot capture | 103.342 ms | 1.23x | 160.308 ms | 1.17x |
-| Snapshot capture | 3.718 ms | 0.04x | 6.629 ms | 0.05x |
-| Valid snapshot validation | 3.656 ms | 0.04x | 6.425 ms | 0.05x |
+### Reproduction
 
-Observation added approximately 304 KB per Core evaluation and 487 KB per CMS
-evaluation. Observation plus snapshot capture added approximately 324 KB and
-505 KB, respectively.
+Run from the MSBuild repository root with disposable restored OrchardCore and
+Roslyn checkouts:
 
-### Mutation and miss costs
+```powershell
+$OrchardRoot = 'C:\src\OrchardCore'
+$RoslynRoot = 'C:\src\roslyn'
+$ResultsRoot = 'C:\benchmark-results\evaluation-timestamp'
+$SdkVersion = (Get-Content .\global.json -Raw | ConvertFrom-Json).tools.dotnet
+
+$env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_SDK_ROOT =
+    (Resolve-Path ".\.dotnet\sdk\$SdkVersion").Path
+$env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS = @(
+    "$OrchardRoot\src\OrchardCore\OrchardCore\OrchardCore.csproj"
+    "$OrchardRoot\src\OrchardCore.Cms.Web\OrchardCore.Cms.Web.csproj"
+    "$RoslynRoot\src\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj"
+) -join [IO.Path]::PathSeparator
+Remove-Item Env:\MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS -ErrorAction SilentlyContinue
+
+.\src\MSBuild.Benchmarks\Run-Benchmarks.ps1 `
+    -Filter '*OrchardCoreEvaluationFilesystemTimestampBenchmark.*' `
+    -Framework net11.0 `
+    -LaunchCount 3 `
+    -ArtifactsPath "$ResultsRoot\normal"
+```
+
+```powershell
+$env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS = 'ProjectFile,ImportFile'
+
+.\src\MSBuild.Benchmarks\Run-Benchmarks.ps1 `
+    -Filter '*OrchardCoreEvaluationFilesystemTimestampStaleBenchmark.*' `
+    -Framework net11.0 `
+    -LaunchCount 3 `
+    -ArtifactsPath "$ResultsRoot\file-import"
+```
+
+```powershell
+$env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS = @(
+    "$OrchardRoot\src\OrchardCore.Cms.Web\OrchardCore.Cms.Web.csproj"
+    "$RoslynRoot\src\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj"
+) -join [IO.Path]::PathSeparator
+$env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS = 'GlobMembership'
+
+.\src\MSBuild.Benchmarks\Run-Benchmarks.ps1 `
+    -Filter '*OrchardCoreEvaluationFilesystemTimestampStaleBenchmark.*' `
+    -Framework net11.0 `
+    -LaunchCount 3 `
+    -ArtifactsPath "$ResultsRoot\glob"
+```
+
+### Evaluation, observation, and capture overhead
+
+| Workload | Fresh evaluation | Observed evaluation | Time ratio | Allocation ratio | Observed and capture | Time ratio | Allocation ratio | Capture only |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| OrchardCore Core | 70.714 +/- 3.964 ms | 72.880 +/- 4.155 ms | 1.04x | 1.04x | 96.689 +/- 5.768 ms | 1.38x | 1.07x | 23.490 +/- 2.617 ms |
+| OrchardCore CMS | 92.384 +/- 4.974 ms | 103.938 +/- 7.782 ms | 1.13x | 1.05x | 140.850 +/- 10.805 ms | 1.54x | 1.08x | 29.382 +/- 1.913 ms |
+| Roslyn Workspaces | 116.306 +/- 8.309 ms | 128.887 +/- 9.868 ms | 1.12x | 1.05x | 163.131 +/- 10.757 ms | 1.42x | 1.07x | 25.934 +/- 1.681 ms |
+
+Observation alone adds approximately 3-13% mean evaluation time and 4-5%
+managed allocation. Observation plus capture adds approximately 38-54% mean
+time and 7-8% managed allocation. Snapshot capture alone costs 22-33% of fresh
+evaluation because capture performs the initial metadata reads and a final
+complete validation, including two reparse-component passes overall.
+
+### Unchanged validation versus fresh reevaluation
+
+| Workload | Reparse check only | Timestamp and existence only | Complete validation | Percent of fresh | Fresh / validation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| OrchardCore Core | 6.621 +/- 0.774 ms | 6.986 +/- 0.763 ms | 11.969 +/- 0.868 ms | 16.9% | 5.9x |
+| OrchardCore CMS | 9.544 +/- 0.669 ms | 10.367 +/- 0.677 ms | 19.342 +/- 1.090 ms | 20.9% | 4.8x |
+| Roslyn Workspaces | 8.222 +/- 0.510 ms | 9.550 +/- 0.638 ms | 16.800 +/- 0.736 ms | 14.4% | 6.9x |
+
+The isolated reparse and timestamp rows are diagnostic and are not additive:
+they run separately with different filesystem-cache state. The
+timestamp-without-reparse row is benchmark-only and cannot make a safe reuse
+decision. The complete validation row is the relevant cache-hit invalidation
+cost.
+
+### Changed dependency and miss costs
 
 The stale suite mutates a real observed dependency before each measured
-iteration and restores the exact contents and timestamp afterward.
+iteration and exactly restores it afterward. Glob membership is changed by
+creating a file and relying on the filesystem's natural parent-directory
+timestamp update; the benchmark does not force that directory timestamp.
+OrchardCore Core has no eligible observed glob directory, so its glob case is
+not applicable.
 
-| Mutation | Fresh evaluation | Stale validation | Validation and reevaluation | Combined ratio |
-| --- | ---: | ---: | ---: | ---: |
-| Core project file | 95.603 ms | 0.089 ms | 88.264 ms | 0.93x |
-| Core imported `Directory.Build.props` | 89.181 ms | 0.283 ms | 88.857 ms | 1.00x |
-| CMS glob membership | 125.621 ms | 7.072 ms | 144.237 ms | 1.15x |
+| Workload | Mutation | Fresh evaluation | Stale validation | Percent of fresh | Validation and reevaluation | Combined ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| OrchardCore Core | Project file | 62.861 ms | 5.561 ms | 8.8% | 66.090 ms | 1.06x |
+| OrchardCore Core | Imported file | 80.804 ms | 7.309 ms | 9.0% | 72.529 ms | 0.91x |
+| OrchardCore CMS | Project file | 88.410 ms | 8.644 ms | 9.8% | 95.588 ms | 1.09x |
+| OrchardCore CMS | Imported file | 92.039 ms | 9.685 ms | 10.5% | 107.247 ms | 1.17x |
+| OrchardCore CMS | Glob membership | 91.070 ms | 18.770 ms | 20.6% | 111.630 ms | 1.24x |
+| Roslyn Workspaces | Project file | 107.566 ms | 7.741 ms | 7.2% | 122.131 ms | 1.15x |
+| Roslyn Workspaces | Imported file | 113.682 ms | 8.372 ms | 7.4% | 116.926 ms | 1.04x |
+| Roslyn Workspaces | Glob membership | 115.410 ms | 15.830 ms | 13.7% | 135.950 ms | 1.20x |
 
-The combined Core values are within run-to-run evaluation noise and must not be
-interpreted as invalidation making reevaluation faster. These historical stale rows
-predate reparse-component validation. The current algorithm scans all stored components
-before reading the first timestamp, so every current hit or miss pays that complete
-component-scan cost; only the subsequent timestamp scan retains early-out behavior. A
-production implementation should validate each entry's memoized component chain
-immediately before its timestamp read, preserving the same safety while restoring
-early-out across the combined scan.
+The current algorithm scans every stored component before reading the first
+timestamp. Consequently, project and import changes no longer produce the
+sub-millisecond early-out seen in the historical prototype. The timestamp
+scan still exits early, while a glob mutation is detected near the end of the
+complete scan.
 
-## Roslyn Workspaces BenchmarkDotNet results
-
-The same statistical jobs were run on Roslyn commit
-`0f82fdec3c901702ec7fc3f0e9a813330a903ec9`, using
-`src\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj`.
-This evaluation allocated about 13.4 MB and produced a snapshot with 161
-timestamp identities.
-
-### Filesystem-slice capture and validation costs
-
-| Workload | Mean | Ratio to fresh |
-| --- | ---: | ---: |
-| Fresh evaluation | 163.786 ms | 1.00x |
-| Observed evaluation | 187.436 ms | 1.15x |
-| Observed evaluation and snapshot capture | 184.270 ms | 1.13x |
-| Snapshot capture | 6.041 ms | 0.04x |
-| Valid snapshot validation | 5.475 ms | 0.03x |
-
-Observation added approximately 675 KB per evaluation. Observation plus
-snapshot capture added approximately 703 KB. The observed-plus-capture mean is
-lower than the observed-only mean because the independently measured
-evaluations vary by several milliseconds; the standalone 6.041 ms capture row
-is the clearer measurement of capture work.
-
-### Mutation and miss costs
-
-| Mutation | Fresh evaluation | Stale validation | Validation and reevaluation | Combined ratio |
-| --- | ---: | ---: | ---: | ---: |
-| Workspaces project file | 159.073 ms | 0.090 ms | 178.483 ms | 1.12x |
-| Roslyn `Directory.Build.props` import | 158.594 ms | 0.313 ms | 166.774 ms | 1.05x |
-| `src\Dependencies\PooledObjects` glob membership | 166.512 ms | 5.864 ms | 169.699 ms | 1.02x |
-
-The direct stale-validation cost remains the useful incremental measurement.
-The combined rows include normal reevaluation variance and should not be used
-to infer that the sub-millisecond file scan caused the full difference.
+The direct stale-validation rows are the useful incremental measurement.
+Combined rows include normal reevaluation variance and, for glob membership,
+a genuinely changed item set. In particular, the 0.91x Core import result is
+measurement noise and does not mean validation makes reevaluation faster.
 
 ## Historical BuildXL coverage comparison
 
@@ -292,9 +340,15 @@ historical evidence, not BuildXL coverage evidence for the newly observer-enable
 optimized drivers, and not a proof over every possible project, custom filesystem
 provider, property function, or future SDK resolver.
 
-## Historical decision withdrawn
+## Decision
 
-The pre-restack continuation statement is withdrawn for the current branch. The next
-decision-grade run must first align the observed, validation, and fresh-evaluation graphs
-and then answer only whether a complete timestamp scan is sufficiently cheaper than
-fresh evaluation to continue.
+The current restacked result supersedes the historical timing rows. Complete
+validation is 4.8-6.9x faster than fresh reevaluation, but it consumes
+14.4-20.9% of reevaluation time and therefore does not pass the predeclared
+less-than-10% continuation threshold.
+
+The result is sufficient to justify one targeted optimization stage: combine
+attributes, existence, and timestamps into fewer metadata probes, deduplicate
+component work, and interleave component and timestamp checks to restore
+early-out behavior. The benchmark must then be rerun. This report does not
+justify implementing persistence or claiming an end-to-end cache speedup yet.

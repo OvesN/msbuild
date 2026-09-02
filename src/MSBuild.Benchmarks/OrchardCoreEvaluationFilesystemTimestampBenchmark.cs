@@ -31,6 +31,9 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
     private const string ProjectsEnvironmentVariable = "MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS";
     private const string SdkRootEnvironmentVariable = "MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_SDK_ROOT";
     private const string UnconfiguredProjectPath = "<configure OrchardCore project paths>";
+    private protected const int EvaluationOperationsPerInvoke = 2;
+    private protected const int SnapshotCaptureOperationsPerInvoke = 8;
+    private protected const int ValidationOperationsPerInvoke = 24;
 
     private protected EvaluationFilesystemTimestampCaptureResult BaselineCapture { get; private set; }
     private protected EvaluationObservationReport BaselineReport { get; private set; } = null!;
@@ -365,7 +368,6 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
                 {
                     File.WriteAllText(Path, "// Evaluation timestamp benchmark mutation.");
                     File.SetLastWriteTimeUtc(Path, changedTimestamp);
-                    Directory.SetLastWriteTimeUtc(System.IO.Path.GetDirectoryName(Path)!, changedTimestamp);
                 }
                 else
                 {
@@ -587,29 +589,89 @@ public class OrchardCoreEvaluationFilesystemTimestampBenchmark :
         [nameof(ObservedEvaluation), nameof(ObservedEvaluationAndSnapshotCapture)])]
     public void EndObservedBenchmarkIteration() => EndObservedIteration();
 
-    [Benchmark(Baseline = true)]
-    public int FreshEvaluation() => FreshEvaluationCore();
+    [Benchmark(Baseline = true, OperationsPerInvoke = EvaluationOperationsPerInvoke)]
+    public int FreshEvaluation()
+    {
+        int result = 0;
+        for (int i = 0; i < EvaluationOperationsPerInvoke; i++)
+        {
+            result += FreshEvaluationCore();
+        }
 
-    [Benchmark]
-    public int ObservedEvaluation() => ObservedEvaluationCore();
+        return result;
+    }
 
-    [Benchmark]
-    public int ObservedEvaluationAndSnapshotCapture() =>
-        ObservedEvaluationAndSnapshotCaptureCore();
+    [Benchmark(OperationsPerInvoke = EvaluationOperationsPerInvoke)]
+    public int ObservedEvaluation()
+    {
+        int result = 0;
+        for (int i = 0; i < EvaluationOperationsPerInvoke; i++)
+        {
+            result += ObservedEvaluationCore();
+        }
 
-    [Benchmark]
-    public int SnapshotCapture() => SnapshotCaptureCore();
+        return result;
+    }
 
-    [Benchmark]
-    public int ValidReparsePointValidation() =>
-        ValidReparsePointValidationCore();
+    [Benchmark(OperationsPerInvoke = EvaluationOperationsPerInvoke)]
+    public int ObservedEvaluationAndSnapshotCapture()
+    {
+        int result = 0;
+        for (int i = 0; i < EvaluationOperationsPerInvoke; i++)
+        {
+            result += ObservedEvaluationAndSnapshotCaptureCore();
+        }
 
-    [Benchmark]
-    public int ValidTimestampValidationWithoutReparsePointCheck() =>
-        ValidTimestampValidationWithoutReparsePointCheckCore();
+        return result;
+    }
 
-    [Benchmark]
-    public int ValidValidation() => ValidValidationCore();
+    [Benchmark(OperationsPerInvoke = SnapshotCaptureOperationsPerInvoke)]
+    public int SnapshotCapture()
+    {
+        int result = 0;
+        for (int i = 0; i < SnapshotCaptureOperationsPerInvoke; i++)
+        {
+            result += SnapshotCaptureCore();
+        }
+
+        return result;
+    }
+
+    [Benchmark(OperationsPerInvoke = ValidationOperationsPerInvoke)]
+    public int ValidReparsePointValidation()
+    {
+        int result = 0;
+        for (int i = 0; i < ValidationOperationsPerInvoke; i++)
+        {
+            result += ValidReparsePointValidationCore();
+        }
+
+        return result;
+    }
+
+    [Benchmark(OperationsPerInvoke = ValidationOperationsPerInvoke)]
+    public int ValidTimestampValidationWithoutReparsePointCheck()
+    {
+        int result = 0;
+        for (int i = 0; i < ValidationOperationsPerInvoke; i++)
+        {
+            result += ValidTimestampValidationWithoutReparsePointCheckCore();
+        }
+
+        return result;
+    }
+
+    [Benchmark(OperationsPerInvoke = ValidationOperationsPerInvoke)]
+    public int ValidValidation()
+    {
+        int result = 0;
+        for (int i = 0; i < ValidationOperationsPerInvoke; i++)
+        {
+            result += ValidValidationCore();
+        }
+
+        return result;
+    }
 }
 
 [MemoryDiagnoser]
@@ -730,22 +792,43 @@ public class OrchardCoreEvaluationFilesystemTimestampStaleBenchmark :
             EvaluationFilesystemTimestampValidationStatus.Valid);
     }
 
-    [Benchmark(Baseline = true)]
-    public int FreshEvaluation() => FreshEvaluationCore();
-
-    [Benchmark]
-    public int StaleValidation()
+    [Benchmark(Baseline = true, OperationsPerInvoke = EvaluationOperationsPerInvoke)]
+    public int FreshEvaluation()
     {
-        EvaluationFilesystemTimestampValidationResult validation = Snapshot.Validate();
-        EnsureValidationStatus(validation, EvaluationFilesystemTimestampValidationStatus.Changed);
-        return validation.CheckedTimestampCount;
+        int result = 0;
+        for (int i = 0; i < EvaluationOperationsPerInvoke; i++)
+        {
+            result += FreshEvaluationCore();
+        }
+
+        return result;
     }
 
-    [Benchmark]
+    [Benchmark(OperationsPerInvoke = ValidationOperationsPerInvoke)]
+    public int StaleValidation()
+    {
+        int result = 0;
+        for (int i = 0; i < ValidationOperationsPerInvoke; i++)
+        {
+            EvaluationFilesystemTimestampValidationResult validation = Snapshot.Validate();
+            EnsureValidationStatus(validation, EvaluationFilesystemTimestampValidationStatus.Changed);
+            result += validation.CheckedTimestampCount;
+        }
+
+        return result;
+    }
+
+    [Benchmark(OperationsPerInvoke = EvaluationOperationsPerInvoke)]
     public int StaleValidationAndFreshEvaluation()
     {
-        EvaluationFilesystemTimestampValidationResult validation = Snapshot.Validate();
-        EnsureValidationStatus(validation, EvaluationFilesystemTimestampValidationStatus.Changed);
-        return validation.CheckedTimestampCount + Evaluate();
+        int result = 0;
+        for (int i = 0; i < EvaluationOperationsPerInvoke; i++)
+        {
+            EvaluationFilesystemTimestampValidationResult validation = Snapshot.Validate();
+            EnsureValidationStatus(validation, EvaluationFilesystemTimestampValidationStatus.Changed);
+            result += validation.CheckedTimestampCount + Evaluate();
+        }
+
+        return result;
     }
 }
