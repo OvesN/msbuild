@@ -2107,7 +2107,20 @@ namespace Microsoft.Build.UnitTests.Definition
         public void EvaluationObservationRecordsEnvironmentAndPropertyFunctions()
         {
             _env.SetEnvironmentVariable("OBSERVED_ENVIRONMENT_INPUT", "environment-value");
-            _env.CreateFile("settings.txt", "settings-value");
+            string projectSettingsPath = _env.CreateFile("settings.txt", "settings-value").Path;
+            string currentDirectory = _env.CreateFolder(
+                Path.Combine(
+                    _env.DefaultTestDirectory.Path,
+                    "ambient-current-directory")).Path;
+            string currentDirectorySettingsPath = _env.CreateFile(
+                Path.Combine(currentDirectory, "settings.txt"),
+                "current-directory-settings").Path;
+            File.SetLastWriteTime(
+                currentDirectorySettingsPath,
+                DateTime.Now.AddHours(-2));
+            string expectedModifiedTime = File.GetLastWriteTime(currentDirectorySettingsPath)
+                .ToString(FileUtilities.FileTimeFormat);
+            _env.SetCurrentDirectory(currentDirectory);
 
             EvaluationObservationReport report = null;
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
@@ -2130,6 +2143,8 @@ namespace Microsoft.Build.UnitTests.Definition
                   <ItemGroup>
                     <Input Include="settings.txt" />
                     <MetadataValue Include="@(Input->'%(ModifiedTime)')" />
+                    <Missing Include="missing.txt" />
+                    <MissingMetadataValue Include="@(Missing->'%(ModifiedTime)')" />
                   </ItemGroup>
                 </Project>
                 """.Cleanup()).Path;
@@ -2180,7 +2195,19 @@ namespace Microsoft.Build.UnitTests.Definition
                 observation.Kind == EvaluationMetadataKind.ItemModifiedTime &&
                 FileUtilities.PathsEqual(
                     observation.Path,
-                    Path.Combine(Path.GetDirectoryName(projectFile), "settings.txt")));
+                    currentDirectorySettingsPath) &&
+                FileUtilities.PathsEqual(observation.BaseDirectory, currentDirectory) &&
+                observation.TextValue == expectedModifiedTime);
+            report.MetadataReads.ShouldNotContain(observation =>
+                observation.Kind == EvaluationMetadataKind.ItemModifiedTime &&
+                FileUtilities.PathsEqual(observation.Path, projectSettingsPath));
+            report.MetadataReads.ShouldContain(observation =>
+                observation.Kind == EvaluationMetadataKind.ItemModifiedTime &&
+                FileUtilities.PathsEqual(
+                    observation.Path,
+                    Path.Combine(currentDirectory, "missing.txt")) &&
+                FileUtilities.PathsEqual(observation.BaseDirectory, currentDirectory) &&
+                observation.TextValue == string.Empty);
             (report.Reasons & EvaluationObservationReason.UnsupportedVolatileInput)
                 .ShouldBe(EvaluationObservationReason.UnsupportedVolatileInput);
             (report.Reasons & EvaluationObservationReason.UnrootedPath)

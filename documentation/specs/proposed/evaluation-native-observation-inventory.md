@@ -280,7 +280,7 @@ dependency identity.
 | Last-write time | `IFileSystem.GetLastWriteTimeUtc` or classified function | Exact returned value and outcome |
 | Creation, last-access, and local/UTC write times | classified `File` / `Directory` / `FileSystemInfo` member | Member, logical path, exact returned value, and time-zone dependency for local-time variants |
 | Length and other filesystem-backed `FileInfo` / `DirectoryInfo` fields | classified member dispatcher | Member, logical path/provider, exact value |
-| Built-in item metadata `%(ModifiedTime)`, `%(CreatedTime)`, `%(AccessedTime)` | `ItemSpecModifiers` / `FileUtilities.GetFileInfoNoThrow` | Metadata kind, unescaped item spec, effective base directory/source, exact returned string, and time-zone dependency |
+| Built-in item metadata `%(ModifiedTime)`, `%(CreatedTime)`, `%(AccessedTime)` | `ItemSpecModifiers` / `FileUtilities.GetFileInfoNoThrow` | Metadata kind, constructed `FileInfo.FullName` for existing or valid missing paths, process-CWD base for relative specs, exact returned string, and time-zone dependency; invalid paths remain fail-closed |
 | Symlink/reparse target | classified member/provider | Logical path, target, and provider semantics |
 
 Metadata is recorded only when evaluation consumes it. A timestamp is not a substitute for

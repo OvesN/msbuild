@@ -453,13 +453,13 @@ internal static class ItemSpecModifiers
 
                 // Time-based modifiers are NOT cached - they hit the file system.
                 case ItemSpecModifierKind.ModifiedTime:
-                    return Observe(itemSpec, modifier, currentDirectory, ComputeModifiedTime(itemSpec));
+                    return ComputeModifiedTime(itemSpec);
 
                 case ItemSpecModifierKind.CreatedTime:
-                    return Observe(itemSpec, modifier, currentDirectory, ComputeCreatedTime(itemSpec));
+                    return ComputeCreatedTime(itemSpec);
 
                 case ItemSpecModifierKind.AccessedTime:
-                    return Observe(itemSpec, modifier, currentDirectory, ComputeAccessedTime(itemSpec));
+                    return ComputeAccessedTime(itemSpec);
 
                 default:
                     break;
@@ -519,14 +519,8 @@ internal static class ItemSpecModifiers
             return value;
         }
 
-        string observedItemSpec = modifier is
-            ItemSpecModifierKind.ModifiedTime or
-            ItemSpecModifierKind.CreatedTime or
-            ItemSpecModifierKind.AccessedTime
-                ? EscapingUtilities.UnescapeAll(itemSpec)
-                : itemSpec;
         observer.RecordItemMetadata(
-            observedItemSpec,
+            itemSpec,
             modifier.ToString(),
             currentDirectory ?? FileUtilities.CurrentThreadWorkingDirectory ?? string.Empty,
             value);
@@ -636,26 +630,129 @@ internal static class ItemSpecModifiers
     }
 
     private static string ComputeModifiedTime(string itemSpec)
-        => TryGetFileInfo(itemSpec, out FileInfo? info)
-            ? info.LastWriteTime.ToString(FileUtilities.FileTimeFormat)
-            : string.Empty;
+    {
+        if (TryGetFileInfo(
+                itemSpec,
+                out FileInfo? info,
+                out FileInfo? probedFileInfo) &&
+            info is not null)
+        {
+            string value = info.LastWriteTime.ToString(FileUtilities.FileTimeFormat);
+            return ObserveFileTime(
+                itemSpec,
+                ItemSpecModifierKind.ModifiedTime,
+                probedFileInfo,
+                value);
+        }
+
+        return ObserveFileTime(
+            itemSpec,
+            ItemSpecModifierKind.ModifiedTime,
+            probedFileInfo,
+            value: string.Empty);
+    }
 
     private static string ComputeCreatedTime(string itemSpec)
-        => TryGetFileInfo(itemSpec, out FileInfo? info)
-            ? info.CreationTime.ToString(FileUtilities.FileTimeFormat)
-            : string.Empty;
+    {
+        if (TryGetFileInfo(
+                itemSpec,
+                out FileInfo? info,
+                out FileInfo? probedFileInfo) &&
+            info is not null)
+        {
+            string value = info.CreationTime.ToString(FileUtilities.FileTimeFormat);
+            return ObserveFileTime(
+                itemSpec,
+                ItemSpecModifierKind.CreatedTime,
+                probedFileInfo,
+                value);
+        }
+
+        return ObserveFileTime(
+            itemSpec,
+            ItemSpecModifierKind.CreatedTime,
+            probedFileInfo,
+            value: string.Empty);
+    }
 
     private static string ComputeAccessedTime(string itemSpec)
-        => TryGetFileInfo(itemSpec, out FileInfo? info)
-            ? info.LastAccessTime.ToString(FileUtilities.FileTimeFormat)
-            : string.Empty;
+    {
+        if (TryGetFileInfo(
+                itemSpec,
+                out FileInfo? info,
+                out FileInfo? probedFileInfo) &&
+            info is not null)
+        {
+            string value = info.LastAccessTime.ToString(FileUtilities.FileTimeFormat);
+            return ObserveFileTime(
+                itemSpec,
+                ItemSpecModifierKind.AccessedTime,
+                probedFileInfo,
+                value);
+        }
 
-    private static bool TryGetFileInfo(string itemSpec, [NotNullWhen(true)] out FileInfo? result)
+        return ObserveFileTime(
+            itemSpec,
+            ItemSpecModifierKind.AccessedTime,
+            probedFileInfo,
+            value: string.Empty);
+    }
+
+    private static string ObserveFileTime(
+        string itemSpec,
+        ItemSpecModifierKind modifier,
+        FileInfo? probedFileInfo,
+        string value)
+    {
+        IEvaluationInputObserver? observer = EvaluationInputObserver.Current;
+        if (observer is null)
+        {
+            return value;
+        }
+
+        string unescapedItemSpec = EscapingUtilities.UnescapeAll(itemSpec);
+        string observedPath;
+        try
+        {
+            observedPath = probedFileInfo?.FullName ?? unescapedItemSpec;
+        }
+        catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
+        {
+            observer.RecordAmbiguousPathProbe(unescapedItemSpec, EvaluationPathProbeKind.File);
+            observedPath = unescapedItemSpec;
+            probedFileInfo = null;
+        }
+
+        string baseDirectory = string.Empty;
+        if (probedFileInfo is not null &&
+            !FileUtilities.IsPathFullyQualifiedNoThrow(unescapedItemSpec))
+        {
+            try
+            {
+                baseDirectory = System.IO.Directory.GetCurrentDirectory();
+            }
+            catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
+            {
+            }
+        }
+
+        observer.RecordItemMetadata(
+            observedPath,
+            modifier.ToString(),
+            baseDirectory,
+            value: value);
+        return value;
+    }
+
+    private static bool TryGetFileInfo(
+        string itemSpec,
+        [NotNullWhen(true)] out FileInfo? result,
+        out FileInfo? probedFileInfo)
     {
         // About to go out to the file system.  This means data is leaving the engine, so need to unescape first.
         string unescapedItemSpec = EscapingUtilities.UnescapeAll(itemSpec);
 
-        result = FileUtilities.GetFileInfoNoThrow(unescapedItemSpec);
+        result = FileUtilities.GetFileInfoNoThrow(unescapedItemSpec, out probedFileInfo);
         return result is not null;
     }
 

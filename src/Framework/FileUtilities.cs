@@ -1245,6 +1245,15 @@ namespace Microsoft.Build.Framework
         /// <param name="filePath"></param>
         /// <returns>FileInfo around path if it is an existing /file/, else null</returns>
         internal static FileInfo? GetFileInfoNoThrow(string filePath)
+            => GetFileInfoNoThrow(filePath, out _);
+
+        /// <summary>
+        /// Gets a file info object for an existing file while also returning the
+        /// <see cref="FileInfo"/> constructed for a valid missing path.
+        /// </summary>
+        internal static FileInfo? GetFileInfoNoThrow(
+            string filePath,
+            out FileInfo? probedFileInfo)
         {
             filePath = AttemptToShortenPath(filePath);
 
@@ -1256,11 +1265,13 @@ namespace Microsoft.Build.Framework
             }
             catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
             {
+                probedFileInfo = null;
                 EvaluationInputObserver.Current?.RecordAmbiguousPathProbe(filePath, EvaluationPathProbeKind.File);
                 // Invalid or inaccessible path: treat as if nonexistent file, just as File.Exists does
                 return null;
             }
 
+            probedFileInfo = fileInfo;
             if (fileInfo.Exists)
             {
                 // It's an existing file
