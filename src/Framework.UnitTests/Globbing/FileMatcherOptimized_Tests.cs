@@ -234,6 +234,63 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
     }
 
+    [Fact]
+    public void ObservedProcessWideResultCachePartitionsFileEntryCache()
+    {
+        _ = FileMatcher.Default;
+        TransientTestFolder root = _environment.CreateFolder();
+        File.WriteAllText(Path.Combine(root.Path, "first.cs"), string.Empty);
+
+        try
+        {
+            _environment.SetEnvironmentVariable("MsBuildCacheFileEnumerations", "1");
+            FileMatcher.ClearCaches();
+            using IDisposable scope =
+                EvaluationInputObserver.Enter(new NoOpEvaluationInputObserver());
+            List<string> excludes = [ToPlatformPath("**/obj/**")];
+
+            FileMatcher withoutEntryCache = new(
+                FileSystems.Default,
+                implementation: FileMatcherImplementation.Optimized);
+            withoutEntryCache.GetFiles(
+                root.Path,
+                ToPlatformPath("**/*.cs"),
+                excludes).FileList.ShouldBe(["first.cs"]);
+
+            File.WriteAllText(Path.Combine(root.Path, "second.cs"), string.Empty);
+            FileMatcher withEntryCache = new(
+                FileSystems.Default,
+                new ConcurrentDictionary<string, IReadOnlyList<string>>(),
+                FileMatcherImplementation.Optimized);
+            withEntryCache.GetFiles(
+                root.Path,
+                ToPlatformPath("**/*.cs"),
+                excludes).FileList.ShouldBe(
+                ["first.cs", "second.cs"],
+                ignoreOrder: true);
+        }
+        finally
+        {
+            FileMatcher.ClearCaches();
+        }
+    }
+
+    [Fact]
+    public void ObservationIdentitySeparatesIncludeAndExcludeFields()
+    {
+        string root = _environment.DefaultTestDirectory.Path;
+        string includeOnly = FileMatcher.ComputeFileEnumerationCacheKey(
+            root,
+            "a*b",
+            excludes: []);
+        string includeAndExclude = FileMatcher.ComputeFileEnumerationCacheKey(
+            root,
+            "a*",
+            excludes: ["b"]);
+
+        includeOnly.ShouldNotBe(includeAndExclude);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -2402,5 +2459,54 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
 
         public bool SupportsDirectEnumeration => true;
+    }
+
+    private sealed class NoOpEvaluationInputObserver : IEvaluationInputObserver
+    {
+        public bool RetainDetails => false;
+
+        public void RecordPathProbe(string path, EvaluationPathProbeKind kind, bool exists)
+        {
+        }
+
+        public void RecordAmbiguousPathProbe(string path, EvaluationPathProbeKind kind)
+        {
+        }
+
+        public void RecordItemMetadata(string itemSpec, string modifier, string baseDirectory, string value)
+        {
+        }
+
+        public void RecordPathAdjustment(string value, string baseDirectory, string result)
+        {
+        }
+
+        public void RecordPathResolution(
+            string operation,
+            string firstInput,
+            string secondInput,
+            string firstResult,
+            string secondResult)
+        {
+        }
+
+        public void RecordGlobDirectory(
+            string directory,
+            string filespec,
+            string path,
+            bool exists,
+            string? globIdentity)
+        {
+        }
+
+        public void RecordSearch(
+            string kind,
+            string request,
+            IReadOnlyList<string> candidates,
+            int candidateCount,
+            string candidatesFingerprint,
+            string selected)
+        {
+        }
     }
 }

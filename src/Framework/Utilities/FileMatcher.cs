@@ -2099,9 +2099,9 @@ namespace Microsoft.Build.Shared
                 selection = new DriverSelection(
                     FileMatcherDriver.Legacy,
                     FileMatcherFallbackReason.LegacyImplementation,
-                    _cachedGlobExpansions is null
-                        ? CacheDriverProfile.LegacyUncached
-                        : CacheDriverProfile.LegacyCached);
+                    _usesFileSystemEntryCache
+                        ? CacheDriverProfile.LegacyCached
+                        : CacheDriverProfile.LegacyUncached);
             }
 
             if (Traits.Instance.LogExpandedWildcards)
@@ -2111,7 +2111,7 @@ namespace Microsoft.Build.Shared
                     category: nameof(FileMatcher));
             }
 
-            string observationKey = evaluationInputObserver is null
+            string? observationKey = evaluationInputObserver is null
                 ? null
                 : ComputeFileEnumerationCacheKey(
                     projectDirectoryUnescaped,
@@ -2238,9 +2238,7 @@ namespace Microsoft.Build.Shared
             string filespecUnescaped,
             IReadOnlyList<string> excludes)
         {
-            Debug.Assert(projectDirectoryUnescaped != null);
             Debug.Assert(filespecUnescaped != null);
-            Debug.Assert(Path.IsPathRooted(projectDirectoryUnescaped));
 
             int excludeSize = 0;
             if (excludes != null)
@@ -2252,45 +2250,36 @@ namespace Microsoft.Build.Shared
             }
 
             using (var builder = new ReuseableStringBuilder(
-                projectDirectoryUnescaped.Length + filespecUnescaped.Length + excludeSize))
+                (projectDirectoryUnescaped?.Length ?? 0) + filespecUnescaped.Length + excludeSize))
             {
-                bool pathValidityExceptionTriggered = false;
-                try
-                {
-                    string fullyQualifiedFilespec =
-                        Path.Combine(projectDirectoryUnescaped, filespecUnescaped);
-                    if (fullyQualifiedFilespec.Equals(filespecUnescaped, StringComparison.Ordinal))
-                    {
-                        builder.Append(filespecUnescaped);
-                    }
-                    else
-                    {
-                        builder.Append('p');
-                        builder.Append(fullyQualifiedFilespec);
-                    }
-                }
-                catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
-                {
-                    pathValidityExceptionTriggered = true;
-                }
-
-                if (pathValidityExceptionTriggered)
-                {
-                    builder.Append('e');
-                    builder.Append('p');
-                    builder.Append(projectDirectoryUnescaped);
-                    builder.Append(filespecUnescaped);
-                }
+                AppendField("p", projectDirectoryUnescaped);
+                AppendField("i", filespecUnescaped);
 
                 if (excludes != null)
                 {
                     foreach (string exclude in excludes)
                     {
-                        builder.Append(exclude);
+                        AppendField("e", exclude);
                     }
                 }
 
                 return builder.ToString();
+
+                void AppendField(string name, string value)
+                {
+                    builder.Append(name);
+                    builder.Append(':');
+                    if (value is null)
+                    {
+                        builder.Append("-1:;");
+                        return;
+                    }
+
+                    builder.Append(value.Length.ToString(CultureInfo.InvariantCulture));
+                    builder.Append(':');
+                    builder.Append(value);
+                    builder.Append(';');
+                }
             }
         }
 

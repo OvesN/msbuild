@@ -415,18 +415,20 @@ namespace Microsoft.Build.Evaluation.Context
                 EvaluationPathKind.Directory,
                 exists,
                 out _);
+            if (string.IsNullOrEmpty(globIdentity))
+            {
+                MarkTimestampSourceIncomplete(EvaluationFilesystemTimestampSource.Glob);
+                AddReason(EvaluationObservationReason.ObservationIncomplete);
+                return;
+            }
+
             Record(
                 () =>
                 {
-                    string key = globIdentity ??
-                        FileMatcher.ComputeFileEnumerationCacheKey(
-                            directory,
-                            filespec,
-                            excludes: null);
-                    if (!_globDirectories.TryGetValue(key, out HashSet<string> directories))
+                    if (!_globDirectories.TryGetValue(globIdentity, out HashSet<string> directories))
                     {
                         directories = new HashSet<string>(FileUtilities.PathComparer);
-                        _globDirectories.Add(key, directories);
+                        _globDirectories.Add(globIdentity, directories);
                     }
 
                     directories.Add(normalizedPath);
@@ -891,7 +893,7 @@ namespace Microsoft.Build.Evaluation.Context
             RecordSearch(
                 kind,
                 request,
-                _retainDetails ? CopyStrings(candidates) : [],
+                CopyStrings(candidates),
                 candidates?.Count ?? 0,
                 ComputeStringSequenceHash(candidates),
                 CopyStrings(selectedPaths),

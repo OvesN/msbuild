@@ -1,8 +1,19 @@
 # Evaluation filesystem timestamp invalidation prototype
 
-## Result
+> [!IMPORTANT]
+> These measurements were collected on the pre-restack base, before current `main`
+> introduced the optimized FileMatcher drivers. They are retained as historical
+> prototype evidence only and are not decision-grade for the restacked PR.
+>
+> The compatibility restack routes observer-active globs through the legacy driver to
+> preserve traversed-directory evidence, while an unobserved evaluation may use the
+> optimized driver. Fresh evaluation and validation benchmarks must use the same driver
+> and evaluation graph before this report can support a continuation decision.
 
-The prototype shows that timestamp validation itself is substantially cheaper
+## Historical result
+
+On the pre-restack base, the prototype showed that timestamp validation itself was
+substantially cheaper
 than reevaluating the OrchardCore and Roslyn projects exercised here:
 
 - a valid snapshot scan cost 3.656-6.425 ms, about 3-5% of a fresh evaluation;
@@ -12,18 +23,22 @@ than reevaluating the OrchardCore and Roslyn projects exercised here:
 - native observation plus snapshot capture increased a cache-producing
   evaluation by about 13-23%.
 
-These results do not prove that a persistent evaluation cache is worthwhile,
+Those historical results did not prove that a persistent evaluation cache was worthwhile,
 because cache serialization, loading, materialization, and real hit rates are
-not measured. They do show that timestamp invalidation is not, by itself, an
-obvious reason to stop the experiment. On a valid hit, the measured validation
-work is approximately 21-30 times cheaper than reevaluation before accounting
-for cache-load cost.
+not measured. On that base, the measured validation work was approximately 21-30 times
+cheaper than reevaluation before accounting for cache-load cost. That conclusion is not
+carried forward to the restacked branch.
 
 Timestamp-only invalidation is not sufficient for production correctness. It
 cannot detect timestamp-preserving changes, changes within filesystem timestamp
 granularity, or replacement with the same timestamp.
 
-## Prototype mechanism
+## Current restacked mechanism and limitations
+
+Current `main` can select optimized FileMatcher drivers. The compatibility restack forces
+observer-active globs through the legacy driver because only that path reports every
+traversed directory. An unobserved evaluation may still use an optimized driver, so the
+existing benchmarks are intentionally historical until graph alignment is implemented.
 
 The observation session records a canonical absolute path, path kind,
 existence, consumed last-write timestamp, and source flags for each filesystem
@@ -36,14 +51,18 @@ The snapshot includes dependencies from:
 - file reads and file, directory, or file-or-directory probes;
 - consumed last-write-time metadata;
 - complete directory enumerations;
-- directories actually traversed by each glob, including cached glob
-  expansions;
+- directories actually traversed by each glob, including repeated expansion within the
+  same observation session;
 - every ordered upward-search candidate and the selected result.
 
 Glob result membership is invalidated through timestamps of the directories
 that the glob actually traversed. Exact-file includes do not add an artificial
 directory dependency. Benchmark mutations exclude generated and tool roots
 such as `.dotnet`, `.git`, `artifacts`, `bin`, `obj`, and `packages`.
+
+A glob-result cache hit populated by another evaluation does not replay traversal
+evidence. Snapshot capture therefore fails closed for that case. Lazy wildcards also
+currently fail closed because no traversal occurs.
 
 Snapshot admission fails closed when observation is incomplete, a project
 source changed while it was read, timestamps conflict, a path is unrooted, an
@@ -151,10 +170,10 @@ The direct stale-validation cost remains the useful incremental measurement.
 The combined rows include normal reevaluation variance and should not be used
 to infer that the sub-millisecond file scan caused the full difference.
 
-## Fresh BuildXL coverage comparison
+## Historical BuildXL coverage comparison
 
-The current observer was rerun against BuildXL Detours for the same restored
-OrchardCore projects. Paths were converted to absolute canonical identities,
+On the pre-restack base, the observer was run against BuildXL Detours for the same
+restored OrchardCore projects. Paths were converted to absolute canonical identities,
 Windows device prefixes and trailing separators were normalized, and
 BuildXL's randomized case-sensitivity probe was excluded.
 
@@ -169,18 +188,14 @@ identities were classified as host/runtime/SDK/toolset accesses or
 implementation-level recursive-glob traversal paths. No unexplained built-in
 project-source, import, file-read, probe, search, or glob dependency remained.
 
-This comparison supports filesystem observation completeness for the exercised
-built-in evaluation paths. It is evidence, not a proof over every possible
-project, custom filesystem provider, property function, or future SDK resolver.
+This comparison covered the legacy FileMatcher traversal on the pre-restack base. It is
+historical evidence, not coverage evidence for the optimized drivers now present on
+`main`, and not a proof over every possible project, custom filesystem provider,
+property function, or future SDK resolver.
 
-## Decision
+## Historical decision withdrawn
 
-The next experiment should measure end-to-end cache hits, including persistent
-snapshot loading and evaluated-project materialization. The current numbers set
-a useful threshold: those operations must remain well below the roughly 78-158
-ms saved after valid timestamp validation on these projects.
-
-The prototype should not advance as a timestamp-only production design without
-a correctness strategy for timestamp-preserving mutations. However, the
-measured 3-5% valid-scan cost is low enough that invalidation overhead alone
-does not justify abandoning the persistent evaluation-cache investigation.
+The pre-restack continuation statement is withdrawn for the current branch. The next
+decision-grade run must first align the observed, validation, and fresh-evaluation graphs
+and then answer only whether a complete timestamp scan is sufficiently cheaper than
+fresh evaluation to continue.

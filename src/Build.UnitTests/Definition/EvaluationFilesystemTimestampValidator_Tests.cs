@@ -7,6 +7,7 @@ using Microsoft.Build.Definition;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Shared;
 using Microsoft.Build.UnitTests;
 using Shouldly;
 using Xunit;
@@ -330,7 +331,9 @@ namespace Microsoft.Build.UnitTests.Definition
             foundSearch.ShouldBeTrue();
             search.Candidates.Length.ShouldBe(search.CandidateCount);
             search.CandidateCount.ShouldBeGreaterThan(1);
-            FileUtilities.PathsEqual(search.Selected, marker).ShouldBeTrue();
+            search.SelectedPaths.Length.ShouldBe(search.SelectedPathCount);
+            search.SelectedPathCount.ShouldBe(1);
+            FileUtilities.PathsEqual(search.SelectedPaths[0], marker).ShouldBeTrue();
 
             EvaluationFilesystemTimestampCaptureResult capture =
                 EvaluationFilesystemTimestampValidator.Capture(report);
@@ -435,11 +438,16 @@ namespace Microsoft.Build.UnitTests.Definition
                 Path.Combine(_env.DefaultTestDirectory.Path, "Covered")).Path;
             EvaluationObservationSession session =
                 EvaluationObservationSession.CreateForTests();
+            string globIdentity = FileMatcher.ComputeFileEnumerationCacheKey(
+                _env.DefaultTestDirectory.Path,
+                "Covered/**/*.cs",
+                excludes: []);
             ((IEvaluationInputObserver)session).RecordGlobDirectory(
                 _env.DefaultTestDirectory.Path,
                 "Covered/**/*.cs",
                 coveredDirectory,
-                exists: true);
+                exists: true,
+                globIdentity: globIdentity);
             session.RecordGlob(
                 "Item",
                 _env.DefaultTestDirectory.Path,

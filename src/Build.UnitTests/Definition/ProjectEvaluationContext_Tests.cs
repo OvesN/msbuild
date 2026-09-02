@@ -4650,7 +4650,7 @@ namespace Microsoft.Build.UnitTests.Definition
                 string filespec,
                 string path,
                 bool exists,
-                string globIdentity = null)
+                string globIdentity)
             {
             }
 

@@ -35,7 +35,7 @@ namespace Microsoft.Build.Framework
             string filespec,
             string path,
             bool exists,
-            string globIdentity = null);
+            string globIdentity);
         void RecordSearch(
             string kind,
             string request,

@@ -348,12 +348,15 @@ namespace Microsoft.Build.Evaluation.Context
             foreach (EvaluationSearchObservation observation in report.Searches)
             {
                 if (!observation.Complete ||
-                    observation.Candidates.Length != observation.CandidateCount)
+                    observation.Candidates.Length != observation.CandidateCount ||
+                    observation.SelectedPaths.Length != observation.SelectedPathCount)
                 {
                     return builder.Fail(
                         EvaluationFilesystemTimestampCaptureStatus.Unsupported,
                         EvaluationFilesystemTimestampFailure.IncompleteEnumeration,
-                        observation.Selected ?? report.ProjectPath);
+                        observation.SelectedPaths.Length == 0
+                            ? report.ProjectPath
+                            : observation.SelectedPaths[0]);
                 }
 
                 foreach (string candidate in observation.Candidates)
@@ -367,13 +370,15 @@ namespace Microsoft.Build.Evaluation.Context
                     }
                 }
 
-                if (!string.IsNullOrEmpty(observation.Selected) &&
-                    !builder.TryRequire(
-                        observation.Selected,
-                        provider: null,
-                        EvaluationFilesystemTimestampSource.Search))
+                foreach (string selectedPath in observation.SelectedPaths)
                 {
-                    return builder.CreateFailureResult();
+                    if (!builder.TryRequire(
+                            selectedPath,
+                            provider: null,
+                            EvaluationFilesystemTimestampSource.Search))
+                    {
+                        return builder.CreateFailureResult();
+                    }
                 }
             }
 
