@@ -10,10 +10,11 @@
 > optimized driver. Fresh evaluation and validation benchmarks must use the same driver
 > and evaluation graph before this report can support a continuation decision.
 >
-> The historical rows also predate strict snapshot admission and the
-> conflicting-observation analysis gate. Current benchmark setup may reject a blocked
-> report instead of reproducing those rows; they are retained only as prior directional
-> evidence.
+> The historical rows also predate strict snapshot admission, the
+> conflicting-observation analysis gate, and reparse-component scanning during capture
+> and validation. Current benchmark setup may reject a blocked report instead of
+> reproducing those rows, and both scan costs have changed; the rows are retained only
+> as prior directional evidence.
 
 ## Historical result
 
@@ -65,6 +66,46 @@ that the glob actually traversed. Exact-file includes do not add an artificial
 directory dependency. Benchmark mutations exclude generated and tool roots
 such as `.dotnet`, `.git`, `artifacts`, `bin`, `obj`, and `packages`.
 
+Before admitting a snapshot, the prototype checks every unique observed filesystem
+path and its ancestors for `FileAttributes.ReparsePoint`. This rejects file and
+directory symbolic links, Windows junctions, and observed paths beneath them,
+regardless of whether the dependency came from a project source, file read, probe,
+metadata read, enumeration, glob, or search. Missing path components are treated as
+absent while their existing ancestors are still checked, and the missing components are
+recorded and rechecked later. Any other attribute-read failure rejects the snapshot as
+`ReparsePointStateUnknown`, including access failures and unreachable filesystem roots.
+The sorted set of checked components is stored in the snapshot and rechecked before
+every complete `Validate()` reuse check, so a reparse point present at reuse invalidates
+the snapshot even when timestamps match. A link already present during construction is
+`Unsupported`; one appearing during final or reuse validation is `Changed`; an
+attribute failure is `Failed`. Validation also rejects a missing, duplicate, or
+incomplete persisted component set, or any non-canonical persisted path, before probing
+the filesystem. The component scan and following timestamp reads are not atomic;
+closing that validation-to-materialization race remains production work.
+
+Capture checks components while constructing the snapshot and deliberately performs
+the complete component scan again during its final validation pass. The first pass
+rejects a link used by evaluation even if it disappears before final validation; the
+second rejects a link introduced during capture. This brackets, but does not make
+atomic, snapshot construction. A successful capture therefore issues exactly twice the
+stored component count in attribute probes. The benchmark exposes
+`ValidReparsePointValidation` and
+`ValidTimestampValidationWithoutReparsePointCheck` separately so the new cost can be
+measured. The latter is benchmark-only and is not a valid reuse decision. Capture
+reports the total number of component probes issued across both passes. These checks do
+not change normal evaluation or glob results. A production implementation can reduce
+syscalls by reading attributes, existence, and timestamps through one metadata probe.
+
+The prototype deliberately rejects every `ReparsePoint` tag, including non-aliasing
+cloud, deduplication, and container placeholders. This is conservative and can reduce
+admission to zero for repositories hosted by those systems or beneath a stable
+filesystem symlink such as macOS `/var`. It does not detect alias mechanisms that do
+not expose a reparse component, such as `subst` drives, mapped-drive retargeting, or
+DFS namespace changes. Hard-link identity is also not distinguished, although hard
+links share file timestamps and remain subject to the general timestamp-preserving
+replacement limitation. A production implementation should classify name-surrogate
+links precisely and record and validate both logical and resolved target identities.
+
 A glob-result cache hit populated by another evaluation does not replay traversal
 evidence. Snapshot capture therefore fails closed for that case. Lazy wildcards also
 currently fail closed because no traversal occurs.
@@ -91,14 +132,18 @@ scan cost, returns `AnalysisOnly`, and is marked
 `IsFilesystemSnapshotAdmissible = false`; it is not evidence of an admissible cache
 hit.
 
-Validation performs only these operations, in snapshot order:
+Validation performs these operations:
 
-1. Read the current last-write timestamp.
-2. Resolve existence when the timestamp alone cannot distinguish an absent
+1. Recheck every stored path component for `ReparsePoint`, returning `Changed` with
+   `ReparsePointTraversal` on the first match or `Failed` with
+   `ReparsePointStateUnknown` on any other attribute error.
+2. Read each dependency's current last-write timestamp.
+3. Resolve existence when the timestamp alone cannot distinguish an absent
    path from an existing path with the missing-value timestamp.
-3. Return `Changed` on the first timestamp or existence mismatch.
+4. Return `Changed` on the first timestamp or existence mismatch.
 
 It does not reread or hash contents, replay probes, or reenumerate globs.
+The reported check counts include the operation that found a change or failed.
 
 This prototype covers only filesystem mutations. Environment variables,
 global properties, toolset selection, SDK resolver results, Registry values,
@@ -123,8 +168,9 @@ intentionally deferred to the resolver contract.
 
 The normal suite compares an unobserved evaluation, an observed evaluation,
 an observed evaluation followed by snapshot capture, snapshot capture alone,
-and validation of an unchanged snapshot. Snapshot capture includes a final full
-validation pass before returning the snapshot.
+isolated reparse-component validation, benchmark-only timestamp validation without the
+component check, and complete validation of an unchanged snapshot. Snapshot capture
+includes a final full validation pass before returning the snapshot.
 
 ### Filesystem-slice capture and validation costs
 
@@ -152,10 +198,13 @@ iteration and restores the exact contents and timestamp afterward.
 | CMS glob membership | 125.621 ms | 7.072 ms | 144.237 ms | 1.15x |
 
 The combined Core values are within run-to-run evaluation noise and must not be
-interpreted as invalidation making reevaluation faster. The direct stale
-validation rows isolate the additional invalidation work: early file changes
-are almost free, while a glob membership change near the end of the snapshot
-requires most of the timestamp scan.
+interpreted as invalidation making reevaluation faster. These historical stale rows
+predate reparse-component validation. The current algorithm scans all stored components
+before reading the first timestamp, so every current hit or miss pays that complete
+component-scan cost; only the subsequent timestamp scan retains early-out behavior. A
+production implementation should validate each entry's memoized component chain
+immediately before its timestamp read, preserving the same safety while restoring
+early-out across the combined scan.
 
 ## Roslyn Workspaces BenchmarkDotNet results
 

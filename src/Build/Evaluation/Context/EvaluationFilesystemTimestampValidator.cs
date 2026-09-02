@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared.FileSystem;
 
@@ -33,10 +34,15 @@ namespace Microsoft.Build.Evaluation.Context
         UnsupportedObservationVersion,
         BlockingObservation,
         IncompleteCategorySet,
+        IncompleteReparsePointCheckSet,
+        MalformedSnapshot,
+        NonCanonicalPath,
         MissingRequestObservation,
         MissingRootProjectSourceObservation,
         IncompleteFilesystemObservation,
         ConflictingObservation,
+        ReparsePointTraversal,
+        ReparsePointStateUnknown,
         UnsupportedProvider,
         UnrootedPath,
         MissingProjectSourceTimestamp,
@@ -75,18 +81,26 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationFilesystemTimestampSnapshot
     {
         private readonly EvaluationFilesystemTimestampEntry[] _entries;
+        private readonly string[] _reparsePointCheckPaths;
 
         internal EvaluationFilesystemTimestampSnapshot(
-            EvaluationFilesystemTimestampEntry[] entries)
+            EvaluationFilesystemTimestampEntry[] entries,
+            string[] reparsePointCheckPaths)
         {
             _entries = entries;
+            _reparsePointCheckPaths = reparsePointCheckPaths;
         }
 
-        internal int TimestampCount => _entries.Length;
+        internal int TimestampCount => _entries?.Length ?? 0;
+        internal int ReparsePointCheckCount => _reparsePointCheckPaths?.Length ?? 0;
         internal IReadOnlyList<EvaluationFilesystemTimestampEntry> Entries => _entries;
+        internal IReadOnlyList<string> ReparsePointCheckPaths => _reparsePointCheckPaths;
 
         internal EvaluationFilesystemTimestampValidationResult Validate() =>
             EvaluationFilesystemTimestampValidator.Validate(this);
+
+        internal EvaluationFilesystemTimestampValidationResult ValidateReparsePoints() =>
+            EvaluationFilesystemTimestampValidator.ValidateReparsePoints(this);
     }
 
     internal readonly struct EvaluationFilesystemTimestampCaptureResult
@@ -99,6 +113,7 @@ namespace Microsoft.Build.Evaluation.Context
             string path,
             string exceptionType,
             int hResult,
+            int reparsePointProbeCount,
             int timestampReadCount)
         {
             Status = status;
@@ -108,6 +123,7 @@ namespace Microsoft.Build.Evaluation.Context
             Path = path;
             ExceptionType = exceptionType;
             HResult = hResult;
+            ReparsePointProbeCount = reparsePointProbeCount;
             TimestampReadCount = timestampReadCount;
         }
 
@@ -122,6 +138,7 @@ namespace Microsoft.Build.Evaluation.Context
         internal string Path { get; }
         internal string ExceptionType { get; }
         internal int HResult { get; }
+        internal int ReparsePointProbeCount { get; }
         internal int TimestampReadCount { get; }
     }
 
@@ -129,6 +146,8 @@ namespace Microsoft.Build.Evaluation.Context
     {
         internal EvaluationFilesystemTimestampValidationResult(
             EvaluationFilesystemTimestampValidationStatus status,
+            EvaluationFilesystemTimestampFailure failure,
+            int checkedReparsePointCount,
             int checkedTimestampCount,
             string path,
             long expectedLastWriteTimeUtcTicks,
@@ -137,6 +156,8 @@ namespace Microsoft.Build.Evaluation.Context
             int hResult)
         {
             Status = status;
+            Failure = failure;
+            CheckedReparsePointCount = checkedReparsePointCount;
             CheckedTimestampCount = checkedTimestampCount;
             Path = path;
             ExpectedLastWriteTimeUtcTicks = expectedLastWriteTimeUtcTicks;
@@ -146,6 +167,8 @@ namespace Microsoft.Build.Evaluation.Context
         }
 
         internal EvaluationFilesystemTimestampValidationStatus Status { get; }
+        internal EvaluationFilesystemTimestampFailure Failure { get; }
+        internal int CheckedReparsePointCount { get; }
         internal int CheckedTimestampCount { get; }
         internal string Path { get; }
         internal long ExpectedLastWriteTimeUtcTicks { get; }
@@ -159,6 +182,14 @@ namespace Microsoft.Build.Evaluation.Context
     /// </summary>
     internal static class EvaluationFilesystemTimestampValidator
     {
+        private enum ReparsePointProbeResult
+        {
+            Missing,
+            NotReparsePoint,
+            ReparsePoint,
+            Failed,
+        }
+
         private static readonly long s_missingTimestampUtcTicks =
             DateTime.FromFileTimeUtc(0).Ticks;
 
@@ -501,7 +532,125 @@ namespace Microsoft.Build.Evaluation.Context
                 throw new ArgumentNullException(nameof(snapshot));
             }
 
+            EvaluationFilesystemTimestampValidationResult reparsePointValidation =
+                ValidateReparsePoints(snapshot);
+            return reparsePointValidation.Status == EvaluationFilesystemTimestampValidationStatus.Valid
+                ? ValidateTimestampsWithoutReparsePointCheck(
+                    snapshot,
+                    reparsePointValidation.CheckedReparsePointCount)
+                : reparsePointValidation;
+        }
+
+        internal static EvaluationFilesystemTimestampValidationResult ValidateReparsePoints(
+            EvaluationFilesystemTimestampSnapshot snapshot)
+        {
+            if (snapshot is null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            if (!TryValidateReparsePointCheckSet(
+                    snapshot,
+                    out EvaluationFilesystemTimestampFailure checkSetFailure,
+                    out string incompletePath,
+                    out Exception checkSetException))
+            {
+                return new EvaluationFilesystemTimestampValidationResult(
+                    EvaluationFilesystemTimestampValidationStatus.Failed,
+                    checkSetFailure,
+                    checkedReparsePointCount: 0,
+                    checkedTimestampCount: 0,
+                    incompletePath,
+                    expectedLastWriteTimeUtcTicks: 0,
+                    actualLastWriteTimeUtcTicks: 0,
+                    checkSetException?.GetType().FullName,
+                    checkSetException?.HResult ?? 0);
+            }
+
+            IReadOnlyList<string> reparsePointCheckPaths =
+                snapshot.ReparsePointCheckPaths;
+            for (int i = 0; i < reparsePointCheckPaths.Count; i++)
+            {
+                string path = reparsePointCheckPaths[i];
+                ReparsePointProbeResult probeResult =
+                    ProbeReparsePoint(path, out Exception exception);
+                if (probeResult == ReparsePointProbeResult.ReparsePoint)
+                {
+                    return new EvaluationFilesystemTimestampValidationResult(
+                        EvaluationFilesystemTimestampValidationStatus.Changed,
+                        EvaluationFilesystemTimestampFailure.ReparsePointTraversal,
+                        checkedReparsePointCount: i + 1,
+                        checkedTimestampCount: 0,
+                        path,
+                        expectedLastWriteTimeUtcTicks: 0,
+                        actualLastWriteTimeUtcTicks: 0,
+                        exceptionType: null,
+                        hResult: 0);
+                }
+
+                if (probeResult == ReparsePointProbeResult.Failed)
+                {
+                    return new EvaluationFilesystemTimestampValidationResult(
+                        EvaluationFilesystemTimestampValidationStatus.Failed,
+                        EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown,
+                        checkedReparsePointCount: i + 1,
+                        checkedTimestampCount: 0,
+                        path,
+                        expectedLastWriteTimeUtcTicks: 0,
+                        actualLastWriteTimeUtcTicks: 0,
+                        exception.GetType().FullName,
+                        exception.HResult);
+                }
+            }
+
+            return new EvaluationFilesystemTimestampValidationResult(
+                EvaluationFilesystemTimestampValidationStatus.Valid,
+                EvaluationFilesystemTimestampFailure.None,
+                reparsePointCheckPaths.Count,
+                checkedTimestampCount: 0,
+                path: null,
+                expectedLastWriteTimeUtcTicks: 0,
+                actualLastWriteTimeUtcTicks: 0,
+                exceptionType: null,
+                hResult: 0);
+        }
+
+        /// <summary>
+        /// Benchmark-only timestamp scan that omits the required reparse-point check.
+        /// Do not use this result for snapshot reuse.
+        /// </summary>
+        internal static EvaluationFilesystemTimestampValidationResult ValidateTimestampsWithoutReparsePointCheck(
+            EvaluationFilesystemTimestampSnapshot snapshot)
+        {
+            if (snapshot is null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            return ValidateTimestampsWithoutReparsePointCheck(
+                snapshot,
+                checkedReparsePointCount: 0);
+        }
+
+        private static EvaluationFilesystemTimestampValidationResult ValidateTimestampsWithoutReparsePointCheck(
+            EvaluationFilesystemTimestampSnapshot snapshot,
+            int checkedReparsePointCount)
+        {
             IReadOnlyList<EvaluationFilesystemTimestampEntry> entries = snapshot.Entries;
+            if (entries is null)
+            {
+                return new EvaluationFilesystemTimestampValidationResult(
+                    EvaluationFilesystemTimestampValidationStatus.Failed,
+                    EvaluationFilesystemTimestampFailure.MalformedSnapshot,
+                    checkedReparsePointCount,
+                    checkedTimestampCount: 0,
+                    path: null,
+                    expectedLastWriteTimeUtcTicks: 0,
+                    actualLastWriteTimeUtcTicks: 0,
+                    exceptionType: null,
+                    hResult: 0);
+            }
+
             for (int i = 0; i < entries.Count; i++)
             {
                 EvaluationFilesystemTimestampEntry entry = entries[i];
@@ -519,7 +668,9 @@ namespace Microsoft.Build.Evaluation.Context
                 {
                     return new EvaluationFilesystemTimestampValidationResult(
                         EvaluationFilesystemTimestampValidationStatus.Failed,
-                        i,
+                        EvaluationFilesystemTimestampFailure.FilesystemError,
+                        checkedReparsePointCount,
+                        i + 1,
                         entry.Path,
                         entry.LastWriteTimeUtcTicks,
                         actualLastWriteTimeUtcTicks: 0,
@@ -532,6 +683,8 @@ namespace Microsoft.Build.Evaluation.Context
                 {
                     return new EvaluationFilesystemTimestampValidationResult(
                         EvaluationFilesystemTimestampValidationStatus.Changed,
+                        EvaluationFilesystemTimestampFailure.ConflictingTimestamp,
+                        checkedReparsePointCount,
                         i + 1,
                         entry.Path,
                         entry.LastWriteTimeUtcTicks,
@@ -543,12 +696,140 @@ namespace Microsoft.Build.Evaluation.Context
 
             return new EvaluationFilesystemTimestampValidationResult(
                 EvaluationFilesystemTimestampValidationStatus.Valid,
+                EvaluationFilesystemTimestampFailure.None,
+                checkedReparsePointCount,
                 entries.Count,
                 path: null,
                 expectedLastWriteTimeUtcTicks: 0,
                 actualLastWriteTimeUtcTicks: 0,
                 exceptionType: null,
                 hResult: 0);
+        }
+
+        private static ReparsePointProbeResult ProbeReparsePoint(
+            string path,
+            out Exception exception)
+        {
+            exception = null;
+            try
+            {
+                return (FileSystems.Default.GetAttributes(path) &
+                    FileAttributes.ReparsePoint) != 0
+                    ? ReparsePointProbeResult.ReparsePoint
+                    : ReparsePointProbeResult.NotReparsePoint;
+            }
+            catch (FileNotFoundException)
+            {
+                return ReparsePointProbeResult.Missing;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return ReparsePointProbeResult.Missing;
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                exception = ex;
+                return ReparsePointProbeResult.Failed;
+            }
+        }
+
+        private static bool TryValidateReparsePointCheckSet(
+            EvaluationFilesystemTimestampSnapshot snapshot,
+            out EvaluationFilesystemTimestampFailure failure,
+            out string incompletePath,
+            out Exception exception)
+        {
+            failure = EvaluationFilesystemTimestampFailure.None;
+            incompletePath = null;
+            exception = null;
+            IReadOnlyList<string> paths = snapshot.ReparsePointCheckPaths;
+            IReadOnlyList<EvaluationFilesystemTimestampEntry> entries = snapshot.Entries;
+            if (paths is null ||
+                entries is null)
+            {
+                failure = EvaluationFilesystemTimestampFailure.MalformedSnapshot;
+                return false;
+            }
+
+            var pathSet = new HashSet<string>(FileUtilities.PathComparer);
+            for (int i = 0; i < paths.Count; i++)
+            {
+                string path = paths[i];
+                if (string.IsNullOrEmpty(path) ||
+                    !pathSet.Add(path))
+                {
+                    failure =
+                        EvaluationFilesystemTimestampFailure.IncompleteReparsePointCheckSet;
+                    incompletePath = path;
+                    return false;
+                }
+
+                if (!IsCanonicalPath(path))
+                {
+                    failure = EvaluationFilesystemTimestampFailure.NonCanonicalPath;
+                    incompletePath = path;
+                    return false;
+                }
+            }
+
+            foreach (EvaluationFilesystemTimestampEntry entry in entries)
+            {
+                if (!IsCanonicalPath(entry.Path))
+                {
+                    failure = EvaluationFilesystemTimestampFailure.NonCanonicalPath;
+                    incompletePath = entry.Path;
+                    return false;
+                }
+
+                string current = entry.Path;
+                while (!string.IsNullOrEmpty(current))
+                {
+                    if (!pathSet.Contains(current))
+                    {
+                        failure =
+                            EvaluationFilesystemTimestampFailure.IncompleteReparsePointCheckSet;
+                        incompletePath = current;
+                        return false;
+                    }
+
+                    try
+                    {
+                        string parent = Path.GetDirectoryName(current);
+                        if (string.IsNullOrEmpty(parent) ||
+                            FileUtilities.PathsEqual(parent, current))
+                        {
+                            break;
+                        }
+
+                        current = parent;
+                    }
+                    catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                    {
+                        failure = EvaluationFilesystemTimestampFailure.NonCanonicalPath;
+                        incompletePath = current;
+                        exception = ex;
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsCanonicalPath(string path)
+        {
+            try
+            {
+                return string.Equals(
+                    path,
+                    FileUtilities.NormalizePathForObservation(
+                        FileUtilities.NormalizePath(path)),
+                    FileUtilities.PathComparison);
+            }
+            catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+            {
+                return false;
+            }
         }
 
         private static bool IsDiskProvider(string provider) =>
@@ -577,11 +858,16 @@ namespace Microsoft.Build.Evaluation.Context
         {
             private readonly Dictionary<string, PendingTimestamp> _timestamps =
                 new(FileUtilities.PathComparer);
+            private readonly HashSet<string> _reparsePointCheckedPaths =
+                new(FileUtilities.PathComparer);
             private readonly bool _isFilesystemSnapshotAdmissible;
 
             private EvaluationFilesystemTimestampCaptureStatus _failureStatus;
             private EvaluationFilesystemTimestampFailure _failure;
             private string _failurePath;
+            private string _failureExceptionType;
+            private int _failureHResult;
+            private int _reparsePointProbeCount;
 
             internal SnapshotBuilder(bool isFilesystemSnapshotAdmissible)
             {
@@ -636,6 +922,11 @@ namespace Microsoft.Build.Evaluation.Context
                     return false;
                 }
 
+                if (!TryRejectReparsePointTraversal(path))
+                {
+                    return false;
+                }
+
                 if (_timestamps.TryGetValue(path, out PendingTimestamp pending))
                 {
                     if (pending.TimestampUtcTicks != timestampUtcTicks ||
@@ -661,6 +952,63 @@ namespace Microsoft.Build.Evaluation.Context
                         exists,
                         kind,
                         sources));
+                return true;
+            }
+
+            private bool TryRejectReparsePointTraversal(string path)
+            {
+                if (_reparsePointCheckedPaths.Contains(path))
+                {
+                    return true;
+                }
+
+                string parent;
+                try
+                {
+                    parent = Path.GetDirectoryName(path);
+                }
+                catch (Exception ex) when (!ExceptionHandling.IsCriticalException(ex))
+                {
+                    SetFailure(
+                        EvaluationFilesystemTimestampCaptureStatus.Failed,
+                        EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown,
+                        path,
+                        ex);
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(parent) &&
+                    !FileUtilities.PathsEqual(parent, path) &&
+                    !TryRejectReparsePointTraversal(parent))
+                {
+                    return false;
+                }
+
+                _reparsePointProbeCount++;
+                ReparsePointProbeResult probeResult =
+                    ProbeReparsePoint(path, out Exception exception);
+                if (probeResult == ReparsePointProbeResult.ReparsePoint)
+                {
+                    // A link already present during capture makes the candidate unsupported.
+                    // A link found by the final or reuse validation is reported as changed.
+                    SetFailure(
+                        EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                        EvaluationFilesystemTimestampFailure.ReparsePointTraversal,
+                        path);
+                    return false;
+                }
+
+                if (probeResult == ReparsePointProbeResult.Failed)
+                {
+                    SetFailure(
+                        EvaluationFilesystemTimestampCaptureStatus.Failed,
+                        EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown,
+                        path,
+                        exception);
+                    return false;
+                }
+
+                _reparsePointCheckedPaths.Add(path);
                 return true;
             }
 
@@ -706,7 +1054,14 @@ namespace Microsoft.Build.Evaluation.Context
                         pending.Sources);
                 }
 
-                var snapshot = new EvaluationFilesystemTimestampSnapshot(entries);
+                var reparsePointCheckPaths =
+                    new string[_reparsePointCheckedPaths.Count];
+                _reparsePointCheckedPaths.CopyTo(reparsePointCheckPaths);
+                Array.Sort(reparsePointCheckPaths, FileUtilities.PathComparer);
+
+                var snapshot = new EvaluationFilesystemTimestampSnapshot(
+                    entries,
+                    reparsePointCheckPaths);
                 EvaluationFilesystemTimestampValidationResult validation =
                     Validate(snapshot);
                 if (validation.Status == EvaluationFilesystemTimestampValidationStatus.Valid)
@@ -721,7 +1076,9 @@ namespace Microsoft.Build.Evaluation.Context
                         path: null,
                         exceptionType: null,
                         hResult: 0,
-                        validation.CheckedTimestampCount);
+                        reparsePointProbeCount: _reparsePointProbeCount +
+                            validation.CheckedReparsePointCount,
+                        timestampReadCount: validation.CheckedTimestampCount);
                 }
 
                 if (validation.Status == EvaluationFilesystemTimestampValidationStatus.Changed)
@@ -730,22 +1087,26 @@ namespace Microsoft.Build.Evaluation.Context
                         EvaluationFilesystemTimestampCaptureStatus.Changed,
                         snapshot: null,
                         isFilesystemSnapshotAdmissible: false,
-                        EvaluationFilesystemTimestampFailure.ConflictingTimestamp,
+                        validation.Failure,
                         validation.Path,
                         exceptionType: null,
                         hResult: 0,
-                        validation.CheckedTimestampCount);
+                        reparsePointProbeCount: _reparsePointProbeCount +
+                            validation.CheckedReparsePointCount,
+                        timestampReadCount: validation.CheckedTimestampCount);
                 }
 
                 return new EvaluationFilesystemTimestampCaptureResult(
                     EvaluationFilesystemTimestampCaptureStatus.Failed,
                     snapshot: null,
                     isFilesystemSnapshotAdmissible: false,
-                    EvaluationFilesystemTimestampFailure.FilesystemError,
+                    validation.Failure,
                     validation.Path,
                     validation.ExceptionType,
                     validation.HResult,
-                    validation.CheckedTimestampCount);
+                    reparsePointProbeCount: _reparsePointProbeCount +
+                        validation.CheckedReparsePointCount,
+                    timestampReadCount: validation.CheckedTimestampCount);
             }
 
             internal EvaluationFilesystemTimestampCaptureResult Fail(
@@ -764,8 +1125,9 @@ namespace Microsoft.Build.Evaluation.Context
                     isFilesystemSnapshotAdmissible: false,
                     _failure,
                     _failurePath,
-                    exceptionType: null,
-                    hResult: 0,
+                    _failureExceptionType,
+                    _failureHResult,
+                    reparsePointProbeCount: _reparsePointProbeCount,
                     timestampReadCount: 0);
 
             private bool TryValidatePathAndProvider(string path, string provider)
@@ -789,13 +1151,23 @@ namespace Microsoft.Build.Evaluation.Context
                     return false;
                 }
 
+                if (!IsCanonicalPath(path))
+                {
+                    SetFailure(
+                        EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                        EvaluationFilesystemTimestampFailure.NonCanonicalPath,
+                        path);
+                    return false;
+                }
+
                 return true;
             }
 
             private void SetFailure(
                 EvaluationFilesystemTimestampCaptureStatus status,
                 EvaluationFilesystemTimestampFailure failure,
-                string path)
+                string path,
+                Exception exception = null)
             {
                 if (HasFailure)
                 {
@@ -805,6 +1177,8 @@ namespace Microsoft.Build.Evaluation.Context
                 _failureStatus = status;
                 _failure = failure;
                 _failurePath = path;
+                _failureExceptionType = exception?.GetType().FullName;
+                _failureHResult = exception?.HResult ?? 0;
             }
 
             private bool HasFailure =>

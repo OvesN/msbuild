@@ -2,12 +2,15 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using Microsoft.Build.Definition;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Shared.FileSystem;
 using Microsoft.Build.UnitTests;
 using Shouldly;
 using Xunit;
@@ -24,7 +27,7 @@ namespace Microsoft.Build.UnitTests.Definition
         public EvaluationFilesystemTimestampValidator_Tests(ITestOutputHelper output)
         {
             _output = output;
-            _env = TestEnvironment.Create(output);
+            _env = CreateTestEnvironment(output);
         }
 
         public void Dispose()
@@ -371,13 +374,46 @@ namespace Microsoft.Build.UnitTests.Definition
             capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.None);
             capture.Snapshot.ShouldNotBeNull();
             capture.Snapshot.TimestampCount.ShouldBeGreaterThan(3);
+            capture.Snapshot.ReparsePointCheckCount.ShouldBeGreaterThanOrEqualTo(
+                capture.Snapshot.TimestampCount);
+            capture.ReparsePointProbeCount.ShouldBe(
+                capture.Snapshot.ReparsePointCheckCount * 2);
+            foreach (EvaluationFilesystemTimestampEntry entry in capture.Snapshot.Entries)
+            {
+                capture.Snapshot.ReparsePointCheckPaths.ShouldContain(path =>
+                    FileUtilities.PathsEqual(path, entry.Path));
+            }
             capture.Snapshot.Entries.ShouldContain(entry =>
                 (entry.Sources & EvaluationFilesystemTimestampSource.Glob) != 0);
+
+            EvaluationFilesystemTimestampValidationResult reparsePointValidation =
+                capture.Snapshot.ValidateReparsePoints();
+            reparsePointValidation.Status.ShouldBe(
+                EvaluationFilesystemTimestampValidationStatus.Valid);
+            reparsePointValidation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.None);
+            reparsePointValidation.CheckedReparsePointCount.ShouldBe(
+                capture.Snapshot.ReparsePointCheckCount);
+            reparsePointValidation.CheckedTimestampCount.ShouldBe(0);
+
+            EvaluationFilesystemTimestampValidationResult timestampValidation =
+                EvaluationFilesystemTimestampValidator
+                    .ValidateTimestampsWithoutReparsePointCheck(capture.Snapshot);
+            timestampValidation.Status.ShouldBe(
+                EvaluationFilesystemTimestampValidationStatus.Valid);
+            timestampValidation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.None);
+            timestampValidation.CheckedReparsePointCount.ShouldBe(0);
+            timestampValidation.CheckedTimestampCount.ShouldBe(
+                capture.Snapshot.TimestampCount);
 
             EvaluationFilesystemTimestampValidationResult validation =
                 capture.Snapshot.Validate();
 
             validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Valid);
+            validation.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.None);
+            validation.CheckedReparsePointCount.ShouldBe(
+                capture.Snapshot.ReparsePointCheckCount);
             validation.CheckedTimestampCount.ShouldBe(capture.Snapshot.TimestampCount);
         }
 
@@ -480,6 +516,8 @@ namespace Microsoft.Build.UnitTests.Definition
                 EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
             capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            capture.Snapshot.ReparsePointCheckPaths.ShouldContain(path =>
+                FileUtilities.PathsEqual(path, missingFile));
 
             File.WriteAllText(missingFile, "<Project />");
 
@@ -570,6 +608,332 @@ namespace Microsoft.Build.UnitTests.Definition
             validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
             FileUtilities.PathsEqual(validation.Path, nestedSharedDirectory).ShouldBeTrue();
         }
+
+        [WindowsOnlyFact]
+        public void JunctionGlobTraversalIsRejected()
+        {
+            TransientTestFolder root = _env.CreateFolder();
+            TransientTestFolder project = _env.CreateFolder(
+                Path.Combine(root.Path, "Project"));
+            TransientTestFolder target = _env.CreateFolder(
+                Path.Combine(root.Path, "Target"));
+            _env.CreateFile(target, "Observed.cs", string.Empty);
+            TransientTestFolder targetSubdirectory = _env.CreateFolder(
+                Path.Combine(target.Path, "Sub"));
+            _env.CreateFile(targetSubdirectory, "Nested.cs", string.Empty);
+            string junction = Path.Combine(project.Path, "Linked");
+
+            CreateJunction(junction, target.Path);
+            try
+            {
+                AssertReparsePointGlobTraversalIsRejected(
+                    project,
+                    junction,
+                    "junction-root.proj",
+                    Path.Combine("Linked", "**", "*.cs"),
+                    expectedResultCount: 2);
+                AssertReparsePointGlobTraversalIsRejected(
+                    project,
+                    junction,
+                    "junction-ancestor.proj",
+                    Path.Combine("Linked", "Sub", "**", "*.cs"),
+                    expectedResultCount: 1);
+                AssertMissingPathBeneathReparsePointIsRejected(junction);
+                AssertProjectBeneathReparsePointIsRejected(target, junction);
+            }
+            finally
+            {
+                if (Directory.Exists(junction))
+                {
+                    Directory.Delete(junction);
+                }
+            }
+        }
+
+        [WindowsOnlyFact]
+        public void ReparsePointIntroducedAfterCaptureInvalidates()
+        {
+            TransientTestFolder project = _env.CreateFolder();
+            TransientTestFolder observedDirectory = _env.CreateFolder(
+                Path.Combine(project.Path, "Observed"));
+            _env.CreateFile(observedDirectory, "Input.cs", string.Empty);
+            TransientTestFolder target = _env.CreateFolder();
+            _env.CreateFile(target, "Input.cs", string.Empty);
+            string projectFile = _env.CreateFile(
+                project,
+                "replacement.proj",
+                """
+                <Project>
+                  <ItemGroup>
+                    <Compile Include="Observed/**/*.cs" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+            EvaluationObservationReport report = Evaluate(projectFile);
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            capture.Snapshot.ReparsePointCheckPaths.ShouldContain(path =>
+                FileUtilities.PathsEqual(path, observedDirectory.Path));
+
+            Directory.Delete(observedDirectory.Path, recursive: true);
+            CreateJunction(observedDirectory.Path, target.Path);
+            try
+            {
+                EvaluationFilesystemTimestampValidationResult validation =
+                    capture.Snapshot.Validate();
+
+                validation.Status.ShouldBe(
+                    EvaluationFilesystemTimestampValidationStatus.Changed);
+                validation.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.ReparsePointTraversal);
+                validation.CheckedReparsePointCount.ShouldBeGreaterThan(0);
+                validation.CheckedTimestampCount.ShouldBe(0);
+                FileUtilities.PathsEqual(
+                    validation.Path,
+                    observedDirectory.Path).ShouldBeTrue();
+            }
+            finally
+            {
+                if (Directory.Exists(observedDirectory.Path))
+                {
+                    Directory.Delete(observedDirectory.Path);
+                }
+            }
+        }
+
+#if NET
+        [WindowsOnlyFact]
+        public void ReparseTempRootIsResolved()
+        {
+            TransientTestFolder target = _env.CreateFolder();
+            string junction = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "TempJunction");
+            CreateJunction(junction, target.Path);
+            try
+            {
+                using TestEnvironment redirected =
+                    CreateTestEnvironment(_output, junction);
+                string testDirectory = redirected.DefaultTestDirectory.Path;
+
+                HasReparsePointComponent(testDirectory).ShouldBeFalse();
+                testDirectory.StartsWith(
+                    string.Concat(target.Path, Path.DirectorySeparatorChar),
+                    FileUtilities.PathComparison).ShouldBeTrue();
+            }
+            finally
+            {
+                if (Directory.Exists(junction))
+                {
+                    Directory.Delete(junction);
+                }
+            }
+        }
+#endif
+
+        [Fact]
+        public void ReparsePointAttributeFailureRejectsCapture()
+        {
+            string projectFile = _env.CreateFile(
+                "attribute-failure.proj",
+                "<Project />").Path;
+            EvaluationObservationReport report = Evaluate(projectFile);
+            // Initialize the validator's accepted default-provider identity before replacing FileSystems.Default.
+            EvaluationFilesystemTimestampCaptureResult baselineCapture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(baselineCapture, report);
+            baselineCapture.Status.ShouldBe(
+                EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            _env.WithTransientTestState(
+                new TransientDefaultFileSystem(
+                    new ThrowingAttributesFileSystem(
+                        FileSystems.Default,
+                        projectFile)));
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Failed);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown);
+            FileUtilities.PathsEqual(capture.Path, projectFile).ShouldBeTrue();
+            capture.ExceptionType.ShouldBe(typeof(UnauthorizedAccessException).FullName);
+            capture.HResult.ShouldNotBe(0);
+            capture.ReparsePointProbeCount.ShouldBeGreaterThan(0);
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        [WindowsOnlyFact]
+        public void InvalidParentPathFailsClosed()
+        {
+            string invalidParent = string.Concat(
+                Path.GetPathRoot(_env.DefaultTestDirectory.Path),
+                "invalid|component");
+            string invalidPath = string.Concat(
+                invalidParent,
+                Path.DirectorySeparatorChar,
+                "input.props");
+            var timestamp = new EvaluationFilesystemTimestampObservation(
+                invalidPath,
+                DateTime.FromFileTimeUtc(0).Ticks,
+                exists: false,
+                EvaluationPathKind.File,
+                EvaluationFilesystemTimestampSource.PathProbe,
+                provider: null);
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(),
+                filesystemTimestamps: [timestamp]);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Failed);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown);
+#if NETFRAMEWORK
+            capture.Path.ShouldBe(invalidPath);
+            capture.ExceptionType.ShouldBe(typeof(ArgumentException).FullName);
+#else
+            capture.Path.ShouldBe(invalidParent);
+            capture.ExceptionType.ShouldBe(typeof(IOException).FullName);
+#endif
+            capture.HResult.ShouldNotBe(0);
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        [Fact]
+        public void ReparsePointAttributeFailureFailsValidation()
+        {
+            string projectFile = _env.CreateFile(
+                "validation-attribute-failure.proj",
+                "<Project />").Path;
+            EvaluationObservationReport report = Evaluate(projectFile);
+            // Initialize the validator's accepted default-provider identity before replacing FileSystems.Default.
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+            WriteCaptureFailure(capture, report);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            _env.WithTransientTestState(
+                new TransientDefaultFileSystem(
+                    new ThrowingAttributesFileSystem(
+                        FileSystems.Default,
+                        projectFile)));
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                capture.Snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Failed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown);
+            validation.CheckedReparsePointCount.ShouldBeGreaterThan(0);
+            FileUtilities.PathsEqual(validation.Path, projectFile).ShouldBeTrue();
+            validation.ExceptionType.ShouldBe(
+                typeof(UnauthorizedAccessException).FullName);
+            validation.HResult.ShouldNotBe(0);
+        }
+
+#if FEATURE_SYMLINK_TARGET
+        [RequiresSymbolicLinksFact]
+        public void SymbolicLinkGlobTraversalIsRejected()
+        {
+            TransientTestFolder root = _env.CreateFolder();
+            TransientTestFolder project = _env.CreateFolder(
+                Path.Combine(root.Path, "Project"));
+            TransientTestFolder target = _env.CreateFolder(
+                Path.Combine(root.Path, "Target"));
+            _env.CreateFile(target, "Observed.cs", string.Empty);
+            TransientTestFolder targetSubdirectory = _env.CreateFolder(
+                Path.Combine(target.Path, "Sub"));
+            _env.CreateFile(targetSubdirectory, "Nested.cs", string.Empty);
+            string symbolicLink = Path.Combine(project.Path, "Linked");
+
+            Directory.CreateSymbolicLink(symbolicLink, target.Path);
+            try
+            {
+                AssertReparsePointGlobTraversalIsRejected(
+                    project,
+                    symbolicLink,
+                    "symlink-root.proj",
+                    Path.Combine("Linked", "**", "*.cs"),
+                    expectedResultCount: 2);
+                AssertReparsePointGlobTraversalIsRejected(
+                    project,
+                    symbolicLink,
+                    "symlink-ancestor.proj",
+                    Path.Combine("Linked", "Sub", "**", "*.cs"),
+                    expectedResultCount: 1);
+                AssertMissingPathBeneathReparsePointIsRejected(symbolicLink);
+                AssertProjectBeneathReparsePointIsRejected(target, symbolicLink);
+            }
+            finally
+            {
+                if (Directory.Exists(symbolicLink))
+                {
+                    Directory.Delete(symbolicLink);
+                }
+            }
+        }
+
+        [RequiresSymbolicLinksFact]
+        public void SymbolicLinkProjectSourceIsRejected()
+        {
+            TransientTestFolder root = _env.CreateFolder();
+            TransientTestFolder project = _env.CreateFolder(
+                Path.Combine(root.Path, "Project"));
+            string target = _env.CreateFile(
+                root,
+                "Target.props",
+                """
+                <Project>
+                  <PropertyGroup>
+                    <Imported>true</Imported>
+                  </PropertyGroup>
+                </Project>
+                """.Cleanup()).Path;
+            string symbolicLink = Path.Combine(project.Path, "Linked.props");
+
+            File.CreateSymbolicLink(symbolicLink, target);
+            try
+            {
+                string projectFile = _env.CreateFile(
+                    project,
+                    "symlink-import.proj",
+                    """
+                    <Project>
+                      <Import Project="Linked.props" />
+                    </Project>
+                    """.Cleanup()).Path;
+                EvaluationObservationReport report = Evaluate(projectFile);
+
+                report.ProjectSources.ShouldContain(source =>
+                    FileUtilities.PathsEqual(source.Path, symbolicLink));
+                EvaluationFilesystemTimestampCaptureResult capture =
+                    EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+                WriteCaptureFailure(capture, report);
+
+                capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+                capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+                capture.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.ReparsePointTraversal);
+                FileUtilities.PathsEqual(capture.Path, symbolicLink).ShouldBeTrue();
+                capture.Snapshot.ShouldBeNull();
+            }
+            finally
+            {
+                if (File.Exists(symbolicLink))
+                {
+                    File.Delete(symbolicLink);
+                }
+            }
+        }
+#endif
 
         [Fact]
         public void CreatedSearchCandidateInvalidates()
@@ -827,7 +1191,8 @@ namespace Microsoft.Build.UnitTests.Definition
                         true,
                         EvaluationPathKind.File,
                         EvaluationFilesystemTimestampSource.PathProbe),
-                ]);
+                ],
+                CreatePathComponents(path));
 
             EvaluationFilesystemTimestampValidationResult validation =
                 snapshot.Validate();
@@ -835,6 +1200,169 @@ namespace Microsoft.Build.UnitTests.Definition
             validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Changed);
             validation.ExpectedLastWriteTimeUtcTicks
                 .ShouldBe(validation.ActualLastWriteTimeUtcTicks);
+        }
+
+        [Fact]
+        public void IncompleteReparsePointCheckSetFailsValidation()
+        {
+            string path = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "unchecked.props");
+            string[] completeComponents = CreatePathComponents(path);
+            var duplicateComponents =
+                new string[completeComponents.Length + 1];
+            Array.Copy(
+                completeComponents,
+                duplicateComponents,
+                completeComponents.Length);
+            duplicateComponents[duplicateComponents.Length - 1] =
+                completeComponents[completeComponents.Length - 1];
+            string[][] invalidCheckSets =
+            [
+                [],
+                [path],
+                duplicateComponents,
+            ];
+
+            foreach (string[] invalidCheckSet in invalidCheckSets)
+            {
+                var snapshot = new EvaluationFilesystemTimestampSnapshot(
+                    [
+                        new EvaluationFilesystemTimestampEntry(
+                            path,
+                            DateTime.FromFileTimeUtc(0).Ticks,
+                            exists: false,
+                            EvaluationPathKind.File,
+                            EvaluationFilesystemTimestampSource.PathProbe),
+                    ],
+                    invalidCheckSet);
+
+                EvaluationFilesystemTimestampValidationResult validation =
+                    snapshot.Validate();
+
+                validation.Status.ShouldBe(
+                    EvaluationFilesystemTimestampValidationStatus.Failed);
+                validation.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.IncompleteReparsePointCheckSet);
+                validation.CheckedReparsePointCount.ShouldBe(0);
+                validation.CheckedTimestampCount.ShouldBe(0);
+                validation.Path.ShouldNotBeNull();
+            }
+        }
+
+        [Fact]
+        public void MalformedSnapshotFailsValidation()
+        {
+            var snapshot = new EvaluationFilesystemTimestampSnapshot(
+                entries: null,
+                reparsePointCheckPaths: []);
+
+            EvaluationFilesystemTimestampValidationResult validation =
+                snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Failed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.MalformedSnapshot);
+            validation.CheckedReparsePointCount.ShouldBe(0);
+            validation.CheckedTimestampCount.ShouldBe(0);
+        }
+
+        [Fact]
+        public void NonCanonicalPathFailsClosed()
+        {
+            string directory = _env.CreateFolder(
+                Path.Combine(
+                    _env.DefaultTestDirectory.Path,
+                    "NonCanonical")).Path;
+            string path = string.Concat(
+                directory,
+                Path.DirectorySeparatorChar);
+            var timestamp = new EvaluationFilesystemTimestampObservation(
+                path,
+                Directory.GetLastWriteTimeUtc(directory).Ticks,
+                exists: true,
+                EvaluationPathKind.Directory,
+                EvaluationFilesystemTimestampSource.PathProbe,
+                provider: null);
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(),
+                filesystemTimestamps: [timestamp]);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.NonCanonicalPath);
+            capture.Path.ShouldBe(path);
+
+            var snapshot = new EvaluationFilesystemTimestampSnapshot(
+                [
+                    new EvaluationFilesystemTimestampEntry(
+                        path,
+                        timestamp.LastWriteTimeUtcTicks,
+                        exists: true,
+                        EvaluationPathKind.Directory,
+                        EvaluationFilesystemTimestampSource.PathProbe),
+                ],
+                [path]);
+            EvaluationFilesystemTimestampValidationResult validation =
+                snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Failed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.NonCanonicalPath);
+            validation.Path.ShouldBe(path);
+        }
+
+        [Fact]
+        public void DotSegmentPathFailsClosed()
+        {
+            string path = Path.Combine(
+                _env.DefaultTestDirectory.Path,
+                "Child",
+                "..",
+                "input.props");
+            var timestamp = new EvaluationFilesystemTimestampObservation(
+                path,
+                DateTime.FromFileTimeUtc(0).Ticks,
+                exists: false,
+                EvaluationPathKind.File,
+                EvaluationFilesystemTimestampSource.PathProbe,
+                provider: null);
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(),
+                filesystemTimestamps: [timestamp]);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.NonCanonicalPath);
+            capture.Path.ShouldBe(path);
+
+            var snapshot = new EvaluationFilesystemTimestampSnapshot(
+                [
+                    new EvaluationFilesystemTimestampEntry(
+                        path,
+                        timestamp.LastWriteTimeUtcTicks,
+                        exists: false,
+                        EvaluationPathKind.File,
+                        EvaluationFilesystemTimestampSource.PathProbe),
+                ],
+                CreatePathComponents(path));
+            EvaluationFilesystemTimestampValidationResult validation =
+                snapshot.Validate();
+
+            validation.Status.ShouldBe(EvaluationFilesystemTimestampValidationStatus.Failed);
+            validation.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.NonCanonicalPath);
+            validation.Path.ShouldBe(Path.GetDirectoryName(path));
         }
 
         [Fact]
@@ -1003,6 +1531,288 @@ namespace Microsoft.Build.UnitTests.Definition
             }
         }
 
+        private void AssertReparsePointGlobTraversalIsRejected(
+            TransientTestFolder project,
+            string reparsePoint,
+            string projectFileName,
+            string include,
+            int expectedResultCount)
+        {
+            string projectFile = _env.CreateFile(
+                project,
+                projectFileName,
+                $"""
+                <Project>
+                  <ItemGroup>
+                    <Compile Include="{include}" />
+                  </ItemGroup>
+                </Project>
+                """.Cleanup()).Path;
+
+            EvaluationObservationReport report = Evaluate(projectFile);
+
+            report.Globs.ShouldContain(
+                observation => observation.ResultCount == expectedResultCount);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ReparsePointTraversal);
+            FileUtilities.PathsEqual(capture.Path, reparsePoint).ShouldBeTrue();
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        private void AssertMissingPathBeneathReparsePointIsRejected(
+            string reparsePoint)
+        {
+            string missingPath = Path.Combine(reparsePoint, "Missing.props");
+            EvaluationObservationSession session =
+                EvaluationObservationSession.CreateForTests();
+            session.RecordProbe(
+                missingPath,
+                EvaluationPathKind.File,
+                exists: false);
+            EvaluationObservationReport report =
+                session.Complete(evaluationSucceeded: true);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ReparsePointTraversal);
+            FileUtilities.PathsEqual(capture.Path, reparsePoint).ShouldBeTrue();
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        private void AssertProjectBeneathReparsePointIsRejected(
+            TransientTestFolder target,
+            string reparsePoint)
+        {
+            const string projectFileName = "project-under-reparse.proj";
+            _env.CreateFile(target, projectFileName, "<Project />");
+            string logicalProjectPath =
+                Path.Combine(reparsePoint, projectFileName);
+            EvaluationObservationReport report = Evaluate(logicalProjectPath);
+
+            report.ProjectSources.ShouldContain(source =>
+                FileUtilities.PathsEqual(source.Path, logicalProjectPath));
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ReparsePointTraversal);
+            FileUtilities.PathsEqual(capture.Path, reparsePoint).ShouldBeTrue();
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        private void CreateJunction(string junction, string target)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+                Arguments = $"/d /c mklink /J \"{junction}\" \"{target}\"",
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            };
+            using Process process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("Failed to start junction creation.");
+            string standardOutput = process.StandardOutput.ReadToEnd();
+            string standardError = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+
+            process.ExitCode.ShouldBe(
+                0,
+                $"Output: {standardOutput}{Environment.NewLine}Error: {standardError}");
+        }
+
+        private static bool HasReparsePointComponent(string path)
+        {
+            string current = Path.GetFullPath(path);
+            while (!string.IsNullOrEmpty(current))
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+
+                string parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent) ||
+                    FileUtilities.PathsEqual(parent, current))
+                {
+                    return false;
+                }
+
+                current = parent;
+            }
+
+            return false;
+        }
+
+        private static TestEnvironment CreateTestEnvironment(
+            ITestOutputHelper output,
+            string tempPathOverride = null)
+        {
+            string tempPath = tempPathOverride ?? Path.GetTempPath();
+            TestEnvironment environment = TestEnvironment.Create(output);
+            if (!HasReparsePointComponent(tempPath))
+            {
+                return environment;
+            }
+
+#if NET
+            string resolvedTempPath = ResolveDirectoryLinks(tempPath);
+            if (!HasReparsePointComponent(resolvedTempPath))
+            {
+                environment.SetTempPath(resolvedTempPath);
+                return environment;
+            }
+#endif
+
+            environment.Dispose();
+            Assert.Skip(
+                $"Timestamp validator tests require a temporary root without reparse components. Current root: '{tempPath}'.");
+            throw new InvalidOperationException("Unreachable after Assert.Skip.");
+        }
+
+#if NET
+        private static string ResolveDirectoryLinks(string path)
+        {
+            string fullPath = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(fullPath);
+            string current = root;
+            string[] components = fullPath.Substring(root.Length).Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            foreach (string component in components)
+            {
+                current = Path.Combine(current, component);
+                FileSystemInfo target =
+                    Directory.ResolveLinkTarget(current, returnFinalTarget: true);
+                if (target is not null)
+                {
+                    current = target.FullName;
+                }
+            }
+
+            return current;
+        }
+#endif
+
+        private static string[] CreatePathComponents(string path)
+        {
+            List<string> components = [];
+            string current = path;
+            while (!string.IsNullOrEmpty(current))
+            {
+                components.Add(current);
+                string parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent) ||
+                    FileUtilities.PathsEqual(parent, current))
+                {
+                    break;
+                }
+
+                current = parent;
+            }
+
+            components.Reverse();
+            return components.ToArray();
+        }
+
+        private sealed class TransientDefaultFileSystem : TransientTestState
+        {
+            private readonly IFileSystem _original;
+
+            internal TransientDefaultFileSystem(IFileSystem replacement)
+            {
+                _original = FileSystems.Default;
+                FileSystems.Default = replacement;
+            }
+
+            public override void Revert()
+            {
+                FileSystems.Default = _original;
+            }
+        }
+
+        private sealed class ThrowingAttributesFileSystem : IFileSystem
+        {
+            private readonly IFileSystem _inner;
+            private readonly string _throwPath;
+
+            internal ThrowingAttributesFileSystem(
+                IFileSystem inner,
+                string throwPath)
+            {
+                _inner = inner;
+                _throwPath = throwPath;
+            }
+
+            public TextReader ReadFile(string path) => _inner.ReadFile(path);
+
+            public Stream GetFileStream(
+                string path,
+                FileMode mode,
+                System.IO.FileAccess access,
+                FileShare share) =>
+                _inner.GetFileStream(path, mode, access, share);
+
+            public string ReadFileAllText(string path) =>
+                _inner.ReadFileAllText(path);
+
+            public byte[] ReadFileAllBytes(string path) =>
+                _inner.ReadFileAllBytes(path);
+
+            public IEnumerable<string> EnumerateFiles(
+                string path,
+                string searchPattern = "*",
+                SearchOption searchOption = SearchOption.TopDirectoryOnly) =>
+                _inner.EnumerateFiles(path, searchPattern, searchOption);
+
+            public IEnumerable<string> EnumerateDirectories(
+                string path,
+                string searchPattern = "*",
+                SearchOption searchOption = SearchOption.TopDirectoryOnly) =>
+                _inner.EnumerateDirectories(path, searchPattern, searchOption);
+
+            public IEnumerable<string> EnumerateFileSystemEntries(
+                string path,
+                string searchPattern = "*",
+                SearchOption searchOption = SearchOption.TopDirectoryOnly) =>
+                _inner.EnumerateFileSystemEntries(path, searchPattern, searchOption);
+
+            public FileAttributes GetAttributes(string path)
+            {
+                if (FileUtilities.PathsEqual(path, _throwPath))
+                {
+                    throw new UnauthorizedAccessException("Injected attribute failure.");
+                }
+
+                return _inner.GetAttributes(path);
+            }
+
+            public DateTime GetLastWriteTimeUtc(string path) =>
+                _inner.GetLastWriteTimeUtc(path);
+
+            public bool DirectoryExists(string path) =>
+                _inner.DirectoryExists(path);
+
+            public bool FileExists(string path) =>
+                _inner.FileExists(path);
+
+            public bool FileOrDirectoryExists(string path) =>
+                _inner.FileOrDirectoryExists(path);
+        }
+
         private static EvaluationCategoryObservation[] CreateCompleteCategories(
             params EvaluationObservationCategory[] additionallyObserved)
         {
@@ -1085,6 +1895,7 @@ namespace Microsoft.Build.UnitTests.Definition
             string projectPath = null,
             EvaluationProjectSourceObservation[] projectSources = null,
             EvaluationRequestObservation request = null,
+            EvaluationFilesystemTimestampObservation[] filesystemTimestamps = null,
             int schemaVersion = EvaluationObservationSession.ObservationSchemaVersion,
             int propertyFunctionClassificationVersion =
                 EvaluationObservationSession.PropertyFunctionClassificationVersion)
@@ -1099,7 +1910,7 @@ namespace Microsoft.Build.UnitTests.Definition
                 categories,
                 request,
                 projectSources: projectSources ?? [],
-                filesystemTimestamps: [],
+                filesystemTimestamps: filesystemTimestamps ?? [],
                 pathProbes: [],
                 directoryEnumerations: [],
                 metadataReads: [],
@@ -1123,7 +1934,7 @@ namespace Microsoft.Build.UnitTests.Definition
                 EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly))
             {
                 _output.WriteLine(
-                    $"Capture={capture.Status}; Failure={capture.Failure}; Path={capture.Path}; Exception={capture.ExceptionType}; HResult={capture.HResult}");
+                    $"Capture={capture.Status}; Failure={capture.Failure}; Path={capture.Path}; Exception={capture.ExceptionType}; HResult={capture.HResult}; ReparseProbes={capture.ReparsePointProbeCount}; TimestampReads={capture.TimestampReadCount}");
                 _output.WriteLine($"Reasons={report.Reasons}");
                 foreach (EvaluationCategoryObservation category in report.Categories)
                 {

@@ -32,6 +32,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
     private const string SdkRootEnvironmentVariable = "MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_SDK_ROOT";
     private const string UnconfiguredProjectPath = "<configure OrchardCore project paths>";
 
+    private protected EvaluationFilesystemTimestampCaptureResult BaselineCapture { get; private set; }
     private protected EvaluationObservationReport BaselineReport { get; private set; } = null!;
     private EvaluationObservationReport? _latestReport;
     private protected EvaluationFilesystemTimestampSnapshot Snapshot { get; private set; } = null!;
@@ -107,6 +108,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
             EvaluationFilesystemTimestampCaptureResult capture =
                 EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(BaselineReport);
             EnsureCaptureSucceeded(capture);
+            BaselineCapture = capture;
             Snapshot = capture.Snapshot;
             EnsureValidationStatus(
                 Snapshot.Validate(),
@@ -154,7 +156,9 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
         EvaluationFilesystemTimestampCaptureResult capture =
             EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(GetLatestReport());
         EnsureCaptureSucceeded(capture);
-        return result + capture.TimestampReadCount;
+        return result +
+            capture.TimestampReadCount +
+            capture.ReparsePointProbeCount;
     }
 
     protected int SnapshotCaptureCore()
@@ -162,7 +166,25 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
         EvaluationFilesystemTimestampCaptureResult capture =
             EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(BaselineReport);
         EnsureCaptureSucceeded(capture);
-        return capture.TimestampReadCount;
+        return capture.TimestampReadCount +
+            capture.ReparsePointProbeCount;
+    }
+
+    protected int ValidReparsePointValidationCore()
+    {
+        EvaluationFilesystemTimestampValidationResult validation =
+            Snapshot.ValidateReparsePoints();
+        EnsureValidationStatus(validation, EvaluationFilesystemTimestampValidationStatus.Valid);
+        return validation.CheckedReparsePointCount;
+    }
+
+    protected int ValidTimestampValidationWithoutReparsePointCheckCore()
+    {
+        EvaluationFilesystemTimestampValidationResult validation =
+            EvaluationFilesystemTimestampValidator
+                .ValidateTimestampsWithoutReparsePointCheck(Snapshot);
+        EnsureValidationStatus(validation, EvaluationFilesystemTimestampValidationStatus.Valid);
+        return validation.CheckedTimestampCount;
     }
 
     protected int ValidValidationCore()
@@ -216,7 +238,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
         if (validation.Status != expected)
         {
             throw new InvalidOperationException(
-                $"Timestamp validation returned {validation.Status}, expected {expected}, at '{validation.Path}'.");
+                $"Timestamp validation returned {validation.Status}/{validation.Failure}, expected {expected}, at '{validation.Path}'.");
         }
     }
 
@@ -549,7 +571,9 @@ public class OrchardCoreEvaluationFilesystemTimestampBenchmark :
         SetupCore();
         Console.WriteLine(
             $"EVALUATION_TIMESTAMP_BENCHMARK|Project={ProjectPath}|" +
-            $"TimestampCount={Snapshot.TimestampCount}");
+            $"TimestampCount={Snapshot.TimestampCount}|" +
+            $"ReparsePointCheckCount={Snapshot.ReparsePointCheckCount}|" +
+            $"CaptureReparsePointProbeCount={BaselineCapture.ReparsePointProbeCount}");
     }
 
     [GlobalCleanup]
@@ -575,6 +599,14 @@ public class OrchardCoreEvaluationFilesystemTimestampBenchmark :
 
     [Benchmark]
     public int SnapshotCapture() => SnapshotCaptureCore();
+
+    [Benchmark]
+    public int ValidReparsePointValidation() =>
+        ValidReparsePointValidationCore();
+
+    [Benchmark]
+    public int ValidTimestampValidationWithoutReparsePointCheck() =>
+        ValidTimestampValidationWithoutReparsePointCheckCore();
 
     [Benchmark]
     public int ValidValidation() => ValidValidationCore();
@@ -650,7 +682,9 @@ public class OrchardCoreEvaluationFilesystemTimestampStaleBenchmark :
                 Snapshot);
             Console.WriteLine(
                 $"EVALUATION_TIMESTAMP_BENCHMARK|Project={ProjectPath}|Mutation={MutationKind}|" +
-                $"MutationTarget={_mutationTarget.Path}|TimestampCount={Snapshot.TimestampCount}");
+                $"MutationTarget={_mutationTarget.Path}|TimestampCount={Snapshot.TimestampCount}|" +
+                $"ReparsePointCheckCount={Snapshot.ReparsePointCheckCount}|" +
+                $"CaptureReparsePointProbeCount={BaselineCapture.ReparsePointProbeCount}");
         }
         catch
         {
