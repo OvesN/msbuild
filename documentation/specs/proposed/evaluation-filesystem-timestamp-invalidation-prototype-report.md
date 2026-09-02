@@ -5,10 +5,10 @@
 > introduced the optimized FileMatcher drivers. They are retained as historical
 > prototype evidence only and are not decision-grade for the restacked PR.
 >
-> The compatibility restack routes observer-active globs through the legacy driver to
-> preserve traversed-directory evidence, while an unobserved evaluation may use the
-> optimized driver. Fresh evaluation and validation benchmarks must use the same driver
-> and evaluation graph before this report can support a continuation decision.
+> Observer-active globs now retain the selected optimized FileMatcher driver. Both the
+> direct and callback optimized drivers report traversed directories, while unsupported
+> patterns retain their normal legacy fallback. The historical rows predate this change
+> and still cannot support a current continuation decision.
 >
 > The historical rows also predate strict snapshot admission, the
 > conflicting-observation analysis gate, and reparse-component scanning during capture
@@ -42,10 +42,21 @@ predicate evaluation actually consumed.
 
 ## Current restacked mechanism and limitations
 
-Current `main` can select optimized FileMatcher drivers. The compatibility restack forces
-observer-active globs through the legacy driver because only that path reports every
-traversed directory. An unobserved evaluation may still use an optimized driver, so the
-existing benchmarks are intentionally historical until graph alignment is implemented.
+Observer activation no longer changes FileMatcher driver selection. The optimized
+callback driver records each directory before reading cached or uncached entries; the
+optimized direct driver records its root and every child accepted for recursion.
+Excluded subtrees are not recorded, missing fixed roots retain a negative directory
+observation, and unsupported patterns use their existing legacy fallback with the same
+observer. Process-wide glob-result cache hits still fail closed when no traversal
+evidence exists in the current observation session. Observed and unobserved optimized
+evaluations now share the normal result-cache partition, so a cache entry populated
+before observation can reduce snapshot admission rather than silently reuse missing
+evidence.
+
+Observation adds one synchronized directory record and a first-use timestamp read for
+each optimized directory traversal. The direct optimized driver is otherwise
+callback-free, so this work can be a larger proportional overhead than it was on legacy
+traversal and must be included in future observer-overhead measurements.
 
 The observation session records a canonical absolute path, independent expected
 results for file existence, directory existence, and generic file-or-directory
@@ -277,9 +288,9 @@ implementation-level recursive-glob traversal paths. No unexplained built-in
 project-source, import, file-read, probe, search, or glob dependency remained.
 
 This comparison covered the legacy FileMatcher traversal on the pre-restack base. It is
-historical evidence, not coverage evidence for the optimized drivers now present on
-`main`, and not a proof over every possible project, custom filesystem provider,
-property function, or future SDK resolver.
+historical evidence, not BuildXL coverage evidence for the newly observer-enabled
+optimized drivers, and not a proof over every possible project, custom filesystem
+provider, property function, or future SDK resolver.
 
 ## Historical decision withdrawn
 

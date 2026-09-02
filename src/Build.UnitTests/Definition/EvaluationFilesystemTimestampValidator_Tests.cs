@@ -1149,6 +1149,11 @@ namespace Microsoft.Build.UnitTests.Definition
                 </Project>
                 """);
 
+            EvaluationGlobObservation glob = report.Globs.ShouldHaveSingleItem();
+            glob.TraversedDirectories.ShouldNotBeEmpty();
+            glob.TraversedDirectories.ShouldNotContain(path =>
+                FileUtilities.PathsEqual(path, binDirectory) ||
+                FileUtilities.PathsEqual(path, objDirectory));
             EvaluationFilesystemTimestampCaptureResult capture =
                 EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
