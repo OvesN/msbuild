@@ -1362,6 +1362,7 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         var observer = new RecordingEvaluationInputObserver();
         string include = ToPlatformPath("**/*.cs");
         List<string> excludes = [ToPlatformPath("**/obj/**")];
+        string provider = FileSystems.GetProviderIdentity(fileSystem);
 
         optimized.SelectDriver(
             root.Path,
@@ -1377,7 +1378,7 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
 
         files.Length.ShouldBe(2);
         fileSystem.EnumerationCalls.ShouldBeEmpty();
-        observer.ShouldContainDirectory(root.Path, exists: true);
+        observer.ShouldContainDirectory(root.Path, exists: true, provider: provider);
         observer.ShouldContainDirectory(source, exists: true);
         observer.ShouldContainDirectory(nested, exists: true);
         observer.ShouldNotContainDirectory(excluded);
@@ -1403,6 +1404,7 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         var observer = new RecordingEvaluationInputObserver();
         string include = ToPlatformPath("**/*.cs");
         List<string> excludes = [ToPlatformPath("**/obj/**")];
+        string provider = FileSystems.GetProviderIdentity(fileSystem);
 
         optimized.SelectDriver(
             root.Path,
@@ -1418,7 +1420,7 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
 
         files.ShouldBe([Path.Combine("src", "nested", "nested.cs")]);
         fileSystem.EnumerationCalls.ShouldNotBeEmpty();
-        observer.ShouldContainDirectory(root.Path, exists: true);
+        observer.ShouldContainDirectory(root.Path, exists: true, provider: provider);
         observer.ShouldContainDirectory(source, exists: true);
         observer.ShouldContainDirectory(nested, exists: true);
         observer.ShouldNotContainDirectory(excluded);
@@ -2488,7 +2490,7 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         .Replace('\\', Path.DirectorySeparatorChar)
         .Replace('/', Path.DirectorySeparatorChar);
 
-    private class RecordingFileSystem : IFileSystem
+    private class RecordingFileSystem : IFileSystem, IFileSystemProviderIdentity
     {
         private readonly IFileSystem _inner;
 
@@ -2498,6 +2500,9 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
 
         internal List<(string Operation, string Path, string Pattern)> EnumerationCalls { get; } = [];
+
+        string IFileSystemProviderIdentity.ProviderIdentity =>
+            FileSystems.GetProviderIdentity(_inner);
 
         public TextReader ReadFile(string path) => _inner.ReadFile(path);
         public Stream GetFileStream(string path, FileMode mode, FileAccess access, FileShare share) =>
@@ -2665,11 +2670,10 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
 
         public virtual void RecordGlobDirectory(
-            string directory,
-            string filespec,
             string path,
             bool exists,
-            string? globIdentity)
+            string? globIdentity,
+            string provider)
         {
         }
 
@@ -2679,7 +2683,8 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
             IReadOnlyList<string> candidates,
             int candidateCount,
             string candidatesFingerprint,
-            string selected)
+            string selected,
+            string provider)
         {
         }
     }
@@ -2687,32 +2692,41 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
     private sealed class RecordingEvaluationInputObserver :
         NoOpEvaluationInputObserver
     {
-        private readonly ConcurrentDictionary<string, bool> _directories =
+        private readonly ConcurrentDictionary<string, (bool Exists, string Provider)> _directories =
             new(FileUtilities.PathComparer);
 
         internal int Count => _directories.Count;
 
         public override void RecordGlobDirectory(
-            string directory,
-            string filespec,
             string path,
             bool exists,
-            string? globIdentity)
+            string? globIdentity,
+            string provider)
         {
             _directories.AddOrUpdate(
                 path,
-                exists,
-                (_, priorExists) =>
+                (exists, provider),
+                (_, prior) =>
                 {
-                    priorExists.ShouldBe(exists);
-                    return priorExists;
+                    prior.Exists.ShouldBe(exists);
+                    prior.Provider.ShouldBe(provider);
+                    return prior;
                 });
         }
 
-        internal void ShouldContainDirectory(string path, bool exists)
+        internal void ShouldContainDirectory(
+            string path,
+            bool exists,
+            string? provider = null)
         {
-            _directories.TryGetValue(path, out bool observedExists).ShouldBeTrue();
-            observedExists.ShouldBe(exists);
+            _directories.TryGetValue(
+                path,
+                out (bool Exists, string Provider) observed).ShouldBeTrue();
+            observed.Exists.ShouldBe(exists);
+            if (provider is not null)
+            {
+                observed.Provider.ShouldBe(provider);
+            }
         }
 
         internal void ShouldNotContainDirectory(string path)
@@ -2723,9 +2737,13 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         internal void ShouldMatch(RecordingEvaluationInputObserver expected)
         {
             _directories.Count.ShouldBe(expected._directories.Count);
-            foreach (KeyValuePair<string, bool> directory in expected._directories)
+            foreach (KeyValuePair<string, (bool Exists, string Provider)> directory in
+                expected._directories)
             {
-                ShouldContainDirectory(directory.Key, directory.Value);
+                ShouldContainDirectory(
+                    directory.Key,
+                    directory.Value.Exists,
+                    directory.Value.Provider);
             }
         }
     }

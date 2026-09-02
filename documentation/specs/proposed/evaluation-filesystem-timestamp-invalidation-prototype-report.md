@@ -1,12 +1,17 @@
 # Evaluation filesystem timestamp invalidation prototype
 
 > [!IMPORTANT]
-> These measurements cover the current restacked prototype, including optimized
-> FileMatcher traversal observation, strict default-deny admission, typed-existence
-> replay, and reparse-component validation.
+> These measurements were collected at `c3c52706ad3ba05f82ec425467fca3a4e7d56b62`
+> and cover optimized
+> FileMatcher traversal observation, typed-existence replay, and reparse-component
+> validation.
 >
-> The benchmark uses the analysis-only filesystem slice. Current observation coverage
-> remains intentionally ineligible for a real cache hit, and the measurements exclude
+> Subsequent review cleanup removed the unused cache-admission path, preserved
+> filesystem-provider provenance, and tightened fail-closed handling. Rerun the
+> benchmark before treating these measurements as current-head results.
+>
+> The benchmark uses an analysis-only filesystem slice with no cache integration.
+> The measurements exclude
 > cache lookup, serialization, loading, result materialization, concurrency, eviction,
 > non-filesystem dependency validation, and the validation-to-materialization race.
 
@@ -48,7 +53,7 @@ observation, and unsupported patterns use their existing legacy fallback with th
 observer. Process-wide glob-result cache hits still fail closed when no traversal
 evidence exists in the current observation session. Observed and unobserved optimized
 evaluations now share the normal result-cache partition, so a cache entry populated
-before observation can reduce snapshot admission rather than silently reuse missing
+before observation causes capture to fail closed rather than silently reuse missing
 evidence.
 
 Observation adds one synchronized directory record and a first-use timestamp read for
@@ -113,39 +118,33 @@ syscalls by reading attributes, existence, and timestamps through one metadata p
 
 The prototype deliberately rejects every `ReparsePoint` tag, including non-aliasing
 cloud, deduplication, and container placeholders. This is conservative and can reduce
-admission to zero for repositories hosted by those systems or beneath a stable
+capture coverage to zero for repositories hosted by those systems or beneath a stable
 filesystem symlink such as macOS `/var`. It does not detect alias mechanisms that do
 not expose a reparse component, such as `subst` drives, mapped-drive retargeting, or
 DFS namespace changes. Hard-link identity is also not distinguished, although hard
 links share file timestamps and remain subject to the general timestamp-preserving
-replacement limitation. A production implementation should classify name-surrogate
-links precisely and record and validate both logical and resolved target identities.
+replacement limitation. Windows per-directory case-sensitive namespaces are not
+modeled; dependency identities use the platform-default path comparer. A production
+implementation should classify name-surrogate links precisely and record and validate
+both logical and resolved target identities.
 
 A glob-result cache hit populated by another evaluation does not replay traversal
 evidence. Snapshot capture therefore fails closed for that case. Lazy wildcards also
 currently fail closed because no traversal occurs.
 
-Filesystem-snapshot admission is exhaustive and default deny. `Capture` rejects an
-unsuccessful evaluation, an unsupported observation or
-property-function-classification version, any non-cacheable reason, a missing or
-duplicate category, any category whose implementation coverage is not `Complete`, any
-category state other than `NotExercised` or `Observed`, a missing or mismatched request,
-and a report without a parsed root source matching the evaluated project path. The
-current observer deliberately reports `Partial` implementation coverage for every
-non-completion category, so no report can currently produce an admissible filesystem
-snapshot. Passing this gate does not make a complete cache entry eligible:
-non-filesystem inputs still require cache-key fields or dependency contracts.
-
 Filesystem mechanism tests and timing use
-`CaptureFilesystemSliceForAnalysis`. That analysis-only path bypasses report-level
-admission but still fails closed when filesystem-category observation is incomplete, a
+`CaptureFilesystemSliceForAnalysis`. It fails closed when filesystem-category
+observation is incomplete, a
 project source changed while it was read, observations or timestamps conflict, a path
 is unrooted, an unsupported provider or metadata operation was used, a filesystem
 operation failed, or required glob/search traversal evidence is missing. Toolset- and
 SDK-resolver-mediated filesystem dependencies remain deferred. Its output measures
-scan cost, returns `AnalysisOnly`, and is marked
-`IsFilesystemSnapshotAdmissible = false`; it is not evidence of an admissible cache
-hit.
+scan cost and returns `AnalysisOnly`; it is not evidence of an admissible cache hit.
+
+Directory enumeration capture accepts only complete, top-level searches with simple
+search patterns and default `SearchOption` behavior. Recursive searches, patterns with
+directory components, custom `EnumerationOptions`, wildcard search candidates, and
+custom filesystem providers fail closed.
 
 Validation performs these operations:
 
@@ -182,7 +181,7 @@ intentionally deferred to the resolver contract.
 | Property | Value |
 | --- | --- |
 | Date | 2026-09-02 |
-| Prototype implementation | `981f36c87de4001d6c614bcbe33a32831b51f716` plus benchmark-only batching in this update |
+| Measurement commit | `c3c52706ad3ba05f82ec425467fca3a4e7d56b62` |
 | Platform | Windows 11 `10.0.26200.9106`, Hyper-V |
 | Processor | AMD EPYC 7763, 8 physical / 16 logical cores |
 | Memory | 63.95 GB |
@@ -209,8 +208,8 @@ BenchmarkDotNet's 99.9% confidence-interval half widths.
 
 ### Reproduction
 
-Run from the MSBuild repository root with disposable restored OrchardCore and
-Roslyn checkouts:
+Run from the MSBuild repository root with disposable restored OrchardCore and Roslyn
+checkouts:
 
 ```powershell
 $OrchardRoot = 'C:\src\OrchardCore'
@@ -228,7 +227,7 @@ $env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS = @(
 Remove-Item Env:\MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS -ErrorAction SilentlyContinue
 
 .\src\MSBuild.Benchmarks\Run-Benchmarks.ps1 `
-    -Filter '*OrchardCoreEvaluationFilesystemTimestampBenchmark.*' `
+    -Filter '*RealWorldEvaluationFilesystemTimestampBenchmark.*' `
     -Framework net11.0 `
     -LaunchCount 3 `
     -ArtifactsPath "$ResultsRoot\normal"
@@ -238,7 +237,7 @@ Remove-Item Env:\MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS -ErrorAction S
 $env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS = 'ProjectFile,ImportFile'
 
 .\src\MSBuild.Benchmarks\Run-Benchmarks.ps1 `
-    -Filter '*OrchardCoreEvaluationFilesystemTimestampStaleBenchmark.*' `
+    -Filter '*RealWorldEvaluationFilesystemTimestampStaleBenchmark.*' `
     -Framework net11.0 `
     -LaunchCount 3 `
     -ArtifactsPath "$ResultsRoot\file-import"
@@ -252,7 +251,7 @@ $env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS = @(
 $env:MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS = 'GlobMembership'
 
 .\src\MSBuild.Benchmarks\Run-Benchmarks.ps1 `
-    -Filter '*OrchardCoreEvaluationFilesystemTimestampStaleBenchmark.*' `
+    -Filter '*RealWorldEvaluationFilesystemTimestampStaleBenchmark.*' `
     -Framework net11.0 `
     -LaunchCount 3 `
     -ArtifactsPath "$ResultsRoot\glob"
@@ -317,33 +316,10 @@ Combined rows include normal reevaluation variance and, for glob membership,
 a genuinely changed item set. In particular, the 0.91x Core import result is
 measurement noise and does not mean validation makes reevaluation faster.
 
-## Historical BuildXL coverage comparison
-
-On the pre-restack base, the observer was run against BuildXL Detours for the same
-restored OrchardCore projects. Paths were converted to absolute canonical identities,
-Windows device prefixes and trailing separators were normalized, and
-BuildXL's randomized case-sensitivity probe was excluded.
-
-| Project | Native identities | BuildXL identities | Exact overlap | Native-only | BuildXL-only |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| OrchardCore Core | 327 | 456 | 233 | 94 | 223 |
-| OrchardCore CMS Web | 2,753 | 533 | 313 | 2,440 | 220 |
-
-The large native-only CMS set is expected: MSBuild records semantic glob result
-members even when BuildXL observes only the directory traversal. BuildXL-only
-identities were classified as host/runtime/SDK/toolset accesses or
-implementation-level recursive-glob traversal paths. No unexplained built-in
-project-source, import, file-read, probe, search, or glob dependency remained.
-
-This comparison covered the legacy FileMatcher traversal on the pre-restack base. It is
-historical evidence, not BuildXL coverage evidence for the newly observer-enabled
-optimized drivers, and not a proof over every possible project, custom filesystem
-provider, property function, or future SDK resolver.
-
 ## Decision
 
-The current restacked result supersedes the historical timing rows. Complete
-validation is 4.8-6.9x faster than fresh reevaluation, but it consumes
+At the measurement commit, complete validation is 4.8-6.9x faster than fresh
+reevaluation, but it consumes
 14.4-20.9% of reevaluation time and therefore does not pass the predeclared
 less-than-10% continuation threshold.
 

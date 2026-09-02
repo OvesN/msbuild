@@ -3,17 +3,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared.FileSystem;
 
-#nullable disable
+#nullable enable
 
 namespace Microsoft.Build.Evaluation.Context
 {
     internal enum EvaluationFilesystemTimestampCaptureStatus
     {
-        Success,
         AnalysisOnly,
         Changed,
         Unsupported,
@@ -32,13 +32,10 @@ namespace Microsoft.Build.Evaluation.Context
         None,
         UnsuccessfulEvaluation,
         UnsupportedObservationVersion,
-        BlockingObservation,
         IncompleteCategorySet,
         IncompleteReparsePointCheckSet,
         MalformedSnapshot,
         NonCanonicalPath,
-        MissingRequestObservation,
-        MissingRootProjectSourceObservation,
         IncompleteFilesystemObservation,
         ConflictingObservation,
         ReparsePointTraversal,
@@ -79,12 +76,12 @@ namespace Microsoft.Build.Evaluation.Context
 
     internal sealed class EvaluationFilesystemTimestampSnapshot
     {
-        private readonly EvaluationFilesystemTimestampEntry[] _entries;
-        private readonly string[] _reparsePointCheckPaths;
+        private readonly EvaluationFilesystemTimestampEntry[]? _entries;
+        private readonly string[]? _reparsePointCheckPaths;
 
         internal EvaluationFilesystemTimestampSnapshot(
-            EvaluationFilesystemTimestampEntry[] entries,
-            string[] reparsePointCheckPaths)
+            EvaluationFilesystemTimestampEntry[]? entries,
+            string[]? reparsePointCheckPaths)
         {
             _entries = entries;
             _reparsePointCheckPaths = reparsePointCheckPaths;
@@ -92,8 +89,8 @@ namespace Microsoft.Build.Evaluation.Context
 
         internal int TimestampCount => _entries?.Length ?? 0;
         internal int ReparsePointCheckCount => _reparsePointCheckPaths?.Length ?? 0;
-        internal IReadOnlyList<EvaluationFilesystemTimestampEntry> Entries => _entries;
-        internal IReadOnlyList<string> ReparsePointCheckPaths => _reparsePointCheckPaths;
+        internal IReadOnlyList<EvaluationFilesystemTimestampEntry>? Entries => _entries;
+        internal IReadOnlyList<string>? ReparsePointCheckPaths => _reparsePointCheckPaths;
 
         internal EvaluationFilesystemTimestampValidationResult Validate() =>
             EvaluationFilesystemTimestampValidator.Validate(this);
@@ -106,18 +103,16 @@ namespace Microsoft.Build.Evaluation.Context
     {
         internal EvaluationFilesystemTimestampCaptureResult(
             EvaluationFilesystemTimestampCaptureStatus status,
-            EvaluationFilesystemTimestampSnapshot snapshot,
-            bool isFilesystemSnapshotAdmissible,
+            EvaluationFilesystemTimestampSnapshot? snapshot,
             EvaluationFilesystemTimestampFailure failure,
-            string path,
-            string exceptionType,
+            string? path,
+            string? exceptionType,
             int hResult,
             int reparsePointProbeCount,
             int timestampReadCount)
         {
             Status = status;
             Snapshot = snapshot;
-            IsFilesystemSnapshotAdmissible = isFilesystemSnapshotAdmissible;
             Failure = failure;
             Path = path;
             ExceptionType = exceptionType;
@@ -127,15 +122,10 @@ namespace Microsoft.Build.Evaluation.Context
         }
 
         internal EvaluationFilesystemTimestampCaptureStatus Status { get; }
-        internal EvaluationFilesystemTimestampSnapshot Snapshot { get; }
-        /// <summary>
-        /// Whether strict report admission passed for this filesystem snapshot.
-        /// Non-filesystem inputs still require cache-key fields or dependency contracts.
-        /// </summary>
-        internal bool IsFilesystemSnapshotAdmissible { get; }
+        internal EvaluationFilesystemTimestampSnapshot? Snapshot { get; }
         internal EvaluationFilesystemTimestampFailure Failure { get; }
-        internal string Path { get; }
-        internal string ExceptionType { get; }
+        internal string? Path { get; }
+        internal string? ExceptionType { get; }
         internal int HResult { get; }
         internal int ReparsePointProbeCount { get; }
         internal int TimestampReadCount { get; }
@@ -148,10 +138,10 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationFilesystemTimestampFailure failure,
             int checkedReparsePointCount,
             int checkedTimestampCount,
-            string path,
+            string? path,
             long expectedLastWriteTimeUtcTicks,
             long actualLastWriteTimeUtcTicks,
-            string exceptionType,
+            string? exceptionType,
             int hResult)
         {
             Status = status;
@@ -169,10 +159,10 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationFilesystemTimestampFailure Failure { get; }
         internal int CheckedReparsePointCount { get; }
         internal int CheckedTimestampCount { get; }
-        internal string Path { get; }
+        internal string? Path { get; }
         internal long ExpectedLastWriteTimeUtcTicks { get; }
         internal long ActualLastWriteTimeUtcTicks { get; }
-        internal string ExceptionType { get; }
+        internal string? ExceptionType { get; }
         internal int HResult { get; }
     }
 
@@ -210,17 +200,6 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationObservationReason.UnversionedSourceProvider |
             EvaluationObservationReason.ProjectSourceChangedDuringRead;
 
-        private static readonly string s_defaultFileSystemProvider =
-            FileSystems.Default.GetType().AssemblyQualifiedName;
-        private static readonly string s_cachingFileSystemProvider =
-            typeof(CachingFileSystemWrapper).AssemblyQualifiedName;
-
-        internal static EvaluationFilesystemTimestampCaptureResult Capture(
-            EvaluationObservationReport report)
-        {
-            return Capture(report, requireCacheEligibleReport: true);
-        }
-
         /// <summary>
         /// Captures the filesystem slice for prototype analysis even when unrelated
         /// observation categories prevent cache admission. This method must not be
@@ -229,20 +208,12 @@ namespace Microsoft.Build.Evaluation.Context
         internal static EvaluationFilesystemTimestampCaptureResult CaptureFilesystemSliceForAnalysis(
             EvaluationObservationReport report)
         {
-            return Capture(report, requireCacheEligibleReport: false);
-        }
-
-        private static EvaluationFilesystemTimestampCaptureResult Capture(
-            EvaluationObservationReport report,
-            bool requireCacheEligibleReport)
-        {
             if (report is null)
             {
                 throw new ArgumentNullException(nameof(report));
             }
 
-            var builder = new SnapshotBuilder(
-                isFilesystemSnapshotAdmissible: requireCacheEligibleReport);
+            var builder = new SnapshotBuilder();
             if (!report.EvaluationSucceeded)
             {
                 return builder.Fail(
@@ -261,35 +232,11 @@ namespace Microsoft.Build.Evaluation.Context
                     report.ProjectPath);
             }
 
-            if (!report.HasCompleteCategorySet)
+            if (!HasCompleteCategorySet(report.Categories))
             {
                 return builder.Fail(
                     EvaluationFilesystemTimestampCaptureStatus.Unsupported,
                     EvaluationFilesystemTimestampFailure.IncompleteCategorySet,
-                    report.ProjectPath);
-            }
-
-            if (requireCacheEligibleReport && report.HasBlockingObservations)
-            {
-                return builder.Fail(
-                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
-                    EvaluationFilesystemTimestampFailure.BlockingObservation,
-                    report.ProjectPath);
-            }
-
-            if (requireCacheEligibleReport && !HasMatchingRequest(report))
-            {
-                return builder.Fail(
-                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
-                    EvaluationFilesystemTimestampFailure.MissingRequestObservation,
-                    report.ProjectPath);
-            }
-
-            if (requireCacheEligibleReport && !HasRootProjectSource(report))
-            {
-                return builder.Fail(
-                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
-                    EvaluationFilesystemTimestampFailure.MissingRootProjectSourceObservation,
                     report.ProjectPath);
             }
 
@@ -413,8 +360,7 @@ namespace Microsoft.Build.Evaluation.Context
 
             foreach (EvaluationDirectoryEnumerationObservation observation in report.DirectoryEnumerations)
             {
-                if (observation.Completion != EvaluationEnumerationCompletion.Complete ||
-                    observation.SearchOption == System.IO.SearchOption.AllDirectories)
+                if (!IsSupportedEnumeration(observation))
                 {
                     return builder.Fail(
                         EvaluationFilesystemTimestampCaptureStatus.Unsupported,
@@ -520,29 +466,43 @@ namespace Microsoft.Build.Evaluation.Context
             return builder.Capture();
         }
 
-        private static bool HasMatchingRequest(EvaluationObservationReport report) =>
-            report.Request is not null &&
-            !string.IsNullOrEmpty(report.ProjectPath) &&
-            FileUtilities.PathsEqual(report.Request.ProjectPath, report.ProjectPath);
-
-        private static bool HasRootProjectSource(EvaluationObservationReport report)
+        private static bool HasCompleteCategorySet(
+            EvaluationCategoryObservation[]? categories)
         {
-            if (string.IsNullOrEmpty(report.ProjectPath))
+            EvaluationObservationCategory[] expectedCategories =
+                (EvaluationObservationCategory[])Enum.GetValues(
+                    typeof(EvaluationObservationCategory));
+            if (categories is null ||
+                categories.Length != expectedCategories.Length)
             {
                 return false;
             }
 
-            foreach (EvaluationProjectSourceObservation source in report.ProjectSources)
+            foreach (EvaluationObservationCategory expectedCategory in expectedCategories)
             {
-                if (source.Role == EvaluationProjectSourceRole.Root &&
-                    source.Outcome == EvaluationProjectSourceOutcome.Parsed &&
-                    FileUtilities.PathsEqual(source.Path, report.ProjectPath))
+                bool found = false;
+                foreach (EvaluationCategoryObservation category in categories)
                 {
-                    return true;
+                    if (category.Category != expectedCategory)
+                    {
+                        continue;
+                    }
+
+                    if (found)
+                    {
+                        return false;
+                    }
+
+                    found = true;
+                }
+
+                if (!found)
+                {
+                    return false;
                 }
             }
 
-            return false;
+            return true;
         }
 
         internal static EvaluationFilesystemTimestampValidationResult Validate(
@@ -573,8 +533,8 @@ namespace Microsoft.Build.Evaluation.Context
             if (!TryValidateReparsePointCheckSet(
                     snapshot,
                     out EvaluationFilesystemTimestampFailure checkSetFailure,
-                    out string incompletePath,
-                    out Exception checkSetException))
+                    out string? incompletePath,
+                    out Exception? checkSetException))
             {
                 return new EvaluationFilesystemTimestampValidationResult(
                     EvaluationFilesystemTimestampValidationStatus.Failed,
@@ -589,12 +549,12 @@ namespace Microsoft.Build.Evaluation.Context
             }
 
             IReadOnlyList<string> reparsePointCheckPaths =
-                snapshot.ReparsePointCheckPaths;
+                snapshot.ReparsePointCheckPaths!;
             for (int i = 0; i < reparsePointCheckPaths.Count; i++)
             {
                 string path = reparsePointCheckPaths[i];
                 ReparsePointProbeResult probeResult =
-                    ProbeReparsePoint(path, out Exception exception);
+                    ProbeReparsePoint(path, out Exception? exception);
                 if (probeResult == ReparsePointProbeResult.ReparsePoint)
                 {
                     return new EvaluationFilesystemTimestampValidationResult(
@@ -619,7 +579,7 @@ namespace Microsoft.Build.Evaluation.Context
                         path,
                         expectedLastWriteTimeUtcTicks: 0,
                         actualLastWriteTimeUtcTicks: 0,
-                        exception.GetType().FullName,
+                        exception!.GetType().FullName,
                         exception.HResult);
                 }
             }
@@ -657,7 +617,7 @@ namespace Microsoft.Build.Evaluation.Context
             EvaluationFilesystemTimestampSnapshot snapshot,
             int checkedReparsePointCount)
         {
-            IReadOnlyList<EvaluationFilesystemTimestampEntry> entries = snapshot.Entries;
+            IReadOnlyList<EvaluationFilesystemTimestampEntry>? entries = snapshot.Entries;
             if (entries is null)
             {
                 return new EvaluationFilesystemTimestampValidationResult(
@@ -761,7 +721,7 @@ namespace Microsoft.Build.Evaluation.Context
 
         private static ReparsePointProbeResult ProbeReparsePoint(
             string path,
-            out Exception exception)
+            out Exception? exception)
         {
             exception = null;
             try
@@ -789,14 +749,14 @@ namespace Microsoft.Build.Evaluation.Context
         private static bool TryValidateReparsePointCheckSet(
             EvaluationFilesystemTimestampSnapshot snapshot,
             out EvaluationFilesystemTimestampFailure failure,
-            out string incompletePath,
-            out Exception exception)
+            out string? incompletePath,
+            out Exception? exception)
         {
             failure = EvaluationFilesystemTimestampFailure.None;
             incompletePath = null;
             exception = null;
-            IReadOnlyList<string> paths = snapshot.ReparsePointCheckPaths;
-            IReadOnlyList<EvaluationFilesystemTimestampEntry> entries = snapshot.Entries;
+            IReadOnlyList<string>? paths = snapshot.ReparsePointCheckPaths;
+            IReadOnlyList<EvaluationFilesystemTimestampEntry>? entries = snapshot.Entries;
             if (paths is null ||
                 entries is null)
             {
@@ -854,7 +814,7 @@ namespace Microsoft.Build.Evaluation.Context
 
                     try
                     {
-                        string parent = Path.GetDirectoryName(current);
+                        string? parent = Path.GetDirectoryName(current);
                         if (string.IsNullOrEmpty(parent) ||
                             FileUtilities.PathsEqual(parent, current))
                         {
@@ -892,11 +852,8 @@ namespace Microsoft.Build.Evaluation.Context
             }
         }
 
-        private static bool IsDiskProvider(string provider) =>
-            string.IsNullOrEmpty(provider) ||
-            string.Equals(provider, "Disk", StringComparison.Ordinal) ||
-            string.Equals(provider, s_defaultFileSystemProvider, StringComparison.Ordinal) ||
-            string.Equals(provider, s_cachingFileSystemProvider, StringComparison.Ordinal);
+        private static bool IsDiskProvider(string? provider) =>
+            FileSystems.IsDiskProviderIdentity(provider);
 
         private static bool IsFilesystemCategory(EvaluationObservationCategory category) =>
             category is EvaluationObservationCategory.ProjectSource or
@@ -914,25 +871,40 @@ namespace Microsoft.Build.Evaluation.Context
                 EvaluationMetadataKind.ItemRelativeDirectory or
                 EvaluationMetadataKind.ItemDirectory;
 
+        private static bool IsSupportedEnumeration(
+            EvaluationDirectoryEnumerationObservation observation)
+        {
+            if (observation.Completion != EvaluationEnumerationCompletion.Complete ||
+                observation.SearchOption != SearchOption.TopDirectoryOnly ||
+            observation.SearchPattern?.IndexOfAny(
+                    [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0)
+            {
+                return false;
+            }
+
+            return string.IsNullOrEmpty(observation.OptionsIdentity) ||
+                string.Equals(
+                    observation.OptionsIdentity,
+                    "Default",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    observation.OptionsIdentity,
+                    "SearchOption:0",
+                    StringComparison.Ordinal);
+        }
+
         private sealed class SnapshotBuilder
         {
             private readonly Dictionary<string, PendingTimestamp> _timestamps =
                 new(FileUtilities.PathComparer);
             private readonly HashSet<string> _reparsePointCheckedPaths =
                 new(FileUtilities.PathComparer);
-            private readonly bool _isFilesystemSnapshotAdmissible;
-
             private EvaluationFilesystemTimestampCaptureStatus _failureStatus;
             private EvaluationFilesystemTimestampFailure _failure;
-            private string _failurePath;
-            private string _failureExceptionType;
+            private string? _failurePath;
+            private string? _failureExceptionType;
             private int _failureHResult;
             private int _reparsePointProbeCount;
-
-            internal SnapshotBuilder(bool isFilesystemSnapshotAdmissible)
-            {
-                _isFilesystemSnapshotAdmissible = isFilesystemSnapshotAdmissible;
-            }
 
             internal bool TryAddProjectSource(
                 EvaluationProjectSourceObservation observation)
@@ -975,7 +947,7 @@ namespace Microsoft.Build.Evaluation.Context
                 long timestampUtcTicks,
                 EvaluationPathExistence existence,
                 EvaluationFilesystemTimestampSource sources,
-                string provider)
+                string? provider)
             {
                 if (!TryValidatePathAndProvider(path, provider))
                 {
@@ -1006,7 +978,8 @@ namespace Microsoft.Build.Evaluation.Context
                     return false;
                 }
 
-                if (_timestamps.TryGetValue(path, out PendingTimestamp pending))
+                if (_timestamps.TryGetValue(path, out PendingTimestamp? pending) &&
+                    pending is not null)
                 {
                     if (pending.TimestampUtcTicks != timestampUtcTicks)
                     {
@@ -1060,7 +1033,7 @@ namespace Microsoft.Build.Evaluation.Context
                     return true;
                 }
 
-                string parent;
+                string? parent;
                 try
                 {
                     parent = Path.GetDirectoryName(path);
@@ -1084,7 +1057,7 @@ namespace Microsoft.Build.Evaluation.Context
 
                 _reparsePointProbeCount++;
                 ReparsePointProbeResult probeResult =
-                    ProbeReparsePoint(path, out Exception exception);
+                    ProbeReparsePoint(path, out Exception? exception);
                 if (probeResult == ReparsePointProbeResult.ReparsePoint)
                 {
                     // A link already present during capture makes the candidate unsupported.
@@ -1102,7 +1075,7 @@ namespace Microsoft.Build.Evaluation.Context
                         EvaluationFilesystemTimestampCaptureStatus.Failed,
                         EvaluationFilesystemTimestampFailure.ReparsePointStateUnknown,
                         path,
-                        exception);
+                        exception!);
                     return false;
                 }
 
@@ -1112,7 +1085,7 @@ namespace Microsoft.Build.Evaluation.Context
 
             internal bool TryRequire(
                 string path,
-                string provider,
+                string? provider,
                 EvaluationFilesystemTimestampSource requiredSources,
                 EvaluationPathKind? requiredKind = null,
                 bool? requiredExists = null)
@@ -1122,7 +1095,8 @@ namespace Microsoft.Build.Evaluation.Context
                     return false;
                 }
 
-                if (!_timestamps.TryGetValue(path, out PendingTimestamp pending) ||
+                if (!_timestamps.TryGetValue(path, out PendingTimestamp? pending) ||
+                    pending is null ||
                     (pending.Sources & requiredSources) == 0)
                 {
                     SetFailure(
@@ -1190,11 +1164,8 @@ namespace Microsoft.Build.Evaluation.Context
                 if (validation.Status == EvaluationFilesystemTimestampValidationStatus.Valid)
                 {
                     return new EvaluationFilesystemTimestampCaptureResult(
-                        _isFilesystemSnapshotAdmissible
-                            ? EvaluationFilesystemTimestampCaptureStatus.Success
-                            : EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly,
+                        EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly,
                         snapshot,
-                        _isFilesystemSnapshotAdmissible,
                         EvaluationFilesystemTimestampFailure.None,
                         path: null,
                         exceptionType: null,
@@ -1209,7 +1180,6 @@ namespace Microsoft.Build.Evaluation.Context
                     return new EvaluationFilesystemTimestampCaptureResult(
                         EvaluationFilesystemTimestampCaptureStatus.Changed,
                         snapshot: null,
-                        isFilesystemSnapshotAdmissible: false,
                         validation.Failure,
                         validation.Path,
                         exceptionType: null,
@@ -1222,7 +1192,6 @@ namespace Microsoft.Build.Evaluation.Context
                 return new EvaluationFilesystemTimestampCaptureResult(
                     EvaluationFilesystemTimestampCaptureStatus.Failed,
                     snapshot: null,
-                    isFilesystemSnapshotAdmissible: false,
                     validation.Failure,
                     validation.Path,
                     validation.ExceptionType,
@@ -1235,7 +1204,7 @@ namespace Microsoft.Build.Evaluation.Context
             internal EvaluationFilesystemTimestampCaptureResult Fail(
                 EvaluationFilesystemTimestampCaptureStatus status,
                 EvaluationFilesystemTimestampFailure failure,
-                string path)
+                string? path)
             {
                 SetFailure(status, failure, path);
                 return CreateFailureResult();
@@ -1245,7 +1214,6 @@ namespace Microsoft.Build.Evaluation.Context
                 new(
                     _failureStatus,
                     snapshot: null,
-                    isFilesystemSnapshotAdmissible: false,
                     _failure,
                     _failurePath,
                     _failureExceptionType,
@@ -1253,7 +1221,9 @@ namespace Microsoft.Build.Evaluation.Context
                     reparsePointProbeCount: _reparsePointProbeCount,
                     timestampReadCount: 0);
 
-            private bool TryValidatePathAndProvider(string path, string provider)
+            private bool TryValidatePathAndProvider(
+                [NotNullWhen(true)] string? path,
+                string? provider)
             {
                 if (!IsDiskProvider(provider))
                 {
@@ -1264,7 +1234,8 @@ namespace Microsoft.Build.Evaluation.Context
                     return false;
                 }
 
-                if (string.IsNullOrEmpty(path) ||
+                if (path is null ||
+                    path.Length == 0 ||
                     !FileUtilities.IsPathFullyQualifiedNoThrow(path))
                 {
                     SetFailure(
@@ -1289,8 +1260,8 @@ namespace Microsoft.Build.Evaluation.Context
             private void SetFailure(
                 EvaluationFilesystemTimestampCaptureStatus status,
                 EvaluationFilesystemTimestampFailure failure,
-                string path,
-                Exception exception = null)
+                string? path,
+                Exception? exception = null)
             {
                 if (HasFailure)
                 {
@@ -1305,7 +1276,7 @@ namespace Microsoft.Build.Evaluation.Context
             }
 
             private bool HasFailure =>
-                _failureStatus != EvaluationFilesystemTimestampCaptureStatus.Success;
+                _failure != EvaluationFilesystemTimestampFailure.None;
         }
 
         private sealed class PendingTimestamp

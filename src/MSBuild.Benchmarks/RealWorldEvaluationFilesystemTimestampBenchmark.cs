@@ -13,8 +13,8 @@ using Microsoft.Build.Execution;
 namespace MSBuild.Benchmarks;
 
 /// <summary>
-/// Measures timestamp-based evaluation-cache admission and invalidation against real,
-/// restored OrchardCore projects.
+/// Measures timestamp-based evaluation-cache invalidation against restored real-world
+/// projects.
 /// </summary>
 /// <remarks>
 /// Set <c>MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS</c> to one or more project
@@ -26,11 +26,11 @@ namespace MSBuild.Benchmarks;
 /// temporarily mutate and then exactly restore a tracked project source, imported file,
 /// or glob directory.
 /// </remarks>
-public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
+public abstract class RealWorldEvaluationFilesystemTimestampBenchmarkBase
 {
     private const string ProjectsEnvironmentVariable = "MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_PROJECTS";
     private const string SdkRootEnvironmentVariable = "MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_SDK_ROOT";
-    private const string UnconfiguredProjectPath = "<configure OrchardCore project paths>";
+    private const string UnconfiguredProjectPath = "<configure real-world project paths>";
     private protected const int EvaluationOperationsPerInvoke = 2;
     private protected const int SnapshotCaptureOperationsPerInvoke = 8;
     private protected const int ValidationOperationsPerInvoke = 24;
@@ -86,7 +86,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
         if (ProjectPath == UnconfiguredProjectPath)
         {
             throw new InvalidOperationException(
-                $"{ProjectsEnvironmentVariable} must contain at least one restored OrchardCore project path.");
+                $"{ProjectsEnvironmentVariable} must contain at least one restored project path.");
         }
 
         ConfigureSdk();
@@ -110,9 +110,8 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
 
             EvaluationFilesystemTimestampCaptureResult capture =
                 EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(BaselineReport);
-            EnsureCaptureSucceeded(capture);
             BaselineCapture = capture;
-            Snapshot = capture.Snapshot;
+            Snapshot = EnsureCaptureSucceeded(capture);
             EnsureValidationStatus(
                 Snapshot.Validate(),
                 EvaluationFilesystemTimestampValidationStatus.Valid);
@@ -224,14 +223,17 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
         _latestReport
         ?? throw new InvalidOperationException("The observed benchmark did not produce an observation report.");
 
-    private protected static void EnsureCaptureSucceeded(EvaluationFilesystemTimestampCaptureResult capture)
+    private protected static EvaluationFilesystemTimestampSnapshot EnsureCaptureSucceeded(
+        EvaluationFilesystemTimestampCaptureResult capture)
     {
         if (capture.Status != EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly ||
-            capture.IsFilesystemSnapshotAdmissible)
+            capture.Snapshot is null)
         {
             throw new InvalidOperationException(
                 $"Timestamp analysis capture returned {capture.Status}/{capture.Failure} for '{capture.Path}'.");
         }
+
+        return capture.Snapshot;
     }
 
     private protected static void EnsureValidationStatus(
@@ -273,7 +275,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
         string sdkRoot = Path.GetFullPath(
             Environment.GetEnvironmentVariable(SdkRootEnvironmentVariable)
             ?? throw new InvalidOperationException(
-                $"{SdkRootEnvironmentVariable} must reference the SDK directory used to evaluate OrchardCore."));
+                $"{SdkRootEnvironmentVariable} must reference the SDK directory used to evaluate the projects."));
         string msbuildPath = Path.Combine(sdkRoot, "MSBuild.dll");
         string sdksPath = Path.Combine(sdkRoot, "Sdks");
         string nugetFrameworksPath = Path.Combine(sdkRoot, "NuGet.Frameworks.dll");
@@ -460,7 +462,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
             string repositoryRoot,
             EvaluationFilesystemTimestampSnapshot snapshot)
         {
-            foreach (EvaluationFilesystemTimestampEntry entry in snapshot.Entries)
+            foreach (EvaluationFilesystemTimestampEntry entry in snapshot.Entries!)
             {
                 if ((entry.Sources & EvaluationFilesystemTimestampSource.Glob) == 0 ||
                     !Directory.Exists(entry.Path) ||
@@ -564,8 +566,8 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
 [MaxColumn]
 [MedianColumn]
 [MarkdownExporter]
-public class OrchardCoreEvaluationFilesystemTimestampBenchmark :
-    OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
+public class RealWorldEvaluationFilesystemTimestampBenchmark :
+    RealWorldEvaluationFilesystemTimestampBenchmarkBase
 {
     [GlobalSetup]
     public void GlobalSetup()
@@ -686,8 +688,8 @@ public class OrchardCoreEvaluationFilesystemTimestampBenchmark :
 [MedianColumn]
 [MarkdownExporter]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByParams)]
-public class OrchardCoreEvaluationFilesystemTimestampStaleBenchmark :
-    OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
+public class RealWorldEvaluationFilesystemTimestampStaleBenchmark :
+    RealWorldEvaluationFilesystemTimestampBenchmarkBase
 {
     private const string MutationsEnvironmentVariable =
         "MSBUILD_EVALUATION_TIMESTAMP_BENCHMARK_MUTATIONS";

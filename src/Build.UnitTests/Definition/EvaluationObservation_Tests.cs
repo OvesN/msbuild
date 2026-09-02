@@ -739,6 +739,12 @@ namespace Microsoft.Build.UnitTests.Definition
                 .ShouldBe(@"\\?\Volume{00000000-0000-0000-0000-000000000000}\file.txt");
             FileUtilities.NormalizePathForObservation(@"\\.\pipe\name")
                 .ShouldBe(@"\\.\pipe\name");
+            FileUtilities.NormalizePathForObservation(@"C:\\")
+                .ShouldBe(@"C:\");
+            FileUtilities.NormalizePathForObservation(@"\\server\share\\")
+                .ShouldBe(@"\\server\share\");
+            FileUtilities.NormalizePathForObservation(@"C:\root\directory\\")
+                .ShouldBe(@"C:\root\directory");
         }
 
         [Fact]

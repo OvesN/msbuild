@@ -31,18 +31,18 @@ namespace Microsoft.Build.Framework
             string firstResult,
             string secondResult);
         void RecordGlobDirectory(
-            string directory,
-            string filespec,
             string path,
             bool exists,
-            string globIdentity);
+            string globIdentity,
+            string provider);
         void RecordSearch(
             string kind,
             string request,
             IReadOnlyList<string> candidates,
             int candidateCount,
             string candidatesFingerprint,
-            string selected);
+            string selected,
+            string provider);
     }
 
     internal struct EvaluationInputFingerprintBuilder

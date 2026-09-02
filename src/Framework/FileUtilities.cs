@@ -1841,6 +1841,9 @@ namespace Microsoft.Build.Framework
             string? searchRequest = observer is null
                 ? null
                 : string.Concat(fileName, "|", startingDirectory);
+            string? provider = observer is null
+                ? null
+                : FileSystems.GetProviderIdentity(fileSystem);
 
             // Canonicalize our starting location
             string? lookInDirectory = NewPath.GetFullPath(startingDirectory);
@@ -1867,7 +1870,8 @@ namespace Microsoft.Build.Framework
                         candidates ?? [],
                         candidateCount,
                         candidatesFingerprint.Complete(),
-                        possibleFileDirectory);
+                        possibleFileDirectory,
+                        provider);
                     // We've found the file, return the directory we found it in
                     return lookInDirectory;
                 }
@@ -1886,7 +1890,8 @@ namespace Microsoft.Build.Framework
                 candidates ?? [],
                 candidateCount,
                 candidatesFingerprint.Complete(),
-                string.Empty);
+                string.Empty,
+                provider);
             // When we didn't find the location, then return an empty string
             return string.Empty;
         }
