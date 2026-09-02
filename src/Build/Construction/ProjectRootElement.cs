@@ -47,7 +47,6 @@ namespace Microsoft.Build.Construction
     public partial class ProjectRootElement : ProjectElementContainer
     {
         internal static Action<string> TestOnlyHookAfterSourceRead { get; set; }
-        internal static Action<string> TestOnlyHookAfterFailedSourceRead { get; set; }
 
         // Constants for default (empty) project file.
         private const string EmptyProjectFileContent = "{0}<Project{1}{2}>\r\n</Project>";
@@ -2313,7 +2312,6 @@ namespace Microsoft.Build.Construction
             {
                 if (sourceLoadCapture is not null)
                 {
-                    TestOnlyHookAfterFailedSourceRead?.Invoke(fullPath);
                     DateTime? lastWriteTimeAfterRead =
                         FileUtilities.GetFileInfoNoThrow(fullPath)?.LastWriteTimeUtc;
                     sourceLoadCapture.HasLastWriteTimeUtc =

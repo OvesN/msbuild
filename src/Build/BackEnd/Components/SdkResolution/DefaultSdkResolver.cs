@@ -29,9 +29,8 @@ namespace Microsoft.Build.BackEnd.SdkResolution
         public override SdkResultBase Resolve(SdkReference sdk, SdkResolverContextBase context, SdkResultFactoryBase factory)
         {
             string sdkPath = Path.Combine(BuildEnvironmentHelper.Instance.MSBuildSDKsPath, sdk.Name, "Sdk");
-            bool exists = FileUtilities.DirectoryExistsNoThrow(sdkPath);
 
-            return exists
+            return FileUtilities.DirectoryExistsNoThrow(sdkPath)
                 ? factory.IndicateSuccess(sdkPath, string.Empty)
                 : factory.IndicateFailure([ResourceUtilities.FormatResourceStringIgnoreCodeAndKeyword("DefaultSDKResolverError", sdk.Name, sdkPath)], null);
         }
