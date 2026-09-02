@@ -26,8 +26,8 @@ namespace Microsoft.Build.Evaluation.Context
     internal sealed class EvaluationObservationSession : IEvaluationInputObserver
     {
         private const string ObservationEnvironmentVariable = "MSBUILDPROTOTYPEEVALUATIONOBSERVATION";
-        private const int ObservationSchemaVersion = 18;
-        private const int PropertyFunctionClassificationVersion = 1;
+        internal const int ObservationSchemaVersion = 18;
+        internal const int PropertyFunctionClassificationVersion = 1;
 #if NET
         private const int SupportedEnumerationOptionsPropertyCount = 8;
 #endif

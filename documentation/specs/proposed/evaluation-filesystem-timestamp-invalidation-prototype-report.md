@@ -9,6 +9,11 @@
 > preserve traversed-directory evidence, while an unobserved evaluation may use the
 > optimized driver. Fresh evaluation and validation benchmarks must use the same driver
 > and evaluation graph before this report can support a continuation decision.
+>
+> The historical rows also predate strict snapshot admission and the
+> conflicting-observation analysis gate. Current benchmark setup may reject a blocked
+> report instead of reproducing those rows; they are retained only as prior directional
+> evidence.
 
 ## Historical result
 
@@ -20,8 +25,8 @@ than reevaluating the OrchardCore and Roslyn projects exercised here:
 - a file mutation detected early cost 0.089-0.313 ms;
 - a glob membership mutation detected late cost 5.864-7.072 ms, about 4-6%
   of a fresh evaluation;
-- native observation plus snapshot capture increased a cache-producing
-  evaluation by about 13-23%.
+- native observation plus filesystem-slice capture cost about 1.13-1.23x a
+  fresh evaluation.
 
 Those historical results did not prove that a persistent evaluation cache was worthwhile,
 because cache serialization, loading, materialization, and real hit rates are
@@ -64,10 +69,27 @@ A glob-result cache hit populated by another evaluation does not replay traversa
 evidence. Snapshot capture therefore fails closed for that case. Lazy wildcards also
 currently fail closed because no traversal occurs.
 
-Snapshot admission fails closed when observation is incomplete, a project
-source changed while it was read, timestamps conflict, a path is unrooted, an
-unsupported provider or metadata operation was used, a filesystem operation
-failed, or required glob/search traversal evidence is missing.
+Filesystem-snapshot admission is exhaustive and default deny. `Capture` rejects an
+unsuccessful evaluation, an unsupported observation or
+property-function-classification version, any non-cacheable reason, a missing or
+duplicate category, any category whose implementation coverage is not `Complete`, any
+category state other than `NotExercised` or `Observed`, a missing or mismatched request,
+and a report without a parsed root source matching the evaluated project path. The
+current observer deliberately reports `Partial` implementation coverage for every
+non-completion category, so no report can currently produce an admissible filesystem
+snapshot. Passing this gate does not make a complete cache entry eligible:
+non-filesystem inputs still require cache-key fields or dependency contracts.
+
+Filesystem mechanism tests and timing use
+`CaptureFilesystemSliceForAnalysis`. That analysis-only path bypasses report-level
+admission but still fails closed when filesystem-category observation is incomplete, a
+project source changed while it was read, observations or timestamps conflict, a path
+is unrooted, an unsupported provider or metadata operation was used, a filesystem
+operation failed, or required glob/search traversal evidence is missing. Toolset- and
+SDK-resolver-mediated filesystem dependencies remain deferred. Its output measures
+scan cost, returns `AnalysisOnly`, and is marked
+`IsFilesystemSnapshotAdmissible = false`; it is not evidence of an admissible cache
+hit.
 
 Validation performs only these operations, in snapshot order:
 
@@ -101,9 +123,10 @@ intentionally deferred to the resolver contract.
 
 The normal suite compares an unobserved evaluation, an observed evaluation,
 an observed evaluation followed by snapshot capture, snapshot capture alone,
-and validation of an unchanged snapshot.
+and validation of an unchanged snapshot. Snapshot capture includes a final full
+validation pass before returning the snapshot.
 
-### Cache admission and valid-hit costs
+### Filesystem-slice capture and validation costs
 
 | Workload | Core mean | Core vs. fresh | CMS mean | CMS vs. fresh |
 | --- | ---: | ---: | ---: | ---: |
@@ -142,7 +165,7 @@ The same statistical jobs were run on Roslyn commit
 This evaluation allocated about 13.4 MB and produced a snapshot with 161
 timestamp identities.
 
-### Cache admission and valid-hit costs
+### Filesystem-slice capture and validation costs
 
 | Workload | Mean | Ratio to fresh |
 | --- | ---: | ---: |

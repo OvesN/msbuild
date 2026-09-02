@@ -105,7 +105,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
                 ?? throw new InvalidOperationException("The benchmark setup did not produce an evaluation observation report.");
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(BaselineReport);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(BaselineReport);
             EnsureCaptureSucceeded(capture);
             Snapshot = capture.Snapshot;
             EnsureValidationStatus(
@@ -152,7 +152,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
     {
         int result = Evaluate();
         EvaluationFilesystemTimestampCaptureResult capture =
-            EvaluationFilesystemTimestampValidator.Capture(GetLatestReport());
+            EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(GetLatestReport());
         EnsureCaptureSucceeded(capture);
         return result + capture.TimestampReadCount;
     }
@@ -160,7 +160,7 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
     protected int SnapshotCaptureCore()
     {
         EvaluationFilesystemTimestampCaptureResult capture =
-            EvaluationFilesystemTimestampValidator.Capture(BaselineReport);
+            EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(BaselineReport);
         EnsureCaptureSucceeded(capture);
         return capture.TimestampReadCount;
     }
@@ -201,10 +201,11 @@ public abstract class OrchardCoreEvaluationFilesystemTimestampBenchmarkBase
 
     private protected static void EnsureCaptureSucceeded(EvaluationFilesystemTimestampCaptureResult capture)
     {
-        if (capture.Status != EvaluationFilesystemTimestampCaptureStatus.Success)
+        if (capture.Status != EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly ||
+            capture.IsFilesystemSnapshotAdmissible)
         {
             throw new InvalidOperationException(
-                $"Timestamp snapshot capture failed with {capture.Status}/{capture.Failure} for '{capture.Path}'.");
+                $"Timestamp analysis capture returned {capture.Status}/{capture.Failure} for '{capture.Path}'.");
         }
     }
 

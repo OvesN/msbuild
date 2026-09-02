@@ -815,6 +815,9 @@ namespace Microsoft.Build.Evaluation.Context
 
     internal sealed class EvaluationObservationReport
     {
+        private static readonly EvaluationObservationCategory[] s_allCategories =
+            (EvaluationObservationCategory[])Enum.GetValues(typeof(EvaluationObservationCategory));
+
         // This report contains exact values consumed by evaluation, including environment
         // and property-function values. It must not be logged or serialized without redaction.
         internal EvaluationObservationReport(
@@ -891,19 +894,60 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationObservationCollection<EvaluationSideEffectObservation> SideEffects { get; }
         internal EvaluationObservationCollection<EvaluationOperationFailureObservation> OperationFailures { get; }
 
+        internal bool HasCompleteCategorySet
+        {
+            get
+            {
+                if (Categories is null ||
+                    Categories.Length != s_allCategories.Length)
+                {
+                    return false;
+                }
+
+                foreach (EvaluationObservationCategory expectedCategory in s_allCategories)
+                {
+                    bool found = false;
+                    foreach (EvaluationCategoryObservation category in Categories)
+                    {
+                        if (category.Category != expectedCategory)
+                        {
+                            continue;
+                        }
+
+                        if (found)
+                        {
+                            return false;
+                        }
+
+                        found = true;
+                    }
+
+                    if (!found)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
         internal bool HasBlockingObservations
         {
             get
             {
-                if (Reasons != EvaluationObservationReason.None)
+                if (!EvaluationSucceeded ||
+                    Reasons != EvaluationObservationReason.None ||
+                    !HasCompleteCategorySet)
                 {
                     return true;
                 }
 
                 foreach (EvaluationCategoryObservation category in Categories)
                 {
-                    if (category.State is EvaluationObservationCategoryState.Incomplete or
-                        EvaluationObservationCategoryState.Unsupported)
+                    if (category.Coverage != EvaluationObservationCoverage.Complete ||
+                        category.State is not (EvaluationObservationCategoryState.NotExercised or
+                            EvaluationObservationCategoryState.Observed))
                     {
                         return true;
                     }

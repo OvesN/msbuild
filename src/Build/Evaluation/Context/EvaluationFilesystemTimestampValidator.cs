@@ -13,6 +13,7 @@ namespace Microsoft.Build.Evaluation.Context
     internal enum EvaluationFilesystemTimestampCaptureStatus
     {
         Success,
+        AnalysisOnly,
         Changed,
         Unsupported,
         Failed,
@@ -29,7 +30,13 @@ namespace Microsoft.Build.Evaluation.Context
     {
         None,
         UnsuccessfulEvaluation,
+        UnsupportedObservationVersion,
+        BlockingObservation,
+        IncompleteCategorySet,
+        MissingRequestObservation,
+        MissingRootProjectSourceObservation,
         IncompleteFilesystemObservation,
+        ConflictingObservation,
         UnsupportedProvider,
         UnrootedPath,
         MissingProjectSourceTimestamp,
@@ -87,6 +94,7 @@ namespace Microsoft.Build.Evaluation.Context
         internal EvaluationFilesystemTimestampCaptureResult(
             EvaluationFilesystemTimestampCaptureStatus status,
             EvaluationFilesystemTimestampSnapshot snapshot,
+            bool isFilesystemSnapshotAdmissible,
             EvaluationFilesystemTimestampFailure failure,
             string path,
             string exceptionType,
@@ -95,6 +103,7 @@ namespace Microsoft.Build.Evaluation.Context
         {
             Status = status;
             Snapshot = snapshot;
+            IsFilesystemSnapshotAdmissible = isFilesystemSnapshotAdmissible;
             Failure = failure;
             Path = path;
             ExceptionType = exceptionType;
@@ -104,6 +113,11 @@ namespace Microsoft.Build.Evaluation.Context
 
         internal EvaluationFilesystemTimestampCaptureStatus Status { get; }
         internal EvaluationFilesystemTimestampSnapshot Snapshot { get; }
+        /// <summary>
+        /// Whether strict report admission passed for this filesystem snapshot.
+        /// Non-filesystem inputs still require cache-key fields or dependency contracts.
+        /// </summary>
+        internal bool IsFilesystemSnapshotAdmissible { get; }
         internal EvaluationFilesystemTimestampFailure Failure { get; }
         internal string Path { get; }
         internal string ExceptionType { get; }
@@ -174,17 +188,86 @@ namespace Microsoft.Build.Evaluation.Context
         internal static EvaluationFilesystemTimestampCaptureResult Capture(
             EvaluationObservationReport report)
         {
+            return Capture(report, requireCacheEligibleReport: true);
+        }
+
+        /// <summary>
+        /// Captures the filesystem slice for prototype analysis even when unrelated
+        /// observation categories prevent cache admission. This method must not be
+        /// used for cache admission.
+        /// </summary>
+        internal static EvaluationFilesystemTimestampCaptureResult CaptureFilesystemSliceForAnalysis(
+            EvaluationObservationReport report)
+        {
+            return Capture(report, requireCacheEligibleReport: false);
+        }
+
+        private static EvaluationFilesystemTimestampCaptureResult Capture(
+            EvaluationObservationReport report,
+            bool requireCacheEligibleReport)
+        {
             if (report is null)
             {
                 throw new ArgumentNullException(nameof(report));
             }
 
-            var builder = new SnapshotBuilder();
+            var builder = new SnapshotBuilder(
+                isFilesystemSnapshotAdmissible: requireCacheEligibleReport);
             if (!report.EvaluationSucceeded)
             {
                 return builder.Fail(
                     EvaluationFilesystemTimestampCaptureStatus.Unsupported,
                     EvaluationFilesystemTimestampFailure.UnsuccessfulEvaluation,
+                    report.ProjectPath);
+            }
+
+            if (report.SchemaVersion != EvaluationObservationSession.ObservationSchemaVersion ||
+                report.PropertyFunctionClassificationVersion !=
+                    EvaluationObservationSession.PropertyFunctionClassificationVersion)
+            {
+                return builder.Fail(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    EvaluationFilesystemTimestampFailure.UnsupportedObservationVersion,
+                    report.ProjectPath);
+            }
+
+            if (!report.HasCompleteCategorySet)
+            {
+                return builder.Fail(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    EvaluationFilesystemTimestampFailure.IncompleteCategorySet,
+                    report.ProjectPath);
+            }
+
+            if (requireCacheEligibleReport && report.HasBlockingObservations)
+            {
+                return builder.Fail(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    EvaluationFilesystemTimestampFailure.BlockingObservation,
+                    report.ProjectPath);
+            }
+
+            if (requireCacheEligibleReport && !HasMatchingRequest(report))
+            {
+                return builder.Fail(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    EvaluationFilesystemTimestampFailure.MissingRequestObservation,
+                    report.ProjectPath);
+            }
+
+            if (requireCacheEligibleReport && !HasRootProjectSource(report))
+            {
+                return builder.Fail(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    EvaluationFilesystemTimestampFailure.MissingRootProjectSourceObservation,
+                    report.ProjectPath);
+            }
+
+            if ((report.Reasons & EvaluationObservationReason.ConflictingObservation) != 0)
+            {
+                return builder.Fail(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    EvaluationFilesystemTimestampFailure.ConflictingObservation,
                     report.ProjectPath);
             }
 
@@ -385,6 +468,31 @@ namespace Microsoft.Build.Evaluation.Context
             return builder.Capture();
         }
 
+        private static bool HasMatchingRequest(EvaluationObservationReport report) =>
+            report.Request is not null &&
+            !string.IsNullOrEmpty(report.ProjectPath) &&
+            FileUtilities.PathsEqual(report.Request.ProjectPath, report.ProjectPath);
+
+        private static bool HasRootProjectSource(EvaluationObservationReport report)
+        {
+            if (string.IsNullOrEmpty(report.ProjectPath))
+            {
+                return false;
+            }
+
+            foreach (EvaluationProjectSourceObservation source in report.ProjectSources)
+            {
+                if (source.Role == EvaluationProjectSourceRole.Root &&
+                    source.Outcome == EvaluationProjectSourceOutcome.Parsed &&
+                    FileUtilities.PathsEqual(source.Path, report.ProjectPath))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         internal static EvaluationFilesystemTimestampValidationResult Validate(
             EvaluationFilesystemTimestampSnapshot snapshot)
         {
@@ -469,10 +577,16 @@ namespace Microsoft.Build.Evaluation.Context
         {
             private readonly Dictionary<string, PendingTimestamp> _timestamps =
                 new(FileUtilities.PathComparer);
+            private readonly bool _isFilesystemSnapshotAdmissible;
 
             private EvaluationFilesystemTimestampCaptureStatus _failureStatus;
             private EvaluationFilesystemTimestampFailure _failure;
             private string _failurePath;
+
+            internal SnapshotBuilder(bool isFilesystemSnapshotAdmissible)
+            {
+                _isFilesystemSnapshotAdmissible = isFilesystemSnapshotAdmissible;
+            }
 
             internal bool TryAddProjectSource(
                 EvaluationProjectSourceObservation observation)
@@ -598,8 +712,11 @@ namespace Microsoft.Build.Evaluation.Context
                 if (validation.Status == EvaluationFilesystemTimestampValidationStatus.Valid)
                 {
                     return new EvaluationFilesystemTimestampCaptureResult(
-                        EvaluationFilesystemTimestampCaptureStatus.Success,
+                        _isFilesystemSnapshotAdmissible
+                            ? EvaluationFilesystemTimestampCaptureStatus.Success
+                            : EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly,
                         snapshot,
+                        _isFilesystemSnapshotAdmissible,
                         EvaluationFilesystemTimestampFailure.None,
                         path: null,
                         exceptionType: null,
@@ -612,6 +729,7 @@ namespace Microsoft.Build.Evaluation.Context
                     return new EvaluationFilesystemTimestampCaptureResult(
                         EvaluationFilesystemTimestampCaptureStatus.Changed,
                         snapshot: null,
+                        isFilesystemSnapshotAdmissible: false,
                         EvaluationFilesystemTimestampFailure.ConflictingTimestamp,
                         validation.Path,
                         exceptionType: null,
@@ -622,6 +740,7 @@ namespace Microsoft.Build.Evaluation.Context
                 return new EvaluationFilesystemTimestampCaptureResult(
                     EvaluationFilesystemTimestampCaptureStatus.Failed,
                     snapshot: null,
+                    isFilesystemSnapshotAdmissible: false,
                     EvaluationFilesystemTimestampFailure.FilesystemError,
                     validation.Path,
                     validation.ExceptionType,
@@ -642,6 +761,7 @@ namespace Microsoft.Build.Evaluation.Context
                 new(
                     _failureStatus,
                     snapshot: null,
+                    isFilesystemSnapshotAdmissible: false,
                     _failure,
                     _failurePath,
                     exceptionType: null,

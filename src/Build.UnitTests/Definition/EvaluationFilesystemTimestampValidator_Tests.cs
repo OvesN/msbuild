@@ -33,6 +33,312 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
+        public void EveryObservationReasonBlocksCacheAdmission()
+        {
+            EvaluationCategoryObservation[] categories = CreateCompleteCategories();
+
+            foreach (EvaluationObservationReason reason in Enum.GetValues(typeof(EvaluationObservationReason)))
+            {
+                if (reason == EvaluationObservationReason.None)
+                {
+                    continue;
+                }
+
+                EvaluationObservationReport report = CreateReport(
+                    evaluationSucceeded: true,
+                    reason,
+                    categories);
+
+                report.HasBlockingObservations.ShouldBeTrue($"Reason: {reason}");
+                EvaluationFilesystemTimestampCaptureResult capture =
+                    EvaluationFilesystemTimestampValidator.Capture(report);
+                capture.Status.ShouldBe(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                    $"Reason: {reason}");
+                capture.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.BlockingObservation,
+                    $"Reason: {reason}");
+                capture.Snapshot.ShouldBeNull($"Reason: {reason}");
+            }
+        }
+
+        [Fact]
+        public void NonCompleteCoverageOrBlockingStatePreventsCacheAdmission()
+        {
+            foreach (EvaluationObservationCoverage coverage in Enum.GetValues(
+                typeof(EvaluationObservationCoverage)))
+            {
+                foreach (EvaluationObservationCategoryState state in Enum.GetValues(
+                    typeof(EvaluationObservationCategoryState)))
+                {
+                    bool allowed =
+                        coverage == EvaluationObservationCoverage.Complete &&
+                        state is EvaluationObservationCategoryState.NotExercised or
+                            EvaluationObservationCategoryState.Observed;
+                    EvaluationCategoryObservation[] categories = CreateCompleteCategories();
+                    ReplaceCategory(
+                        categories,
+                        EvaluationObservationCategory.PropertyFunction,
+                        coverage,
+                        state);
+                    EvaluationObservationReport report = CreateReport(
+                        evaluationSucceeded: true,
+                        EvaluationObservationReason.None,
+                        categories);
+
+                    report.HasBlockingObservations.ShouldBe(
+                        !allowed,
+                        $"Coverage={coverage}; State={state}");
+                    if (!allowed)
+                    {
+                        EvaluationFilesystemTimestampCaptureResult capture =
+                            EvaluationFilesystemTimestampValidator.Capture(report);
+                        capture.Status.ShouldBe(
+                            EvaluationFilesystemTimestampCaptureStatus.Unsupported,
+                            $"Coverage={coverage}; State={state}");
+                        capture.Failure.ShouldBe(
+                            EvaluationFilesystemTimestampFailure.BlockingObservation,
+                            $"Coverage={coverage}; State={state}");
+                        capture.Snapshot.ShouldBeNull(
+                            $"Coverage={coverage}; State={state}");
+                    }
+                }
+            }
+        }
+
+        [Fact]
+        public void IncompleteCategorySetPreventsCacheAdmission()
+        {
+            EvaluationCategoryObservation[] complete = CreateCompleteCategories();
+            var missingOne = new EvaluationCategoryObservation[complete.Length - 1];
+            Array.Copy(complete, missingOne, missingOne.Length);
+            EvaluationCategoryObservation[] duplicate = (EvaluationCategoryObservation[])complete.Clone();
+            duplicate[duplicate.Length - 1] = duplicate[0];
+            EvaluationCategoryObservation[][] invalidCategorySets =
+            [
+                null,
+                [],
+                missingOne,
+                duplicate,
+            ];
+
+            foreach (EvaluationCategoryObservation[] categories in invalidCategorySets)
+            {
+                EvaluationObservationReport report = CreateReport(
+                    evaluationSucceeded: true,
+                    EvaluationObservationReason.None,
+                    categories);
+
+                report.HasBlockingObservations.ShouldBeTrue();
+                EvaluationFilesystemTimestampCaptureResult capture =
+                    EvaluationFilesystemTimestampValidator.Capture(report);
+                capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+                capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.IncompleteCategorySet);
+                capture.Snapshot.ShouldBeNull();
+
+                EvaluationFilesystemTimestampCaptureResult analysisCapture =
+                    EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+                analysisCapture.Status.ShouldBe(
+                    EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+                analysisCapture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+                analysisCapture.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.IncompleteCategorySet);
+                analysisCapture.Snapshot.ShouldBeNull();
+            }
+        }
+
+        [Fact]
+        public void FailedEvaluationIsBlocking()
+        {
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: false,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories());
+
+            report.HasBlockingObservations.ShouldBeTrue();
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.Capture(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.UnsuccessfulEvaluation);
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        [Theory]
+        [InlineData(-1, 0)]
+        [InlineData(1, 0)]
+        [InlineData(0, -1)]
+        [InlineData(0, 1)]
+        public void UnsupportedObservationVersionPreventsCacheAdmission(
+            int schemaVersionDelta,
+            int classificationVersionDelta)
+        {
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(),
+                schemaVersion:
+                    EvaluationObservationSession.ObservationSchemaVersion + schemaVersionDelta,
+                propertyFunctionClassificationVersion:
+                    EvaluationObservationSession.PropertyFunctionClassificationVersion +
+                    classificationVersionDelta);
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.Capture(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.UnsupportedObservationVersion);
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        [Fact]
+        public void CacheAdmissionRequiresMatchingRequestEvidence()
+        {
+            string projectPath = _env.CreateFile(
+                "request-root.proj",
+                "<Project />").Path;
+            string otherPath = _env.CreateFile(
+                "other.proj",
+                "<Project />").Path;
+            EvaluationRequestObservation[] invalidRequests =
+            [
+                null,
+                new EvaluationRequestObservation { ProjectPath = otherPath },
+            ];
+
+            foreach (EvaluationRequestObservation request in invalidRequests)
+            {
+                EvaluationObservationReport report = CreateReport(
+                    evaluationSucceeded: true,
+                    EvaluationObservationReason.None,
+                    CreateCompleteCategories(EvaluationObservationCategory.ProjectSource),
+                    projectPath,
+                    [CreateProjectSource(EvaluationProjectSourceRole.Root, projectPath)],
+                    request);
+
+                EvaluationFilesystemTimestampCaptureResult capture =
+                    EvaluationFilesystemTimestampValidator.Capture(report);
+
+                capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+                capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+                capture.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.MissingRequestObservation);
+                capture.Snapshot.ShouldBeNull();
+            }
+        }
+
+        [Fact]
+        public void CacheAdmissionRequiresMatchingParsedRootProjectSourceEvidence()
+        {
+            string projectPath = _env.CreateFile(
+                "root.proj",
+                "<Project />").Path;
+            string otherPath = _env.CreateFile(
+                "import.props",
+                "<Project />").Path;
+            EvaluationProjectSourceObservation[] invalidRootSources =
+            [
+                CreateProjectSource(EvaluationProjectSourceRole.Import, projectPath),
+                CreateProjectSource(EvaluationProjectSourceRole.Root, otherPath),
+                CreateProjectSource(
+                    EvaluationProjectSourceRole.Root,
+                    projectPath,
+                    EvaluationProjectSourceOutcome.ParseFailure),
+            ];
+
+            foreach (EvaluationProjectSourceObservation source in invalidRootSources)
+            {
+                EvaluationObservationReport report = CreateReport(
+                    evaluationSucceeded: true,
+                    EvaluationObservationReason.None,
+                    CreateCompleteCategories(EvaluationObservationCategory.ProjectSource),
+                    projectPath,
+                    [source],
+                    CreateRequest(projectPath));
+
+                report.HasBlockingObservations.ShouldBeFalse();
+                EvaluationFilesystemTimestampCaptureResult capture =
+                    EvaluationFilesystemTimestampValidator.Capture(report);
+
+                capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+                capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+                capture.Failure.ShouldBe(
+                    EvaluationFilesystemTimestampFailure.MissingRootProjectSourceObservation);
+                capture.Snapshot.ShouldBeNull();
+            }
+        }
+
+        [Fact]
+        public void FullyEligibleSyntheticReportCaptures()
+        {
+            string projectPath = _env.CreateFile(
+                "eligible.proj",
+                "<Project />").Path;
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.None,
+                CreateCompleteCategories(EvaluationObservationCategory.ProjectSource),
+                projectPath,
+                [CreateProjectSource(EvaluationProjectSourceRole.Root, projectPath)],
+                CreateRequest(projectPath));
+
+            report.HasBlockingObservations.ShouldBeFalse();
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.Capture(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeTrue();
+            capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.None);
+            capture.Snapshot.Entries.ShouldHaveSingleItem().Path.ShouldBe(projectPath);
+        }
+
+        [Fact]
+        public void CurrentObserverCoverageKeepsCacheAdmissionDisabled()
+        {
+            EvaluationObservationReport report = Evaluate(
+                "partial-coverage.proj",
+                "<Project />");
+            var allCategories = (EvaluationObservationCategory[])Enum.GetValues(
+                typeof(EvaluationObservationCategory));
+
+            report.Categories.Length.ShouldBe(allCategories.Length);
+            foreach (EvaluationCategoryObservation category in report.Categories)
+            {
+                category.Coverage.ShouldBe(
+                    category.Category == EvaluationObservationCategory.Completion
+                        ? EvaluationObservationCoverage.Complete
+                        : EvaluationObservationCoverage.Partial,
+                    $"Category: {category.Category}");
+            }
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.Capture(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
+            capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.BlockingObservation);
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        [Fact]
+        public void ConflictingObservationPreventsFilesystemSliceCapture()
+        {
+            EvaluationObservationReport report = CreateReport(
+                evaluationSucceeded: true,
+                EvaluationObservationReason.ConflictingObservation,
+                CreateCompleteCategories());
+
+            EvaluationFilesystemTimestampCaptureResult capture =
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
+
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
+            capture.Failure.ShouldBe(
+                EvaluationFilesystemTimestampFailure.ConflictingObservation);
+            capture.Snapshot.ShouldBeNull();
+        }
+
+        [Fact]
         public void UnchangedFilesystemSnapshotValidates()
         {
             _env.CreateFolder(Path.Combine(_env.DefaultTestDirectory.Path, "Nested"));
@@ -57,10 +363,11 @@ namespace Microsoft.Build.UnitTests.Definition
                 """);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
 
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
+            capture.IsFilesystemSnapshotAdmissible.ShouldBeFalse();
             capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.None);
             capture.Snapshot.ShouldNotBeNull();
             capture.Snapshot.TimestampCount.ShouldBeGreaterThan(3);
@@ -89,9 +396,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 """,
                 out projectFile);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
 
             SetDistinctLastWriteTimeUtc(projectFile);
 
@@ -122,7 +429,7 @@ namespace Microsoft.Build.UnitTests.Definition
             SetDistinctLastWriteTimeUtc(projectFile);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
 
             capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Changed);
             capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.ConflictingTimestamp);
@@ -143,9 +450,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 </Project>
                 """);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
 
             SetDistinctLastWriteTimeUtc(settingsFile);
 
@@ -170,9 +477,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 </Project>
                 """);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
 
             File.WriteAllText(missingFile, "<Project />");
 
@@ -201,9 +508,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 </Project>
                 """);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
             capture.Snapshot.Entries.ShouldContain(entry =>
                 FileUtilities.PathsEqual(entry.Path, nestedDirectory) &&
                 (entry.Sources & EvaluationFilesystemTimestampSource.Glob) != 0);
@@ -246,9 +553,9 @@ namespace Microsoft.Build.UnitTests.Definition
 
             EvaluationObservationReport report = Evaluate(projectFile);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
             capture.Snapshot.Entries.ShouldContain(entry =>
                 FileUtilities.PathsEqual(entry.Path, nestedSharedDirectory) &&
                 (entry.Sources & EvaluationFilesystemTimestampSource.Glob) != 0);
@@ -285,9 +592,9 @@ namespace Microsoft.Build.UnitTests.Definition
             EvaluationObservationReport report =
                 session.Complete(evaluationSucceeded: true);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
 
             File.WriteAllText(candidate, "<Project />");
 
@@ -336,9 +643,9 @@ namespace Microsoft.Build.UnitTests.Definition
             FileUtilities.PathsEqual(search.SelectedPaths[0], marker).ShouldBeTrue();
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
         }
 
         [Fact]
@@ -363,9 +670,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 """);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
             capture.Snapshot.Entries.ShouldNotContain(entry =>
                 (entry.Sources & EvaluationFilesystemTimestampSource.Glob) != 0 &&
                 (FileUtilities.PathsEqual(entry.Path, binDirectory) ||
@@ -391,9 +698,9 @@ namespace Microsoft.Build.UnitTests.Definition
             (report.Reasons & EvaluationObservationReason.ConflictingObservation)
                 .ShouldBe(EvaluationObservationReason.None);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
         }
 
         [Fact]
@@ -426,9 +733,9 @@ namespace Microsoft.Build.UnitTests.Definition
 
             matchingGlobCount.ShouldBe(2);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
         }
 
         [Fact]
@@ -474,7 +781,7 @@ namespace Microsoft.Build.UnitTests.Definition
                 session.Complete(evaluationSucceeded: true);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
 
             capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
             capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.MissingTimestampObservation);
@@ -500,9 +807,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 session.Complete(evaluationSucceeded: true);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
 
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
         }
 
         [Fact]
@@ -544,7 +851,7 @@ namespace Microsoft.Build.UnitTests.Definition
                 session.Complete(evaluationSucceeded: true);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
 
             capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
             capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.UnsupportedMetadata);
@@ -565,10 +872,10 @@ namespace Microsoft.Build.UnitTests.Definition
                 session.Complete(evaluationSucceeded: true);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
 
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
             EvaluationFilesystemTimestampEntry entry =
                 capture.Snapshot.Entries.ShouldHaveSingleItem();
             (entry.Sources & EvaluationFilesystemTimestampSource.PathProbe)
@@ -592,9 +899,9 @@ namespace Microsoft.Build.UnitTests.Definition
                 """,
                 out projectFile);
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
             WriteCaptureFailure(capture, report);
-            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Success);
+            capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly);
             DateTime originalTimestamp = File.GetLastWriteTimeUtc(projectFile);
 
             File.WriteAllText(
@@ -625,7 +932,7 @@ namespace Microsoft.Build.UnitTests.Definition
             EvaluationObservationReport report = session.Complete(evaluationSucceeded: true);
 
             EvaluationFilesystemTimestampCaptureResult capture =
-                EvaluationFilesystemTimestampValidator.Capture(report);
+                EvaluationFilesystemTimestampValidator.CaptureFilesystemSliceForAnalysis(report);
 
             capture.Status.ShouldBe(EvaluationFilesystemTimestampCaptureStatus.Unsupported);
             capture.Failure.ShouldBe(EvaluationFilesystemTimestampFailure.UnsupportedProvider);
@@ -696,11 +1003,124 @@ namespace Microsoft.Build.UnitTests.Definition
             }
         }
 
+        private static EvaluationCategoryObservation[] CreateCompleteCategories(
+            params EvaluationObservationCategory[] additionallyObserved)
+        {
+            var values = (EvaluationObservationCategory[])Enum.GetValues(
+                typeof(EvaluationObservationCategory));
+            var categories = new EvaluationCategoryObservation[values.Length];
+            for (int i = 0; i < values.Length; i++)
+            {
+                EvaluationObservationCategory category = values[i];
+                bool observed =
+                    category is EvaluationObservationCategory.Request or
+                        EvaluationObservationCategory.Completion;
+                for (int observedIndex = 0;
+                    !observed && observedIndex < additionallyObserved.Length;
+                    observedIndex++)
+                {
+                    observed = additionallyObserved[observedIndex] == category;
+                }
+
+                categories[i] = new EvaluationCategoryObservation(
+                    category,
+                    EvaluationObservationCoverage.Complete,
+                    observed
+                        ? EvaluationObservationCategoryState.Observed
+                        : EvaluationObservationCategoryState.NotExercised);
+            }
+
+            return categories;
+        }
+
+        private static void ReplaceCategory(
+            EvaluationCategoryObservation[] categories,
+            EvaluationObservationCategory expectedCategory,
+            EvaluationObservationCoverage coverage,
+            EvaluationObservationCategoryState state)
+        {
+            for (int i = 0; i < categories.Length; i++)
+            {
+                if (categories[i].Category == expectedCategory)
+                {
+                    categories[i] = new EvaluationCategoryObservation(
+                        expectedCategory,
+                        coverage,
+                        state);
+                    return;
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"Category '{expectedCategory}' was not found.");
+        }
+
+        private static EvaluationRequestObservation CreateRequest(string projectPath) =>
+            new() { ProjectPath = projectPath };
+
+        private static EvaluationProjectSourceObservation CreateProjectSource(
+            EvaluationProjectSourceRole role,
+            string path,
+            EvaluationProjectSourceOutcome outcome =
+                EvaluationProjectSourceOutcome.Parsed)
+        {
+            return new EvaluationProjectSourceObservation(
+                role,
+                outcome,
+                path,
+                version: 1,
+                contentHash: "hash",
+                EvaluationContentHashKind.RawBytes,
+                encoding: null,
+                provider: null,
+                hasLastWriteTimeUtc: true,
+                File.GetLastWriteTimeUtc(path).Ticks,
+                timestampWasStableDuringRead: true);
+        }
+
+        private static EvaluationObservationReport CreateReport(
+            bool evaluationSucceeded,
+            EvaluationObservationReason reasons,
+            EvaluationCategoryObservation[] categories,
+            string projectPath = null,
+            EvaluationProjectSourceObservation[] projectSources = null,
+            EvaluationRequestObservation request = null,
+            int schemaVersion = EvaluationObservationSession.ObservationSchemaVersion,
+            int propertyFunctionClassificationVersion =
+                EvaluationObservationSession.PropertyFunctionClassificationVersion)
+        {
+            return new EvaluationObservationReport(
+                evaluationId: 1,
+                projectPath,
+                evaluationSucceeded,
+                reasons,
+                schemaVersion,
+                propertyFunctionClassificationVersion,
+                categories,
+                request,
+                projectSources: projectSources ?? [],
+                filesystemTimestamps: [],
+                pathProbes: [],
+                directoryEnumerations: [],
+                metadataReads: [],
+                fileReads: [],
+                globs: [],
+                searches: [],
+                environment: [],
+                externalInputs: [],
+                propertyFunctions: [],
+                sdkResolutions: [],
+                taskRegistrations: [],
+                sideEffects: [],
+                operationFailures: []);
+        }
+
         private void WriteCaptureFailure(
             EvaluationFilesystemTimestampCaptureResult capture,
             EvaluationObservationReport report)
         {
-            if (capture.Status != EvaluationFilesystemTimestampCaptureStatus.Success)
+            if (capture.Status is not (EvaluationFilesystemTimestampCaptureStatus.Success or
+                EvaluationFilesystemTimestampCaptureStatus.AnalysisOnly))
             {
                 _output.WriteLine(
                     $"Capture={capture.Status}; Failure={capture.Failure}; Path={capture.Path}; Exception={capture.ExceptionType}; HResult={capture.HResult}");
