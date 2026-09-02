@@ -11,10 +11,9 @@ internal static class EvaluationObservationBenchmarkProcess
     private const int HostTimeoutMilliseconds = 120_000;
 
     internal static EvaluationObservationBenchmarkResult Run(
-        EvaluationObservationBenchmarkMode mode,
+        bool observationEnabled,
         EvaluationObservationBenchmarkScenario scenario,
         string projectPath,
-        string scenarioRoot,
         int iterations)
     {
         string assemblyPath = typeof(EvaluationObservationBenchmarkProcess).Assembly.Location;
@@ -23,19 +22,14 @@ internal static class EvaluationObservationBenchmarkProcess
 
 #if NETFRAMEWORK
         executable = Path.ChangeExtension(assemblyPath, ".exe");
-        arguments = CreateHostArguments(projectPath, iterations, mode, scenario);
+        arguments = CreateHostArguments(projectPath, iterations, observationEnabled, scenario);
 #else
         executable = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
         arguments = string.Concat(
             Quote(assemblyPath),
             " ",
-            CreateHostArguments(projectPath, iterations, mode, scenario));
+            CreateHostArguments(projectPath, iterations, observationEnabled, scenario));
 #endif
-
-        if ((mode & EvaluationObservationBenchmarkMode.Detours) != 0)
-        {
-            return EvaluationObservationDetoursRunner.Run(executable, arguments, scenarioRoot);
-        }
 
         ProcessStartInfo startInfo = new(executable, arguments)
         {
@@ -71,7 +65,7 @@ internal static class EvaluationObservationBenchmarkProcess
     private static string CreateHostArguments(
         string projectPath,
         int iterations,
-        EvaluationObservationBenchmarkMode mode,
+        bool observationEnabled,
         EvaluationObservationBenchmarkScenario scenario)
     {
         return string.Join(
@@ -81,11 +75,12 @@ internal static class EvaluationObservationBenchmarkProcess
             Quote(projectPath),
             "--iterations",
             iterations.ToString(CultureInfo.InvariantCulture),
-            "--mode",
-            mode.ToString(),
+            "--observation-enabled",
+            observationEnabled.ToString(CultureInfo.InvariantCulture),
             "--scenario",
             scenario.ToString());
     }
 
-    internal static string Quote(string value) => string.Concat("\"", value.Replace("\"", "\\\""), "\"");
+    private static string Quote(string value) =>
+        string.Concat("\"", value.Replace("\"", "\\\""), "\"");
 }

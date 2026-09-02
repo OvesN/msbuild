@@ -151,8 +151,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
         private DirectoryInfo[] GetSubfolders(string rootFolder, string additionalResolversFolder)
         {
             DirectoryInfo[] subfolders = null;
-            bool rootExists = !string.IsNullOrEmpty(rootFolder) && FileUtilities.DirectoryExistsNoThrow(rootFolder);
-            if (rootExists)
+            if (!string.IsNullOrEmpty(rootFolder) && FileUtilities.DirectoryExistsNoThrow(rootFolder))
             {
                 subfolders = new DirectoryInfo(rootFolder).GetDirectories();
             }
@@ -160,11 +159,9 @@ namespace Microsoft.Build.BackEnd.SdkResolution
             if (additionalResolversFolder != null)
             {
                 var resolversDirInfo = new DirectoryInfo(additionalResolversFolder);
-                bool additionalExists = resolversDirInfo.Exists;
-                if (additionalExists)
+                if (resolversDirInfo.Exists)
                 {
-                    DirectoryInfo[] additionalDirectories = resolversDirInfo.GetDirectories();
-                    HashSet<DirectoryInfo> overrideFolders = additionalDirectories.ToHashSet(new DirInfoNameComparer());
+                    HashSet<DirectoryInfo> overrideFolders = resolversDirInfo.GetDirectories().ToHashSet(new DirInfoNameComparer());
                     if (subfolders != null)
                     {
                         overrideFolders.UnionWith(subfolders);
@@ -191,8 +188,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
         private bool TryAddAssemblyManifestFromXml(string pathToManifest, string manifestFolder, List<SdkResolverManifest> manifestsList, ElementLocation location)
         {
-            bool manifestExists = !string.IsNullOrEmpty(pathToManifest) && FileUtilities.FileExistsNoThrow(pathToManifest);
-            if (!manifestExists)
+            if (!string.IsNullOrEmpty(pathToManifest) && !FileUtilities.FileExistsNoThrow(pathToManifest))
             {
                 return false;
             }
@@ -229,8 +225,7 @@ namespace Microsoft.Build.BackEnd.SdkResolution
 
         private bool TryAddAssemblyManifestFromDll(string assemblyPath, List<SdkResolverManifest> manifestsList)
         {
-            bool assemblyExists = !string.IsNullOrEmpty(assemblyPath) && FileUtilities.FileExistsNoThrow(assemblyPath);
-            if (!assemblyExists)
+            if (string.IsNullOrEmpty(assemblyPath) || !FileUtilities.FileExistsNoThrow(assemblyPath))
             {
                 return false;
             }

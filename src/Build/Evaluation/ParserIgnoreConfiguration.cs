@@ -23,8 +23,6 @@ namespace Microsoft.Build.Evaluation
     /// </summary>
     internal sealed class ParserIgnoreConfiguration : ITranslatable
     {
-        internal static Action<string>? TestOnlyHookBeforeConfigRead { get; set; }
-
         internal readonly struct Observation
         {
             internal Observation(string kind, string request, string? result, Exception? exception)
@@ -334,7 +332,6 @@ namespace Microsoft.Build.Evaluation
 
             try
             {
-                TestOnlyHookBeforeConfigRead?.Invoke(fullPath);
                 var settings = new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Prohibit };
                 var doc = new System.Xml.XmlDocument();
                 using (Stream stream = OpenConfigStream(fullPath))

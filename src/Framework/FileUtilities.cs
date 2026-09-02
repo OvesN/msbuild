@@ -1919,7 +1919,6 @@ namespace Microsoft.Build.Framework
         {
             ValidateFileNameForGetPathOfFileAbove(file);
 
-            // Search for a directory that contains that file
             List<string> observedCandidates = [];
             string directoryName = GetDirectoryNameOfFileAbove(
                 startingDirectory,

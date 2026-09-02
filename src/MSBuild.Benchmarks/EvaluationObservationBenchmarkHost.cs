@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using Microsoft.Build.Definition;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Execution;
@@ -25,16 +26,12 @@ internal static class EvaluationObservationBenchmarkHost
 
         string projectPath = TakeValue(args, "--project");
         int iterations = int.Parse(TakeValue(args, "--iterations"), CultureInfo.InvariantCulture);
-        EvaluationObservationBenchmarkMode mode = (EvaluationObservationBenchmarkMode)Enum.Parse(
-            typeof(EvaluationObservationBenchmarkMode),
-            TakeValue(args, "--mode"),
-            ignoreCase: false);
+        bool observationEnabled = bool.Parse(TakeValue(args, "--observation-enabled"));
         EvaluationObservationBenchmarkScenario scenario =
             (EvaluationObservationBenchmarkScenario)Enum.Parse(
                 typeof(EvaluationObservationBenchmarkScenario),
                 TakeValue(args, "--scenario"),
                 ignoreCase: false);
-        string? resultFile = TryTakeValue(args, "--result-file");
 
         if (args.Count != 0)
         {
@@ -42,156 +39,86 @@ internal static class EvaluationObservationBenchmarkHost
         }
 
         ValidateIndependentEvaluationEnvironment();
-        EvaluationObservationSemanticSnapshot.ValidateDifferenceDetection();
-
-        bool nativeEnabled = (mode & EvaluationObservationBenchmarkMode.Native) != 0;
-        bool retainObservationDetails = (mode & EvaluationObservationBenchmarkMode.Detours) != 0;
-        EvaluationObservationSemanticSummary semanticSummary =
-            VerifySemanticEquivalence(projectPath, scenario, retainObservationDetails);
+        VerifyRepresentativeEquivalence(projectPath, scenario);
 
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
 
-        long managedMemoryBefore = GC.GetTotalMemory(forceFullCollection: false);
 #if !NETFRAMEWORK
         long allocatedBytesBefore = GC.GetTotalAllocatedBytes(precise: false);
 #endif
-        int gen0Before = GC.CollectionCount(0);
-        int gen1Before = GC.CollectionCount(1);
-        int gen2Before = GC.CollectionCount(2);
         EvaluationObservationNativeMetrics nativeMetrics = new();
-        string projectDirectory = Path.GetDirectoryName(projectPath)!;
-
-        _ = File.Exists(Path.Combine(projectDirectory, EvaluationObservationBenchmarkProtocol.MeasurementStartMarker));
         Stopwatch stopwatch = Stopwatch.StartNew();
         using (EvaluationObservationNativeBridge.Enable(
-            nativeEnabled,
-            nativeMetrics,
-            collectPaths: (mode & EvaluationObservationBenchmarkMode.Detours) != 0))
+            observationEnabled,
+            observationEnabled ? nativeMetrics : null))
         {
             for (int i = 0; i < iterations; i++)
             {
-                Evaluate(projectPath, scenario);
+                Evaluate(projectPath, scenario, captureRepresentativeState: false);
             }
         }
 
         stopwatch.Stop();
-        _ = File.Exists(Path.Combine(projectDirectory, EvaluationObservationBenchmarkProtocol.MeasurementStopMarker));
 
-        long managedMemoryAfter = GC.GetTotalMemory(forceFullCollection: true);
 #if NETFRAMEWORK
         long allocatedManagedBytes = 0;
 #else
         long allocatedManagedBytes = GC.GetTotalAllocatedBytes(precise: false) - allocatedBytesBefore;
 #endif
-        using Process process = Process.GetCurrentProcess();
-        process.Refresh();
-
         EvaluationObservationBenchmarkResult result = new()
         {
             EvaluationTicks = stopwatch.ElapsedTicks,
             AllocatedManagedBytes = allocatedManagedBytes,
-            RetainedManagedBytes = Math.Max(0, managedMemoryAfter - managedMemoryBefore),
-            PrivateBytes = process.PrivateMemorySize64,
-            PeakWorkingSetBytes = process.PeakWorkingSet64,
-            Gen0Collections = GC.CollectionCount(0) - gen0Before,
-            Gen1Collections = GC.CollectionCount(1) - gen1Before,
-            Gen2Collections = GC.CollectionCount(2) - gen2Before,
             NativeReports = nativeMetrics.Reports,
-            NativePathProbes = nativeMetrics.PathProbes,
-            NativeEnumerations = nativeMetrics.Enumerations,
-            NativeMetadataReads = nativeMetrics.MetadataReads,
-            NativeFileReads = nativeMetrics.FileReads,
-            NativeSemanticObservations = nativeMetrics.SemanticObservations,
-            NativeUniquePaths = nativeMetrics.UniquePathCount,
-            SemanticComparisons = semanticSummary.ComparisonCount,
-            SemanticImports = semanticSummary.ImportCount,
-            SemanticProperties = semanticSummary.PropertyCount,
-            SemanticItems = semanticSummary.ItemCount,
-            SemanticMetadata = semanticSummary.MetadataCount,
+            NativeObservations = nativeMetrics.Observations,
         };
 
-        if (result.SemanticComparisons != 1)
+        if (!observationEnabled && result.NativeReports != 0)
+        {
+            throw new InvalidOperationException("The disabled benchmark unexpectedly produced observation reports.");
+        }
+
+        if (observationEnabled && result.NativeReports != iterations)
         {
             throw new InvalidOperationException(
-                $"The benchmark expected one semantic comparison but observed {result.SemanticComparisons}.");
+                $"The enabled benchmark expected {iterations} reports but observed {result.NativeReports}.");
         }
 
-        if (mode == EvaluationObservationBenchmarkMode.Baseline && result.NativeReports != 0)
-        {
-            throw new InvalidOperationException("The baseline benchmark unexpectedly produced native observation reports.");
-        }
-
-        if (nativeEnabled && result.NativeReports != iterations)
-        {
-            throw new InvalidOperationException(
-                $"The native benchmark expected {iterations} reports but observed {result.NativeReports}.");
-        }
-
-        string serializedResult = result.Serialize();
-        Console.WriteLine(serializedResult);
-        if (resultFile is not null)
-        {
-            File.WriteAllText(
-                resultFile,
-                string.Concat(serializedResult, Environment.NewLine, nativeMetrics.SerializePaths()));
-        }
-
+        Console.WriteLine(result.Serialize());
         exitCode = 0;
         return true;
     }
 
-    private static EvaluationObservationSemanticSummary VerifySemanticEquivalence(
-        string projectPath,
-        EvaluationObservationBenchmarkScenario scenario,
-        bool retainObservationDetails)
-    {
-        EvaluationObservationSemanticSnapshot referenceSnapshot;
-        using (EvaluationObservationNativeBridge.Enable(enabled: false, metrics: null, collectPaths: false))
-        {
-            referenceSnapshot = EvaluateAndCapture(projectPath, scenario);
-        }
-
-        EvaluationObservationNativeMetrics metrics = new();
-        EvaluationObservationSemanticSnapshot observedSnapshot;
-        using (EvaluationObservationNativeBridge.Enable(
-            enabled: true,
-            metrics,
-            collectPaths: retainObservationDetails))
-        {
-            observedSnapshot = EvaluateAndCapture(projectPath, scenario);
-        }
-
-        if (metrics.Reports != 1 ||
-            (retainObservationDetails && metrics.UniquePathCount == 0))
-        {
-            throw new InvalidOperationException(
-                "Semantic verification did not exercise the expected native observation path.");
-        }
-
-        int comparisonCount = 0;
-        referenceSnapshot.AssertEquivalent(observedSnapshot);
-        comparisonCount++;
-        return observedSnapshot.GetSummary(comparisonCount);
-    }
-
-    private static void Evaluate(
+    private static void VerifyRepresentativeEquivalence(
         string projectPath,
         EvaluationObservationBenchmarkScenario scenario)
     {
-        _ = Evaluate(projectPath, scenario, captureSemanticState: false);
+        string disabledState;
+        using (EvaluationObservationNativeBridge.Enable(enabled: false, metrics: null))
+        {
+            disabledState = Evaluate(projectPath, scenario, captureRepresentativeState: true)!;
+        }
+
+        EvaluationObservationNativeMetrics metrics = new();
+        string enabledState;
+        using (EvaluationObservationNativeBridge.Enable(enabled: true, metrics))
+        {
+            enabledState = Evaluate(projectPath, scenario, captureRepresentativeState: true)!;
+        }
+
+        if (metrics.Reports != 1 || !string.Equals(disabledState, enabledState, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Observation changed the representative evaluated state used by the benchmark.");
+        }
     }
 
-    private static EvaluationObservationSemanticSnapshot EvaluateAndCapture(
-        string projectPath,
-        EvaluationObservationBenchmarkScenario scenario) =>
-        Evaluate(projectPath, scenario, captureSemanticState: true)!;
-
-    private static EvaluationObservationSemanticSnapshot? Evaluate(
+    private static string? Evaluate(
         string projectPath,
         EvaluationObservationBenchmarkScenario scenario,
-        bool captureSemanticState)
+        bool captureRepresentativeState)
     {
         using ProjectCollection collection = new();
         ProjectInstance project = ProjectInstance.FromFile(projectPath, new ProjectOptions
@@ -200,8 +127,10 @@ internal static class EvaluationObservationBenchmarkHost
             LoadSettings = ProjectLoadSettings.RecordDuplicateButNotCircularImports,
         });
 
+        int expectedCompileCount =
+            scenario == EvaluationObservationBenchmarkScenario.GlobHeavy ? 2_000 : 200;
         if (project.GetPropertyValue("RequestedProperty") != "ImportedValue" ||
-            project.GetItems("Compile").Count == 0)
+            project.GetItems("Compile").Count != expectedCompileCount)
         {
             throw new InvalidOperationException("Evaluation benchmark project produced unexpected state.");
         }
@@ -223,24 +152,15 @@ internal static class EvaluationObservationBenchmarkHost
             throw new InvalidOperationException("Non-ambient evaluation benchmark unexpectedly imported ambient state.");
         }
 
-        if (captureSemanticState)
-        {
-            ValidateSemanticFixture(project, projectPath, scenario);
-            ValidateOrderedItems(project.GetItems("Ordered"));
-        }
-
-        if (!captureSemanticState)
+        if (!captureRepresentativeState)
         {
             return null;
         }
 
-        EvaluationObservationSemanticSnapshot snapshot =
-            EvaluationObservationSemanticSnapshot.Capture(project);
-        ValidateSnapshotCardinality(project, scenario, snapshot.GetSummary());
-        return snapshot;
+        return CaptureRepresentativeState(project, projectPath, scenario);
     }
 
-    private static void ValidateSemanticFixture(
+    private static string CaptureRepresentativeState(
         ProjectInstance project,
         string projectPath,
         EvaluationObservationBenchmarkScenario scenario)
@@ -261,8 +181,7 @@ internal static class EvaluationObservationBenchmarkHost
         if (imports.Count != expectedImportCount || importedProjectCount != 2)
         {
             throw new InvalidOperationException(
-                $"Evaluation benchmark expected {expectedImportCount} imports including two duplicate fixture imports, " +
-                $"but observed {imports.Count} imports including {importedProjectCount} fixture imports.");
+                $"Evaluation benchmark expected {expectedImportCount} imports including two duplicate fixture imports.");
         }
 
         ProjectPropertyInstance? escapedProperty = project.GetProperty("EscapedProperty");
@@ -275,6 +194,7 @@ internal static class EvaluationObservationBenchmarkHost
                 "Evaluation benchmark did not preserve the escaped property or item fixture.");
         }
 
+        string escapedItemState = string.Empty;
         foreach (ProjectItemInstance escapedItem in escapedItems)
         {
             if (((IItem)escapedItem).EvaluatedIncludeEscaped != "semi%3Bcolon" ||
@@ -283,48 +203,21 @@ internal static class EvaluationObservationBenchmarkHost
                 throw new InvalidOperationException(
                     "Evaluation benchmark did not preserve escaped item or metadata values.");
             }
-        }
-    }
 
-    private static void ValidateSnapshotCardinality(
-        ProjectInstance project,
-        EvaluationObservationBenchmarkScenario scenario,
-        EvaluationObservationSemanticSummary summary)
-    {
-        int metadataCount = 0;
-        foreach (ProjectItemInstance item in project.Items)
-        {
-            foreach (ProjectMetadataInstance _ in item.Metadata)
-            {
-                metadataCount++;
-            }
+            escapedItemState = string.Concat(
+                ((IItem)escapedItem).EvaluatedIncludeEscaped,
+                "|",
+                ((IItem)escapedItem).GetMetadataValueEscaped("EscapedMetadata"));
         }
 
-        int expectedImportCount =
-            scenario == EvaluationObservationBenchmarkScenario.AmbientAndSdk ? 4 : 2;
-        if (summary.ImportCount != expectedImportCount ||
-            summary.PropertyCount == 0 ||
-            summary.ItemCount < 5 ||
-            summary.MetadataCount < 10 ||
-            summary.ImportCount != project.ImportPathsIncludingDuplicates.Count ||
-            summary.PropertyCount != project.Properties.Count ||
-            summary.ItemCount != project.Items.Count ||
-            summary.MetadataCount != metadataCount)
+        StringBuilder orderedState = new();
+        int orderedIndex = 0;
+        foreach (ProjectItemInstance item in project.GetItems("Ordered"))
         {
-            throw new InvalidOperationException(
-                "Semantic snapshot cardinalities did not match the evaluated project.");
-        }
-    }
-
-    private static void ValidateOrderedItems(ICollection<ProjectItemInstance> orderedItems)
-    {
-        int index = 0;
-        foreach (ProjectItemInstance item in orderedItems)
-        {
-            string expectedInclude = index == 1 ? "second" : "first";
-            string expectedPosition = (index + 1).ToString(CultureInfo.InvariantCulture);
-            string expectedOverride = index == 1 ? "item" : "default";
-            if (index >= 3 ||
+            string expectedInclude = orderedIndex == 1 ? "second" : "first";
+            string expectedPosition = (orderedIndex + 1).ToString(CultureInfo.InvariantCulture);
+            string expectedOverride = orderedIndex == 1 ? "item" : "default";
+            if (orderedIndex >= 3 ||
                 item.EvaluatedInclude != expectedInclude ||
                 item.GetMetadataValue("Position") != expectedPosition ||
                 item.GetMetadataValue("Inherited") != "definition" ||
@@ -334,14 +227,51 @@ internal static class EvaluationObservationBenchmarkHost
                     "Evaluation benchmark project did not preserve item order, duplicates, or metadata.");
             }
 
-            index++;
+            orderedState.Append(item.EvaluatedInclude);
+            orderedState.Append('|');
+            orderedState.Append(item.GetMetadataValue("Position"));
+            orderedState.Append('|');
+            orderedState.Append(item.GetMetadataValue("Inherited"));
+            orderedState.Append('|');
+            orderedState.Append(item.GetMetadataValue("Override"));
+            orderedState.AppendLine();
+            orderedIndex++;
         }
 
-        if (index != 3)
+        if (orderedIndex != 3)
         {
             throw new InvalidOperationException(
                 "Evaluation benchmark project did not preserve item order, duplicates, or metadata.");
         }
+
+        int metadataCount = 0;
+        foreach (ProjectItemInstance item in project.Items)
+        {
+            foreach (ProjectMetadataInstance _ in item.Metadata)
+            {
+                metadataCount++;
+            }
+        }
+
+        StringBuilder state = new();
+        state.AppendLine(project.Properties.Count.ToString(CultureInfo.InvariantCulture));
+        state.AppendLine(project.Items.Count.ToString(CultureInfo.InvariantCulture));
+        state.AppendLine(metadataCount.ToString(CultureInfo.InvariantCulture));
+        for (int i = 0; i < imports.Count; i++)
+        {
+            state.AppendLine(imports[i]);
+        }
+
+        state.AppendLine(project.GetPropertyValue("RequestedProperty"));
+        state.AppendLine(((IProperty)escapedProperty).EvaluatedValueEscaped);
+        state.AppendLine(project.GetPropertyValue("ImportedEnvironment"));
+        state.AppendLine(project.GetPropertyValue("LiveEnvironment"));
+        state.AppendLine(project.GetPropertyValue("Settings"));
+        state.AppendLine(project.GetPropertyValue("Above"));
+        state.AppendLine(project.GetPropertyValue("Volatile"));
+        state.AppendLine(escapedItemState);
+        state.Append(orderedState);
+        return state.ToString();
     }
 
     private static void ValidateIndependentEvaluationEnvironment()
@@ -350,8 +280,7 @@ internal static class EvaluationObservationBenchmarkHost
             Traits.Instance.MSBuildCacheFileEnumerations)
         {
             throw new InvalidOperationException(
-                "Semantic verification requires the process-wide MsBuildCacheFileExistence and " +
-                "MsBuildCacheFileEnumerations caches to be disabled.");
+                "The benchmark requires the process-wide file-existence and enumeration caches to be disabled.");
         }
     }
 
@@ -361,25 +290,6 @@ internal static class EvaluationObservationBenchmarkHost
         if (index < 0 || index + 1 >= args.Count)
         {
             throw new ArgumentException($"Missing required benchmark host argument '{name}'.");
-        }
-
-        string value = args[index + 1];
-        args.RemoveAt(index + 1);
-        args.RemoveAt(index);
-        return value;
-    }
-
-    private static string? TryTakeValue(List<string> args, string name)
-    {
-        int index = args.IndexOf(name);
-        if (index < 0)
-        {
-            return null;
-        }
-
-        if (index + 1 >= args.Count)
-        {
-            throw new ArgumentException($"Missing value for benchmark host argument '{name}'.");
         }
 
         string value = args[index + 1];

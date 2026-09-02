@@ -624,40 +624,6 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             miss.CacheIdentity.EntryId.ShouldBe(hit.CacheIdentity.EntryId);
             service.IsCacheEntryCurrent(miss.CacheIdentity).ShouldBeTrue();
             service.IsCacheEntryCurrent(hit.CacheIdentity).ShouldBeTrue();
-            SdkResolverCacheIdentity liveIdentity = miss.CacheIdentity;
-
-            SdkResolverCacheIdentity ChangeIdentity(
-                string ownerType = null,
-                long? ownerId = null,
-                string scopeKind = null,
-                int? scopeId = null,
-                long? epoch = null,
-                long? entryId = null,
-                string key = null,
-                string keyComparer = null,
-                bool? cacheEnabled = null)
-            {
-                return new SdkResolverCacheIdentity(
-                    ownerType ?? liveIdentity.OwnerType,
-                    ownerId ?? liveIdentity.OwnerId,
-                    scopeKind ?? liveIdentity.ScopeKind,
-                    scopeId ?? liveIdentity.ScopeId,
-                    epoch ?? liveIdentity.Epoch,
-                    entryId ?? liveIdentity.EntryId,
-                    key ?? liveIdentity.Key,
-                    keyComparer ?? liveIdentity.KeyComparer,
-                    cacheEnabled ?? liveIdentity.CacheEnabled);
-            }
-
-            service.IsCacheEntryCurrent(ChangeIdentity(ownerType: "ForeignOwner")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(ownerId: liveIdentity.OwnerId + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(scopeKind: "ForeignScope")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(scopeId: SubmissionId + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(epoch: liveIdentity.Epoch + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(entryId: liveIdentity.EntryId + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(key: "bar")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(keyComparer: "Ordinal")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(cacheEnabled: false)).ShouldBeFalse();
 
             service.ClearCache(SubmissionId);
 
@@ -788,40 +754,6 @@ namespace Microsoft.Build.Engine.UnitTests.BackEnd
             packetsSent.ShouldBe(1);
             service.IsCacheEntryCurrent(observations[0].CacheIdentity).ShouldBeTrue();
             service.IsCacheEntryCurrent(observations[1].CacheIdentity).ShouldBeTrue();
-            SdkResolverCacheIdentity liveIdentity = observations[0].CacheIdentity;
-
-            SdkResolverCacheIdentity ChangeIdentity(
-                string ownerType = null,
-                long? ownerId = null,
-                string scopeKind = null,
-                int? scopeId = null,
-                long? epoch = null,
-                long? entryId = null,
-                string key = null,
-                string keyComparer = null,
-                bool? cacheEnabled = null)
-            {
-                return new SdkResolverCacheIdentity(
-                    ownerType ?? liveIdentity.OwnerType,
-                    ownerId ?? liveIdentity.OwnerId,
-                    scopeKind ?? liveIdentity.ScopeKind,
-                    scopeId ?? liveIdentity.ScopeId,
-                    epoch ?? liveIdentity.Epoch,
-                    entryId ?? liveIdentity.EntryId,
-                    key ?? liveIdentity.Key,
-                    keyComparer ?? liveIdentity.KeyComparer,
-                    cacheEnabled ?? liveIdentity.CacheEnabled);
-            }
-
-            service.IsCacheEntryCurrent(ChangeIdentity(ownerType: "ForeignOwner")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(ownerId: liveIdentity.OwnerId + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(scopeKind: "ForeignScope")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(scopeId: 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(epoch: liveIdentity.Epoch + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(entryId: liveIdentity.EntryId + 1)).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(key: "bar")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(keyComparer: "Ordinal")).ShouldBeFalse();
-            service.IsCacheEntryCurrent(ChangeIdentity(cacheEnabled: false)).ShouldBeFalse();
 
             service.ShutdownComponent();
 

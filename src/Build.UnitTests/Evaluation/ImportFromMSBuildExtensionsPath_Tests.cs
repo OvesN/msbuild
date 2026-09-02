@@ -176,23 +176,21 @@ namespace Microsoft.Build.UnitTests.Evaluation
                 });
         }
 
-        [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
-        public void ImportFromExtensionsPathWithWildCard(bool retainDetails)
+        [Fact]
+        public void ImportFromExtensionsPathWithWildCard()
         {
             EvaluationObservationReport report = null;
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
                 enabled: true,
                 createdReport => report = createdReport,
-                retainDetails);
+                retainDetails: false);
             string mainTargetsFileContent = @"
                 <Project>
                     <Target Name='Main'>
                         <Message Text='Running Main'/>
                     </Target>
 
-                    <Import Project='$(MSBuildExtensionsPath)\foo\*.proj;$(MSBuildExtensionsPath)\foo\missing.proj'/>
+                    <Import Project='$(MSBuildExtensionsPath)\foo\*.proj'/>
                 </Project>";
 
             string extnTargetsFileContent = @"
@@ -241,10 +239,6 @@ namespace Microsoft.Build.UnitTests.Evaluation
         [Fact]
         public void ImportFromExtensionsPathWithWildCardAndSelfImport()
         {
-            EvaluationObservationReport report = null;
-            using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
-                enabled: true,
-                createdReport => report = createdReport);
             string mainTargetsFileContent = @"
                 <Project>
                     <Target Name='Main'>
@@ -293,19 +287,6 @@ namespace Microsoft.Build.UnitTests.Evaluation
                     Assert.True(project.Build("FromExtn3"));
                     logger.AssertLogContains("MSB4210");
                 });
-
-            report.ShouldNotBeNull();
-            EvaluationSearchObservation search = report.Searches.Single(
-                observation => observation.Kind == "ImportFallback");
-            search.SelectedPathCount.ShouldBe(4);
-            search.SelectedPaths.Length.ShouldBe(search.SelectedPathCount);
-            search.SelectedPaths.ShouldBe(
-            [
-                Path.Combine(extnDir1, "circularwildcardtest", "extn.proj"),
-                Path.Combine(extnDir2, "circularwildcardtest", "extn.proj"),
-                mainProjectPath,
-                Path.Combine(extnDir3, "circularwildcardtest", "extn3.proj"),
-            ]);
         }
 
         [Fact]

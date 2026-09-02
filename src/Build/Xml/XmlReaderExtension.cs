@@ -19,8 +19,6 @@ namespace Microsoft.Build.Internal
     /// </summary>
     internal class XmlReaderExtension : IDisposable
     {
-        internal static Action<string> TestOnlyHookBeforeSourceRead { get; set; }
-
         /// <summary>
         ///     Creates an XmlReaderExtension with handle to an XmlReader.
         /// </summary>
@@ -50,11 +48,6 @@ namespace Microsoft.Build.Internal
             _sourceLoadCapture = sourceLoadCapture;
             try
             {
-                if (_sourceLoadCapture is not null)
-                {
-                    TestOnlyHookBeforeSourceRead?.Invoke(file);
-                }
-
                 // Note: Passing in UTF8 w/o BOM into StreamReader. If the BOM is detected StreamReader will set the
                 // Encoding correctly (detectEncodingFromByteOrderMarks = true). The default is to use UTF8 (with BOM)
                 // which will cause the BOM to be added when we re-save the file in cases where it was not present on
