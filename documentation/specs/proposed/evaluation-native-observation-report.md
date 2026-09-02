@@ -100,9 +100,9 @@ cache lookup/invalidation.
 
 ## Current Total Overhead
 
-Measured on September 1, 2026 after rebasing the PR onto `main` at `c4d2a5f766`, using
-.NET SDK `11.0.100-rc.1.26420.103` on a Windows Hyper-V VM. Only report documentation
-changed after measurement.
+Measured on September 2, 2026 from PR head `89b4d9537b`, rebased onto `main` at
+`c4d2a5f766`, using .NET SDK `11.0.100-rc.1.26420.103` on a Windows Hyper-V VM. Only
+report documentation changed after measurement.
 
 ### Synthetic evaluation benchmark
 
@@ -118,16 +118,20 @@ They are not standard errors or confidence intervals for the cell means or delta
 
 | Scenario | Disabled mean ± SD, 50 evaluations | Enabled mean ± SD, 50 evaluations | Total time overhead | Added allocation per evaluation |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 251.891 ± 13.198 ms | 258.035 ± 9.156 ms | +6.144 ms / **+2.4%** | 15.9 KiB / +4.4% |
-| Glob-heavy | 409.882 ± 14.486 ms | 439.238 ± 18.084 ms | +29.355 ms / **+7.2%** | 12.2 KiB / +0.8% |
-| Ambient/SDK | 313.047 ± 11.691 ms | 350.710 ± 17.192 ms | +37.663 ms / **+12.0%** | 32.0 KiB / +7.3% |
+| Typical | 247.619 ± 5.683 ms | 266.671 ± 15.300 ms | +19.052 ms / **+7.7%** | ≈13 KiB / +3.6% |
+| Glob-heavy | 428.452 ± 16.179 ms | 460.794 ± 19.860 ms | +32.342 ms / **+7.5%** | ≈17 KiB / +1.1% |
+| Ambient/SDK | 339.768 ± 23.556 ms | 367.235 ± 20.861 ms | +27.467 ms / **+8.1%** | ≈32 KiB / +7.3% |
 
-BenchmarkDotNet's process-level ratios were 0.99, 1.03, and 1.06 respectively. Relative
-to the child-loop deltas, non-loop time shifted by approximately -14 ms, -2 ms, and
-+20 ms. That variation is treated as process-level noise, not corroboration; the Typical
-process-level comparison is slightly negative. Both Baseline launches ran before both
-Native launches for each scenario, so fixed-order drift remains a limitation and
-statistical significance is not assessed.
+BenchmarkDotNet's process-level ratios were 1.02, 1.03, and 1.02 respectively. Relative
+to the child-loop deltas, non-loop time shifted by approximately -7 ms, -1 ms, and -5 ms.
+That variation is treated as process-level noise, not a decomposition. Both Baseline
+launches ran before both Native launches for each scenario, so fixed-order drift remains
+a limitation and statistical significance is not assessed.
+
+An immediately preceding same-host run measured 2.4%, 7.2%, and 12.0%. Typical does not
+exercise the intervening file-time observation fix, so the 2.4% to 7.7% shift is
+run-to-run drift. The synthetic table is an order-of-magnitude estimate rather than a
+narrow reproducible band.
 
 ### Orchard Core warm no-op build
 
@@ -142,22 +146,23 @@ enabled cell, so the samples are unpaired and susceptible to VM drift.
 
 | Run | Observation disabled | Observation enabled | Delta |
 | --- | ---: | ---: | ---: |
-| 1 | 5.567 s | 5.791 s | +224 ms / +4.0% |
-| 2 | 5.619 s | 5.781 s | +162 ms / +2.9% |
-| 3 | 5.791 s | 5.761 s | -30 ms / -0.5% |
-| **Aggregate means** | **5.659 s** | **5.778 s** | **+119 ms / +2.1%** |
+| 1 | 5.769 s | 5.999 s | +230 ms / +4.0% |
+| 2 | 5.735 s | 5.851 s | +116 ms / +2.0% |
+| 3 | 6.020 s | 5.871 s | -149 ms / -2.5% |
+| **Aggregate means** | **5.841 s** | **5.907 s** | **+66 ms / +1.1%** |
 
 The Hyper-V run-to-run range is wide and fixed-order drift remains a confounder. The
 aggregate is a descriptive central estimate; no per-category or precise causal
-attribution is inferred. Isolated synthetic evaluation loops measured 2.4-12.0% of
-evaluation-loop time. The three-run Orchard aggregate measured 2.1% of total warm no-op
-build wall time, with individual run deltas from -0.5% to +4.0%; the aggregate is not
-treated as a statistically established across-run effect. These percentages have
-different denominators and are not directly comparable.
+attribution is inferred. Isolated synthetic evaluation loops measured 7.5-8.1% of
+evaluation-loop time. The three-run Orchard mean aggregate measured 1.1% of total warm
+no-op build wall time, with individual run deltas from -2.5% to +4.0%; the median-based
+aggregate measured 2.1%. Neither is treated as a statistically established across-run
+effect. These percentages have different denominators and are not directly comparable.
 
-Monitoring mode retained outliers. Median-based Orchard deltas were +202 ms, +173 ms,
-and +130 ms across the three runs. Run 3's negative mean delta is caused by two retained
-baseline stalls at 6.18 s and 7.31 s; its median delta is +130 ms.
+Monitoring mode retained outliers. Median-based Orchard deltas were +218 ms, +161 ms,
+and -13 ms across the three runs. Run 3's negative mean delta is driven by a single
+retained baseline outlier: a 7.87 s sample. Disabled run means span 5.567-6.020 s, which
+is wider than either aggregate delta.
 
 See [evaluation-native-observation-timing-report.md](evaluation-native-observation-timing-report.md)
 for exact commands, raw run summaries, and measurement limitations.

@@ -6,8 +6,8 @@ This report measures only the total cost of enabling the native evaluation obser
 layer. It does not attribute cost to individual observation categories. The synthetic
 enabled cell also includes the benchmark callback that counts report records.
 
-Measurements were collected on September 1, 2026 after rebasing the PR onto `main` at
-`c4d2a5f766`. Only report documentation changed after measurement.
+Measurements were collected on September 2, 2026 from PR head `89b4d9537b`, rebased
+onto `main` at `c4d2a5f766`. Only report documentation changed after measurement.
 
 - Windows 11 `10.0.26200.9106` under Hyper-V;
 - AMD EPYC 7763 virtual CPU, 8 cores and 16 logical processors;
@@ -34,19 +34,21 @@ samples per launch. Every invocation starts a fresh child and times 50 evaluatio
 table averages the two launch summaries. It excludes child-process startup and semantic
 preflight while retaining the complete evaluation and observation work.
 
+The preflight includes an observation-enabled evaluation in both cells, so observation
+code is JIT-compiled and initialized before timing. These are steady-state costs
+amortized over 50 evaluations, not first-evaluation startup costs.
+
 The `±` values are pooled standard deviations of the 54 child-process samples per cell.
 
 | Scenario | Disabled mean ± SD, 50 evaluations | Enabled mean ± SD, 50 evaluations | Delta | Added allocation per evaluation |
 | --- | ---: | ---: | ---: | ---: |
-| Typical | 251.891 ± 13.198 ms | 258.035 ± 9.156 ms | +6.144 ms / **+2.4%** | 15.9 KiB / +4.4% |
-| Glob-heavy | 409.882 ± 14.486 ms | 439.238 ± 18.084 ms | +29.355 ms / **+7.2%** | 12.2 KiB / +0.8% |
-| Ambient/SDK | 313.047 ± 11.691 ms | 350.710 ± 17.192 ms | +37.663 ms / **+12.0%** | 32.0 KiB / +7.3% |
+| Typical | 247.619 ± 5.683 ms | 266.671 ± 15.300 ms | +19.052 ms / **+7.7%** | ≈13 KiB / +3.6% |
+| Glob-heavy | 428.452 ± 16.179 ms | 460.794 ± 19.860 ms | +32.342 ms / **+7.5%** | ≈17 KiB / +1.1% |
+| Ambient/SDK | 339.768 ± 23.556 ms | 367.235 ± 20.861 ms | +27.467 ms / **+8.1%** | ≈32 KiB / +7.3% |
 
-The corresponding BenchmarkDotNet method ratios were 0.99, 1.03, and 1.06. Relative to
-the child-loop deltas, non-loop time shifted by approximately -14 ms, -2 ms, and +20 ms.
-That variation is treated as process-level noise, not corroboration. In particular, the
-Typical process-level comparison is slightly negative and does not corroborate its
-+2.4% child-loop delta.
+The corresponding BenchmarkDotNet method ratios were 1.02, 1.03, and 1.02. Relative to
+the child-loop deltas, non-loop time shifted by approximately -7 ms, -1 ms, and -5 ms.
+That variation is treated as process-level noise, not a decomposition of non-loop work.
 
 The process-level ratios use measured iterations after BenchmarkDotNet outlier handling;
 the child summaries include all 54 jitting, warmup, and measured invocations per cell.
@@ -59,8 +61,17 @@ scenario. Fixed-order drift therefore remains a limitation for the synthetic com
 as well.
 
 The table is backed by the local, uncommitted
-`synthetic-bdn-project\MSBuild.Benchmarks.EvaluationObservationBenchmark-20260901-210841.log`
+`synthetic-bdn-project\MSBuild.Benchmarks.EvaluationObservationBenchmark-20260902-020946.log`
 and its exported results.
+
+An immediately preceding same-host run on the pre-fix head measured 2.4%, 7.2%, and
+12.0% for the same scenarios. Typical does not exercise the file-time fix, so its change
+from 2.4% to 7.7% demonstrates run-to-run drift rather than a code effect. Treat the
+synthetic results as an order-of-magnitude estimate, not a narrow 7.5-8.1% band.
+
+Allocation uses `GC.GetTotalAllocatedBytes(precise: false)`. The same two runs varied
+from approximately 13-16 KiB for Typical, 12-17 KiB for Glob-heavy, and remained about
+32 KiB for Ambient/SDK.
 
 ## Orchard Core Warm No-Op Build
 
@@ -85,19 +96,23 @@ confidence intervals, not standard deviations.
 
 | Run | Disabled mean ± error | Enabled mean ± error | Delta |
 | --- | ---: | ---: | ---: |
-| 1 | 5.567 s ± 0.063 s | 5.791 s ± 0.176 s | +224 ms / +4.0% |
-| 2 | 5.619 s ± 0.073 s | 5.781 s ± 0.082 s | +162 ms / +2.9% |
-| 3 | 5.791 s ± 0.655 s | 5.761 s ± 0.070 s | -30 ms / -0.5% |
-| **Aggregate means** | **5.659 s** | **5.778 s** | **+119 ms / +2.1%** |
+| 1 | 5.769 s ± 0.095 s | 5.999 s ± 0.147 s | +230 ms / +4.0% |
+| 2 | 5.735 s ± 0.101 s | 5.851 s ± 0.069 s | +116 ms / +2.0% |
+| 3 | 6.020 s ± 0.771 s | 5.871 s ± 0.067 s | -149 ms / -2.5% |
+| **Aggregate means** | **5.841 s** | **5.907 s** | **+66 ms / +1.1%** |
 
 The three runs show substantial Hyper-V noise and fixed-order drift remains a confounder.
-The individual deltas range from -0.5% to +4.0%, with run 3 carrying substantially wider
+The individual deltas range from -2.5% to +4.0%, with run 3 carrying substantially wider
 baseline uncertainty. The equal-sample aggregate is a descriptive central estimate, not
 precise causal attribution or a statistically established across-run effect.
 
-Monitoring mode retains outliers. Median-based deltas were +202 ms, +173 ms, and
-+130 ms across the three runs, all positive. Run 3's negative mean delta is caused by two
-retained baseline stalls at 6.18 s and 7.31 s; its median delta is +130 ms.
+Monitoring mode retains outliers. Median-based deltas were +218 ms, +161 ms, and -13 ms.
+The aggregate of the three cell medians was 5.772 s disabled and 5.894 s enabled:
++122 ms / +2.1%. Run 3's negative mean delta is driven by a single retained baseline
+outlier: a 7.87 s sample.
+
+The disabled run means span 5.567-6.020 s, a 453 ms range that is much larger than either
+aggregate delta.
 
 ## Reproduction
 
@@ -124,8 +139,10 @@ From the OrchardCore root, verify that this bootstrap selects the freshly built 
 <msbuild-root>\artifacts\bin\bootstrap\core\dotnet.exe --version
 ```
 
-The expected output for this measurement is `11.0.100-rc.1.26420.103`, matching the
-MSBuild repository's `global.json`.
+The expected output for this retained measurement is `11.0.100-rc.1.26420.103`.
+OrchardCore's `global.json` requests `10.0.200` with `rollForward: latestMajor`, and the
+bootstrap may contain multiple SDK-version directories, so verify the selected value
+explicitly.
 
 Build the benchmark project:
 
@@ -211,12 +228,14 @@ The local, uncommitted backing result directories for this report are
 ## Interpretation
 
 - Total observation overhead is scenario-dependent.
-- Isolated synthetic evaluation loops measured **+2.4% to +12.0% of evaluation-loop
-  time**.
-- Orchard run deltas ranged from -30 ms to +224 ms. Their descriptive mean was +119 ms
-  / +2.1% of total warm no-op build wall time, but it is not treated as a statistically
-  established across-run effect.
-- Synthetic allocation increased by approximately **12-32 KiB per evaluation**.
+- The final synthetic run measured **+7.5% to +8.1% of evaluation-loop time**, while an
+  immediately preceding same-host run measured **+2.4% to +12.0%**. Treat this as a
+  rough single-digit-to-low-double-digit estimate.
+- Orchard run mean deltas ranged from -149 ms to +230 ms. Their descriptive mean was
+  +66 ms / +1.1% of total warm no-op build wall time; the median-based aggregate was
+  +122 ms / +2.1%. Neither is treated as a statistically established across-run effect.
+- Synthetic allocation increased by approximately **13-32 KiB per evaluation** in the
+  final run, with material cross-run variation.
 - These totals do not identify which observation category should be optimized.
 
 The synthetic and Orchard percentages have different denominators and are not directly
