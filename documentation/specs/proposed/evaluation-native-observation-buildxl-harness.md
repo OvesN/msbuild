@@ -37,7 +37,10 @@ benchmark variant:
 The x64 platform uses separate binary and intermediate directories, and the
 opt-in property uses a separate NuGet project-extensions directory. The
 repository's default x86 .NET Framework benchmark outputs and assets remain
-unchanged.
+unchanged. The opt-in net472 build uses BenchmarkDotNet 0.13.12 because its
+.NET Framework toolchain reuses the already-built EXE that contains the conditional
+broker. BenchmarkDotNet 0.16 rebuilds a net481 DLL and drops that method. Normal
+benchmark builds continue to use the project-local 0.16 preview override.
 
 ## Run
 

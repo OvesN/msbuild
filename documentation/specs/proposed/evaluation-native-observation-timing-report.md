@@ -7,7 +7,9 @@ layer. It does not attribute cost to individual observation categories. The synt
 enabled cell also includes the benchmark callback that counts report records.
 
 Measurements were collected on September 2, 2026 from PR head `89b4d9537b`, rebased
-onto `main` at `c4d2a5f766`. Only report documentation changed after measurement.
+onto `main` at `c4d2a5f766`. Subsequent changes affect report documentation and the
+opt-in net472 Detours harness; the measured net11 observation and benchmark paths are
+unchanged.
 
 - Windows 11 `10.0.26200.9106` under Hyper-V;
 - AMD EPYC 7763 virtual CPU, 8 cores and 16 logical processors;
