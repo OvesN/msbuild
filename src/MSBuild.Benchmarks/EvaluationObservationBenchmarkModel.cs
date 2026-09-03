@@ -14,6 +14,7 @@ internal static class EvaluationObservationBenchmarkProtocol
     internal const string MeasurementStopMarker = ".evaluation-observer-measure-stop";
     internal const string NativePathPrefix = "EVALUATION_OBSERVATION_NATIVE_PATH|";
     internal const string NativeEnumerationPrefix = "EVALUATION_OBSERVATION_NATIVE_ENUMERATION|";
+    internal const string NativeGlobPrefix = "EVALUATION_OBSERVATION_NATIVE_GLOB|";
 }
 
 [Flags]
@@ -177,6 +178,7 @@ internal sealed class EvaluationObservationNativeMetrics
     internal int SemanticObservations = 0;
     private readonly HashSet<string> _uniquePaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _enumerations = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _globs = new(StringComparer.Ordinal);
     private bool _pathsSampled;
 
     internal int UniquePathCount => _uniquePaths.Count;
@@ -245,6 +247,19 @@ internal sealed class EvaluationObservationNativeMetrics
             observation.Completion));
     }
 
+    internal void AddGlob(EvaluationGlobObservation observation)
+    {
+        if (!string.IsNullOrEmpty(observation.Directory))
+        {
+            _globs.Add(string.Join(
+                "|",
+                Path.GetFullPath(observation.Directory),
+                observation.Include,
+                observation.ResultCount,
+                observation.ResultsFingerprint));
+        }
+    }
+
     internal string SerializePaths()
     {
         StringBuilder result = new();
@@ -259,6 +274,13 @@ internal sealed class EvaluationObservationNativeMetrics
         {
             result.Append(EvaluationObservationBenchmarkProtocol.NativeEnumerationPrefix);
             result.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(enumeration)));
+            result.AppendLine();
+        }
+
+        foreach (string glob in _globs.OrderBy(static value => value, StringComparer.Ordinal))
+        {
+            result.Append(EvaluationObservationBenchmarkProtocol.NativeGlobPrefix);
+            result.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(glob)));
             result.AppendLine();
         }
 

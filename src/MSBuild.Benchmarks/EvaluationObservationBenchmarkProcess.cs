@@ -15,7 +15,7 @@ internal static class EvaluationObservationBenchmarkProcess
         EvaluationObservationBenchmarkMode mode,
         EvaluationObservationBenchmarkScenario scenario,
         string projectPath,
-        string scenarioRoot,
+        IReadOnlyList<string> comparisonRoots,
         int iterations,
         IReadOnlyDictionary<string, string>? globalProperties = null,
         string? measurementRoot = null,
@@ -54,7 +54,7 @@ internal static class EvaluationObservationBenchmarkProcess
             return EvaluationObservationDetoursRunner.Run(
                 executable,
                 arguments,
-                scenarioRoot,
+                comparisonRoots,
                 measurementRoot,
                 includeNativeOnlyPaths);
         }

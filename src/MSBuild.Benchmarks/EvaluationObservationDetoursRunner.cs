@@ -17,7 +17,7 @@ internal static class EvaluationObservationDetoursRunner
     internal static EvaluationObservationBenchmarkResult Run(
         string executable,
         string arguments,
-        string scenarioRoot,
+        IReadOnlyList<string> comparisonRoots,
         string measurementRoot,
         bool includeNativeOnlyPaths)
     {
@@ -39,8 +39,8 @@ internal static class EvaluationObservationDetoursRunner
                 Encode(executable),
                 "--target-arguments",
                 Encode(arguments),
-                "--scenario-root",
-                Encode(scenarioRoot),
+                "--comparison-roots",
+                Encode(string.Join("\n", comparisonRoots)),
                 "--measurement-root",
                 Encode(measurementRoot),
                 "--include-native-only-paths",
@@ -126,6 +126,20 @@ internal static class EvaluationObservationDetoursRunner
                 StringComparison.Ordinal))
             {
                 outputPrefix = EvaluationObservationDetoursHost.NativeOnlyPathPrefix;
+                encodedPath = line.Substring(outputPrefix.Length);
+            }
+            else if (line.StartsWith(
+                EvaluationObservationBenchmarkProtocol.NativeEnumerationPrefix,
+                StringComparison.Ordinal))
+            {
+                outputPrefix = EvaluationObservationBenchmarkProtocol.NativeEnumerationPrefix;
+                encodedPath = line.Substring(outputPrefix.Length);
+            }
+            else if (line.StartsWith(
+                EvaluationObservationBenchmarkProtocol.NativeGlobPrefix,
+                StringComparison.Ordinal))
+            {
+                outputPrefix = EvaluationObservationBenchmarkProtocol.NativeGlobPrefix;
                 encodedPath = line.Substring(outputPrefix.Length);
             }
             else

@@ -158,7 +158,7 @@ public partial class EvaluationObservationBenchmark
             mode,
             Scenario,
             _projectPath,
-            _root,
+            [_root],
             EvaluationsPerProcess);
 
         if (!_aggregates.TryGetValue(mode, out Aggregate? aggregate))

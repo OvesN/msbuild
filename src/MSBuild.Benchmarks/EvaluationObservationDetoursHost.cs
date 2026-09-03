@@ -29,7 +29,8 @@ internal static class EvaluationObservationDetoursHost
 
         string targetExecutable = Decode(TakeValue(args, "--target-executable"));
         string targetArguments = Decode(TakeValue(args, "--target-arguments"));
-        string scenarioRoot = Decode(TakeValue(args, "--scenario-root"));
+        string[] comparisonRoots = Decode(TakeValue(args, "--comparison-roots"))
+            .Split(['\n'], StringSplitOptions.RemoveEmptyEntries);
         string measurementRoot = Decode(TakeValue(args, "--measurement-root"));
         bool includeNativeOnlyPaths = bool.Parse(
             TakeValue(args, "--include-native-only-paths"));
@@ -43,7 +44,7 @@ internal static class EvaluationObservationDetoursHost
         exitCode = Run(
             targetExecutable,
             targetArguments,
-            scenarioRoot,
+            comparisonRoots,
             measurementRoot,
             includeNativeOnlyPaths,
             resultFile);
@@ -53,7 +54,7 @@ internal static class EvaluationObservationDetoursHost
     private static int Run(
         string targetExecutable,
         string targetArguments,
-        string scenarioRoot,
+        IReadOnlyList<string> comparisonRoots,
         string measurementRoot,
         bool includeNativeOnlyPaths,
         string resultFile)
@@ -68,7 +69,7 @@ internal static class EvaluationObservationDetoursHost
         try
         {
             File.Delete(hostResultFile);
-            var listener = new DetoursEventListener(scenarioRoot, measurementRoot);
+            var listener = new DetoursEventListener(comparisonRoots, measurementRoot);
             listener.SetMessageHandlingFlags(
                 MessageHandlingFlags.DebugMessageNotify |
                 MessageHandlingFlags.FileAccessNotify |
@@ -96,7 +97,7 @@ internal static class EvaluationObservationDetoursHost
             string resultContent = File.ReadAllText(hostResultFile);
             EvaluationObservationBenchmarkResult hostResult =
                 EvaluationObservationBenchmarkResult.Parse(resultContent);
-            HashSet<string> nativePaths = listener.FilterToScenarioRoot(
+            HashSet<string> nativePaths = listener.FilterToComparisonRoots(
                 EvaluationObservationNativeMetrics.ParsePaths(resultContent));
             HashSet<string> detoursPaths = listener.GetUniquePaths();
             if (hostResult.NativeReports > 0 && nativePaths.Count == 0)
@@ -164,6 +165,23 @@ internal static class EvaluationObservationDetoursHost
                         serializedResult.AppendLine();
                         serializedResult.Append(NativeOnlyPathPrefix);
                         serializedResult.Append(EvaluationObservationDetoursRunner.Encode(path));
+                    }
+
+                    using StringReader reader = new(resultContent);
+                    while (reader.ReadLine() is { } line)
+                    {
+                        if (!line.StartsWith(
+                                EvaluationObservationBenchmarkProtocol.NativeEnumerationPrefix,
+                                StringComparison.Ordinal) &&
+                            !line.StartsWith(
+                                EvaluationObservationBenchmarkProtocol.NativeGlobPrefix,
+                                StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        serializedResult.AppendLine();
+                        serializedResult.Append(line);
                     }
                 }
 
@@ -288,8 +306,8 @@ internal static class EvaluationObservationDetoursHost
 
     private sealed class DetoursEventListener : IDetoursEventListener
     {
-        private readonly string _scenarioRoot;
-        private readonly string _scenarioRootPrefix;
+        private readonly string[] _comparisonRoots;
+        private readonly string[] _comparisonRootPrefixes;
         private readonly string _startMarker;
         private readonly string _stopMarker;
         private readonly HashSet<string> _uniquePaths = new(StringComparer.OrdinalIgnoreCase);
@@ -299,12 +317,20 @@ internal static class EvaluationObservationDetoursHost
         private int _stopMarkerObserved;
         private string? _normalizationFailure;
 
-        internal DetoursEventListener(string scenarioRoot, string measurementRoot)
+        internal DetoursEventListener(
+            IReadOnlyList<string> comparisonRoots,
+            string measurementRoot)
         {
-            string fullRoot = Path.GetFullPath(scenarioRoot);
             string fullMeasurementRoot = Path.GetFullPath(measurementRoot);
-            _scenarioRoot = fullRoot;
-            _scenarioRootPrefix = EnsureTrailingDirectorySeparator(fullRoot);
+            _comparisonRoots = new string[comparisonRoots.Count];
+            _comparisonRootPrefixes = new string[comparisonRoots.Count];
+            for (int i = 0; i < comparisonRoots.Count; i++)
+            {
+                string fullRoot = Path.GetFullPath(comparisonRoots[i]);
+                _comparisonRoots[i] = fullRoot;
+                _comparisonRootPrefixes[i] = EnsureTrailingDirectorySeparator(fullRoot);
+            }
+
             _startMarker = Path.Combine(fullMeasurementRoot, EvaluationObservationBenchmarkProtocol.MeasurementStartMarker);
             _stopMarker = Path.Combine(fullMeasurementRoot, EvaluationObservationBenchmarkProtocol.MeasurementStopMarker);
         }
@@ -322,7 +348,7 @@ internal static class EvaluationObservationDetoursHost
             }
         }
 
-        internal HashSet<string> FilterToScenarioRoot(IEnumerable<string> paths)
+        internal HashSet<string> FilterToComparisonRoots(IEnumerable<string> paths)
         {
             HashSet<string> result = new(StringComparer.OrdinalIgnoreCase);
             foreach (string path in paths)
@@ -336,7 +362,7 @@ internal static class EvaluationObservationDetoursHost
                             : failure);
                 }
 
-                if (IsUnderScenarioRoot(fullPath))
+                if (IsUnderComparisonRoot(fullPath))
                 {
                     result.Add(fullPath);
                 }
@@ -384,7 +410,7 @@ internal static class EvaluationObservationDetoursHost
                 return;
             }
 
-            if (Volatile.Read(ref _counting) == 0 || !IsUnderScenarioRoot(fullPath))
+            if (Volatile.Read(ref _counting) == 0 || !IsUnderComparisonRoot(fullPath))
             {
                 return;
             }
@@ -404,9 +430,24 @@ internal static class EvaluationObservationDetoursHost
         {
         }
 
-        private bool IsUnderScenarioRoot(string fullPath) =>
-            string.Equals(fullPath, _scenarioRoot, StringComparison.OrdinalIgnoreCase) ||
-            fullPath.StartsWith(_scenarioRootPrefix, StringComparison.OrdinalIgnoreCase);
+        private bool IsUnderComparisonRoot(string fullPath)
+        {
+            for (int i = 0; i < _comparisonRoots.Length; i++)
+            {
+                if (string.Equals(
+                        fullPath,
+                        _comparisonRoots[i],
+                        StringComparison.OrdinalIgnoreCase) ||
+                    fullPath.StartsWith(
+                        _comparisonRootPrefixes[i],
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
 
         private static string? TryNormalizePath(
             string path,
