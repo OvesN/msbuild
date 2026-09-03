@@ -70,6 +70,7 @@ internal static class EvaluationObservationNativeBridge
 
                         foreach (EvaluationGlobObservation observation in report.Globs)
                         {
+                            metrics.AddGlob(observation);
                             metrics.AddPath(observation.Directory);
                             foreach (string result in observation.Results)
                             {
