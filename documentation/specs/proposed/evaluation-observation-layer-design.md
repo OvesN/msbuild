@@ -30,7 +30,8 @@ Review the change in this order:
    lifetime at the MSBuild/resolver boundary.
 6. Focused tests cover disabled behavior, semantic equivalence, representative input
    categories, failure handling, source identity, and concurrent evaluation isolation.
-   `EvaluationObservationBenchmark` measures total observation overhead only.
+   `EvaluationObservationBenchmark` measures total observation overhead and provides an
+   opt-in Windows BuildXL Detours comparison.
 
 ## Required cache model
 
@@ -149,6 +150,10 @@ token.
 The report contains exact environment and property-function values. It must not be
 logged, placed in a binlog, sent through telemetry, or persisted without a separate
 redaction and security design.
+
+The benchmark project retains a Windows x64, .NET Framework Detours harness solely to
+compare process-level filesystem paths with native observations. It is verification
+infrastructure, not part of normal MSBuild evaluation or the future cache.
 
 ## Out of scope
 
