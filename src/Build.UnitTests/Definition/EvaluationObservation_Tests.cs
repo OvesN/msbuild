@@ -512,7 +512,7 @@ namespace Microsoft.Build.UnitTests.Definition
         }
 
         [Fact]
-        public void EvaluationObservationSummaryModeRetainsFingerprintsWithoutMemberArrays()
+        public void EvaluationObservationSummaryModeRetainsFingerprintsAndInvalidationPaths()
         {
             EvaluationObservationReport report = null;
             using IDisposable scope = EvaluationObservationSession.TestOnlyConfigure(
@@ -547,9 +547,10 @@ namespace Microsoft.Build.UnitTests.Definition
             glob.Results.ShouldBeEmpty();
             glob.ResultCount.ShouldBe(1);
             glob.ResultsFingerprint.ShouldNotBeNullOrEmpty();
+            glob.TraversedDirectories.ShouldNotBeEmpty();
             EvaluationSearchObservation search = report.Searches.Single(
                 observation => observation.Kind == "GetPathOfFileAbove");
-            search.Candidates.ShouldBeEmpty();
+            search.Candidates.Length.ShouldBe(search.CandidateCount);
             search.CandidateCount.ShouldBeGreaterThan(0);
             search.CandidatesFingerprint.ShouldNotBeNullOrEmpty();
         }
@@ -738,6 +739,12 @@ namespace Microsoft.Build.UnitTests.Definition
                 .ShouldBe(@"\\?\Volume{00000000-0000-0000-0000-000000000000}\file.txt");
             FileUtilities.NormalizePathForObservation(@"\\.\pipe\name")
                 .ShouldBe(@"\\.\pipe\name");
+            FileUtilities.NormalizePathForObservation(@"C:\\")
+                .ShouldBe(@"C:\");
+            FileUtilities.NormalizePathForObservation(@"\\server\share\\")
+                .ShouldBe(@"\\server\share\");
+            FileUtilities.NormalizePathForObservation(@"C:\root\directory\\")
+                .ShouldBe(@"C:\root\directory");
         }
 
         [Fact]
@@ -852,7 +859,7 @@ namespace Microsoft.Build.UnitTests.Definition
             report.Categories.ShouldContain(observation =>
                 observation.Category == EvaluationObservationCategory.PropertyFunction &&
                 observation.State == EvaluationObservationCategoryState.Observed);
-            report.SchemaVersion.ShouldBe(17);
+            report.SchemaVersion.ShouldBe(19);
             report.PropertyFunctionClassificationVersion.ShouldBeGreaterThan(0);
             report.Request.PathComparison.ShouldBe(FileUtilities.PathComparison.ToString());
         }

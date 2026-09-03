@@ -234,6 +234,63 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
     }
 
+    [Fact]
+    public void ObservedProcessWideResultCachePartitionsFileEntryCache()
+    {
+        _ = FileMatcher.Default;
+        TransientTestFolder root = _environment.CreateFolder();
+        File.WriteAllText(Path.Combine(root.Path, "first.cs"), string.Empty);
+
+        try
+        {
+            _environment.SetEnvironmentVariable("MsBuildCacheFileEnumerations", "1");
+            FileMatcher.ClearCaches();
+            using IDisposable scope =
+                EvaluationInputObserver.Enter(new NoOpEvaluationInputObserver());
+            List<string> excludes = [ToPlatformPath("**/obj/**")];
+
+            FileMatcher withoutEntryCache = new(
+                FileSystems.Default,
+                implementation: FileMatcherImplementation.Optimized);
+            withoutEntryCache.GetFiles(
+                root.Path,
+                ToPlatformPath("**/*.cs"),
+                excludes).FileList.ShouldBe(["first.cs"]);
+
+            File.WriteAllText(Path.Combine(root.Path, "second.cs"), string.Empty);
+            FileMatcher withEntryCache = new(
+                FileSystems.Default,
+                new ConcurrentDictionary<string, IReadOnlyList<string>>(),
+                FileMatcherImplementation.Optimized);
+            withEntryCache.GetFiles(
+                root.Path,
+                ToPlatformPath("**/*.cs"),
+                excludes).FileList.ShouldBe(
+                ["first.cs", "second.cs"],
+                ignoreOrder: true);
+        }
+        finally
+        {
+            FileMatcher.ClearCaches();
+        }
+    }
+
+    [Fact]
+    public void ObservationIdentitySeparatesIncludeAndExcludeFields()
+    {
+        string root = _environment.DefaultTestDirectory.Path;
+        string includeOnly = FileMatcher.ComputeFileEnumerationCacheKey(
+            root,
+            "a*b",
+            excludes: []);
+        string includeAndExclude = FileMatcher.ComputeFileEnumerationCacheKey(
+            root,
+            "a*",
+            excludes: ["b"]);
+
+        includeOnly.ShouldNotBe(includeAndExclude);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1286,6 +1343,182 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         fileSystem.EnumerationCalls.ShouldBeEmpty();
     }
 
+    [Fact]
+    public void ObservedOptimizedDirectRecordsTraversalWithoutCallbacks()
+    {
+        TransientTestFolder root = _environment.CreateFolder();
+        string source = Path.Combine(root.Path, "src");
+        string nested = Path.Combine(source, "nested");
+        string excluded = Path.Combine(root.Path, "obj");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(excluded);
+        File.WriteAllText(Path.Combine(root.Path, "root.cs"), string.Empty);
+        File.WriteAllText(Path.Combine(nested, "nested.cs"), string.Empty);
+        File.WriteAllText(Path.Combine(excluded, "excluded.cs"), string.Empty);
+        DirectRecordingFileSystem fileSystem = new(FileSystems.Default);
+        FileMatcher optimized = new(
+            fileSystem,
+            implementation: FileMatcherImplementation.Optimized);
+        var observer = new RecordingEvaluationInputObserver();
+        string include = ToPlatformPath("**/*.cs");
+        List<string> excludes = [ToPlatformPath("**/obj/**")];
+        string provider = FileSystems.GetProviderIdentity(fileSystem);
+
+        optimized.SelectDriver(
+            root.Path,
+            include,
+            excludes).Driver.ShouldBe(
+                FileMatcherDriver.OptimizedDirect);
+
+        using IDisposable scope = EvaluationInputObserver.Enter(observer);
+        string[] files = optimized.GetFiles(
+            root.Path,
+            include,
+            excludes).FileList;
+
+        files.Length.ShouldBe(2);
+        fileSystem.EnumerationCalls.ShouldBeEmpty();
+        observer.ShouldContainDirectory(root.Path, exists: true, provider: provider);
+        observer.ShouldContainDirectory(source, exists: true);
+        observer.ShouldContainDirectory(nested, exists: true);
+        observer.ShouldNotContainDirectory(excluded);
+        observer.Count.ShouldBe(3);
+    }
+
+    [Fact]
+    public void ObservedOptimizedCallbackRecordsOnlyTraversedDirectories()
+    {
+        TransientTestFolder root = _environment.CreateFolder();
+        string source = Path.Combine(root.Path, "src");
+        string nested = Path.Combine(source, "nested");
+        string excluded = Path.Combine(root.Path, "obj");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(excluded);
+        File.WriteAllText(Path.Combine(nested, "nested.cs"), string.Empty);
+        File.WriteAllText(Path.Combine(excluded, "excluded.cs"), string.Empty);
+        RecordingFileSystem fileSystem = new(FileSystems.Default);
+        FileMatcher optimized = new(
+            fileSystem,
+            new ConcurrentDictionary<string, IReadOnlyList<string>>(),
+            FileMatcherImplementation.Optimized);
+        var observer = new RecordingEvaluationInputObserver();
+        string include = ToPlatformPath("**/*.cs");
+        List<string> excludes = [ToPlatformPath("**/obj/**")];
+        string provider = FileSystems.GetProviderIdentity(fileSystem);
+
+        optimized.SelectDriver(
+            root.Path,
+            include,
+            excludes).Driver.ShouldBe(
+                FileMatcherDriver.OptimizedCallback);
+
+        using IDisposable scope = EvaluationInputObserver.Enter(observer);
+        string[] files = optimized.GetFiles(
+            root.Path,
+            include,
+            excludes).FileList;
+
+        files.ShouldBe([Path.Combine("src", "nested", "nested.cs")]);
+        fileSystem.EnumerationCalls.ShouldNotBeEmpty();
+        observer.ShouldContainDirectory(root.Path, exists: true, provider: provider);
+        observer.ShouldContainDirectory(source, exists: true);
+        observer.ShouldContainDirectory(nested, exists: true);
+        observer.ShouldNotContainDirectory(excluded);
+        foreach ((string Operation, string Path, string Pattern) call in
+            fileSystem.EnumerationCalls)
+        {
+            observer.ShouldContainDirectory(call.Path, exists: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ObservedOptimizedDriverRecordsMissingRoot(bool useEntryCache)
+    {
+        TransientTestFolder root = _environment.CreateFolder();
+        string missing = Path.Combine(root.Path, "Missing");
+        FileMatcher optimized = new(
+            FileSystems.Default,
+            useEntryCache
+                ? new ConcurrentDictionary<string, IReadOnlyList<string>>()
+                : null,
+            FileMatcherImplementation.Optimized);
+        var observer = new RecordingEvaluationInputObserver();
+        string include = ToPlatformPath("Missing/**/*.cs");
+        List<string>? excludes = useEntryCache
+            ? [ToPlatformPath("**/obj/**")]
+            : null;
+
+        optimized.SelectDriver(
+            root.Path,
+            include,
+            excludes).Driver.ShouldBe(
+                useEntryCache
+                    ? FileMatcherDriver.OptimizedCallback
+                    : FileMatcherDriver.OptimizedDirect);
+
+        using IDisposable scope = EvaluationInputObserver.Enter(observer);
+        string[] files = optimized.GetFiles(
+            root.Path,
+            include,
+            excludes).FileList;
+
+        files.ShouldBeEmpty();
+        observer.ShouldContainDirectory(missing, exists: false);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LegacyAndOptimizedRecordEquivalentTraversal(bool useEntryCache)
+    {
+        TransientTestFolder root = _environment.CreateFolder();
+        string source = Path.Combine(root.Path, "src");
+        string nested = Path.Combine(source, "nested");
+        string excluded = Path.Combine(root.Path, "obj");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(excluded);
+        File.WriteAllText(Path.Combine(nested, "nested.cs"), string.Empty);
+        File.WriteAllText(Path.Combine(excluded, "excluded.cs"), string.Empty);
+        string include = ToPlatformPath("**/*.cs");
+        List<string> excludes = [ToPlatformPath("**/obj/**")];
+        FileMatcher legacy = new(
+            FileSystems.Default,
+            useEntryCache
+                ? new ConcurrentDictionary<string, IReadOnlyList<string>>()
+                : null,
+            implementation: FileMatcherImplementation.Legacy);
+        FileMatcher optimized = new(
+            FileSystems.Default,
+            useEntryCache
+                ? new ConcurrentDictionary<string, IReadOnlyList<string>>()
+                : null,
+            implementation: FileMatcherImplementation.Optimized);
+        var legacyObserver = new RecordingEvaluationInputObserver();
+        var optimizedObserver = new RecordingEvaluationInputObserver();
+
+        optimized.SelectDriver(
+            root.Path,
+            include,
+            excludes).Driver.ShouldBe(
+                useEntryCache
+                    ? FileMatcherDriver.OptimizedCallback
+                    : FileMatcherDriver.OptimizedDirect);
+
+        using (EvaluationInputObserver.Enter(legacyObserver))
+        {
+            legacy.GetFiles(root.Path, include, excludes);
+        }
+
+        using (EvaluationInputObserver.Enter(optimizedObserver))
+        {
+            optimized.GetFiles(root.Path, include, excludes);
+        }
+
+        optimizedObserver.ShouldMatch(legacyObserver);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -2257,7 +2490,7 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         .Replace('\\', Path.DirectorySeparatorChar)
         .Replace('/', Path.DirectorySeparatorChar);
 
-    private class RecordingFileSystem : IFileSystem
+    private class RecordingFileSystem : IFileSystem, IFileSystemProviderIdentity
     {
         private readonly IFileSystem _inner;
 
@@ -2267,6 +2500,9 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
 
         internal List<(string Operation, string Path, string Pattern)> EnumerationCalls { get; } = [];
+
+        string IFileSystemProviderIdentity.ProviderIdentity =>
+            FileSystems.GetProviderIdentity(_inner);
 
         public TextReader ReadFile(string path) => _inner.ReadFile(path);
         public Stream GetFileStream(string path, FileMode mode, FileAccess access, FileShare share) =>
@@ -2402,5 +2638,113 @@ public sealed class FileMatcherOptimized_Tests : IDisposable
         }
 
         public bool SupportsDirectEnumeration => true;
+    }
+
+    private class NoOpEvaluationInputObserver : IEvaluationInputObserver
+    {
+        public bool RetainDetails => false;
+
+        public void RecordPathProbe(string path, EvaluationPathProbeKind kind, bool exists)
+        {
+        }
+
+        public void RecordAmbiguousPathProbe(string path, EvaluationPathProbeKind kind)
+        {
+        }
+
+        public void RecordItemMetadata(string itemSpec, string modifier, string baseDirectory, string value)
+        {
+        }
+
+        public void RecordPathAdjustment(string value, string baseDirectory, string result)
+        {
+        }
+
+        public void RecordPathResolution(
+            string operation,
+            string firstInput,
+            string secondInput,
+            string firstResult,
+            string secondResult)
+        {
+        }
+
+        public virtual void RecordGlobDirectory(
+            string path,
+            bool exists,
+            string? globIdentity,
+            string provider)
+        {
+        }
+
+        public void RecordSearch(
+            string kind,
+            string request,
+            IReadOnlyList<string> candidates,
+            int candidateCount,
+            string candidatesFingerprint,
+            string selected,
+            string provider)
+        {
+        }
+    }
+
+    private sealed class RecordingEvaluationInputObserver :
+        NoOpEvaluationInputObserver
+    {
+        private readonly ConcurrentDictionary<string, (bool Exists, string Provider)> _directories =
+            new(FileUtilities.PathComparer);
+
+        internal int Count => _directories.Count;
+
+        public override void RecordGlobDirectory(
+            string path,
+            bool exists,
+            string? globIdentity,
+            string provider)
+        {
+            _directories.AddOrUpdate(
+                path,
+                (exists, provider),
+                (_, prior) =>
+                {
+                    prior.Exists.ShouldBe(exists);
+                    prior.Provider.ShouldBe(provider);
+                    return prior;
+                });
+        }
+
+        internal void ShouldContainDirectory(
+            string path,
+            bool exists,
+            string? provider = null)
+        {
+            _directories.TryGetValue(
+                path,
+                out (bool Exists, string Provider) observed).ShouldBeTrue();
+            observed.Exists.ShouldBe(exists);
+            if (provider is not null)
+            {
+                observed.Provider.ShouldBe(provider);
+            }
+        }
+
+        internal void ShouldNotContainDirectory(string path)
+        {
+            _directories.ContainsKey(path).ShouldBeFalse();
+        }
+
+        internal void ShouldMatch(RecordingEvaluationInputObserver expected)
+        {
+            _directories.Count.ShouldBe(expected._directories.Count);
+            foreach (KeyValuePair<string, (bool Exists, string Provider)> directory in
+                expected._directories)
+            {
+                ShouldContainDirectory(
+                    directory.Key,
+                    directory.Value.Exists,
+                    directory.Value.Provider);
+            }
+        }
     }
 }

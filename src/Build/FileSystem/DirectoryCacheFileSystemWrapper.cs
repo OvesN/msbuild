@@ -14,7 +14,9 @@ using Path = Microsoft.IO.Path;
 
 namespace Microsoft.Build.FileSystem
 {
-    internal class DirectoryCacheFileSystemWrapper : IFileSystem
+    internal class DirectoryCacheFileSystemWrapper :
+        IFileSystem,
+        IFileSystemProviderIdentity
     {
         /// <summary>
         /// The base <see cref="IFileSystem"/> to fall back to for functionality not provided by <see cref="_directoryCache"/>.
@@ -31,6 +33,9 @@ namespace Microsoft.Build.FileSystem
             _fileSystem = fileSystem;
             _directoryCache = directoryCache;
         }
+
+        string IFileSystemProviderIdentity.ProviderIdentity =>
+            FileSystems.GetProviderIdentity(_fileSystem);
 
         #region IFileSystem implementation based on IDirectoryCache
 

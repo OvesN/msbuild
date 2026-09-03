@@ -936,6 +936,9 @@ namespace Microsoft.Build.Shared
         /// <param name="searchesToExclude">Patterns to exclude from the results</param>
         /// <param name="searchesToExcludeInSubdirs">exclude patterns that might activate farther down the directory tree. Keys assume paths are normalized with forward slashes and no trailing slashes</param>
         /// <param name="taskOptions">Options for tuning the parallelization of subdirectories</param>
+        /// <param name="evaluationInputObserver">Observer active when recursive enumeration started.</param>
+        /// <param name="globIdentity">The complete cache identity of the observed glob.</param>
+        /// <param name="provider">The filesystem provider used for enumeration.</param>
         private void GetFilesRecursive(
             ConcurrentStack<List<string>> listOfFiles,
             RecursionState recursionState,
@@ -943,7 +946,10 @@ namespace Microsoft.Build.Shared
             bool stripProjectDirectory,
             IList<RecursionState> searchesToExclude,
             Dictionary<string, List<RecursionState>> searchesToExcludeInSubdirs,
-            TaskOptions taskOptions)
+            TaskOptions taskOptions,
+            IEvaluationInputObserver evaluationInputObserver,
+            string globIdentity,
+            string provider)
         {
 #if FEATURE_SYMLINK_TARGET
             // This is a pretty quick, simple check, but it misses some cases:
@@ -959,6 +965,11 @@ namespace Microsoft.Build.Shared
                 FileSystemInfo linkTarget = Directory.ResolveLinkTarget(recursionState.BaseDirectory, returnFinalTarget: true);
                 if (linkTarget is not null && IsSubdirectoryOf(recursionState.BaseDirectory, linkTarget.FullName, FileUtilities.PathComparison))
                 {
+                    evaluationInputObserver?.RecordGlobDirectory(
+                        recursionState.BaseDirectory,
+                        exists: true,
+                        globIdentity: globIdentity,
+                        provider: provider);
                     return;
                 }
             }
@@ -1010,6 +1021,12 @@ namespace Microsoft.Build.Shared
                     }
                 }
             }
+
+            evaluationInputObserver?.RecordGlobDirectory(
+                recursionState.BaseDirectory,
+                true,
+                globIdentity,
+                provider);
 
             RecursiveStepResult nextStep = GetFilesRecursiveStep(recursionState);
 
@@ -1105,7 +1122,10 @@ namespace Microsoft.Build.Shared
                     stripProjectDirectory,
                     newSearchesToExclude,
                     searchesToExcludeInSubdirs,
-                    taskOptions);
+                    taskOptions,
+                    evaluationInputObserver,
+                    globIdentity,
+                    provider);
             };
 
             // Calcuate the MaxDegreeOfParallelism value in order to prevent too much tasks being running concurrently.
@@ -2072,6 +2092,7 @@ namespace Microsoft.Build.Shared
                 return (CreateArrayWithSingleItemIfNotExcluded(filespecUnescaped, excludeSpecsUnescaped), SearchAction.None, string.Empty, null);
             }
 
+            IEvaluationInputObserver evaluationInputObserver = EvaluationInputObserver.Current;
             DriverSelection selection = SelectDriver(
                 projectDirectoryUnescaped,
                 filespecUnescaped,
@@ -2084,13 +2105,25 @@ namespace Microsoft.Build.Shared
                     category: nameof(FileMatcher));
             }
 
+            string? observationKey = evaluationInputObserver is null
+                ? null
+                : ComputeFileEnumerationCacheKey(
+                    projectDirectoryUnescaped,
+                    filespecUnescaped,
+                    excludeSpecsUnescaped);
+            string? observationProvider = evaluationInputObserver is null
+                ? null
+                : FileSystems.GetProviderIdentity(_fileSystem);
             if (_cachedGlobExpansions == null)
             {
                 return GetFilesForImplementation(
                     projectDirectoryUnescaped,
                     filespecUnescaped,
                     excludeSpecsUnescaped,
-                    selection);
+                    selection,
+                    evaluationInputObserver,
+                    observationKey,
+                    observationProvider);
             }
 
             var enumerationKey = ComputeFileEnumerationCacheKey(
@@ -2121,7 +2154,10 @@ namespace Microsoft.Build.Shared
                                         projectDirectoryUnescaped,
                                         filespecUnescaped,
                                         excludeSpecsUnescaped,
-                                        selection);
+                                        selection,
+                                        evaluationInputObserver,
+                                        observationKey,
+                                        observationProvider);
 
                                     return fileList;
                                 });
@@ -2196,6 +2232,56 @@ namespace Microsoft.Build.Shared
             }
         }
 
+        internal static string ComputeFileEnumerationCacheKey(
+            string projectDirectoryUnescaped,
+            string filespecUnescaped,
+            IReadOnlyList<string> excludes)
+        {
+            Debug.Assert(filespecUnescaped != null);
+
+            int excludeSize = 0;
+            if (excludes != null)
+            {
+                foreach (string exclude in excludes)
+                {
+                    excludeSize += exclude.Length;
+                }
+            }
+
+            using (var builder = new ReuseableStringBuilder(
+                (projectDirectoryUnescaped?.Length ?? 0) + filespecUnescaped.Length + excludeSize))
+            {
+                AppendField("p", projectDirectoryUnescaped);
+                AppendField("i", filespecUnescaped);
+
+                if (excludes != null)
+                {
+                    foreach (string exclude in excludes)
+                    {
+                        AppendField("e", exclude);
+                    }
+                }
+
+                return builder.ToString();
+
+                void AppendField(string name, string value)
+                {
+                    builder.Append(name);
+                    builder.Append(':');
+                    if (value is null)
+                    {
+                        builder.Append("-1:;");
+                        return;
+                    }
+
+                    builder.Append(value.Length.ToString(CultureInfo.InvariantCulture));
+                    builder.Append(':');
+                    builder.Append(value);
+                    builder.Append(';');
+                }
+            }
+        }
+
         public enum SearchAction
         {
             None,
@@ -2209,6 +2295,27 @@ namespace Microsoft.Build.Shared
         private SearchAction GetFileSearchData(
             string projectDirectoryUnescaped,
             string filespecUnescaped,
+            out bool stripProjectDirectory,
+            out RecursionState result,
+            bool createRegexFileMatch = true)
+        {
+            return GetFileSearchData(
+                projectDirectoryUnescaped,
+                filespecUnescaped,
+                evaluationInputObserver: null,
+                globIdentity: null,
+                provider: null,
+                out stripProjectDirectory,
+                out result,
+                createRegexFileMatch);
+        }
+
+        private SearchAction GetFileSearchData(
+            string projectDirectoryUnescaped,
+            string filespecUnescaped,
+            IEvaluationInputObserver evaluationInputObserver,
+            string globIdentity,
+            string provider,
             out bool stripProjectDirectory,
             out RecursionState result,
             bool createRegexFileMatch = true)
@@ -2257,15 +2364,24 @@ namespace Microsoft.Build.Shared
                 }
             }
 
-            /*
-             * If the fixed directory part doesn't exist, then this means no files should be
-             * returned.
-             */
-            if (fixedDirectoryPart.Length > 0 && !_fileSystem.DirectoryExists(fixedDirectoryPart))
+            bool fixedDirectoryExists =
+                fixedDirectoryPart.Length == 0 ||
+                _fileSystem.DirectoryExists(fixedDirectoryPart);
+            if (!fixedDirectoryExists)
             {
+                if (evaluationInputObserver is not null)
+                {
+                    evaluationInputObserver.RecordGlobDirectory(
+                        Normalize(fixedDirectoryPart),
+                        false,
+                        globIdentity,
+                        provider);
+                }
+
                 return SearchAction.ReturnEmptyList;
             }
 
+            string normalizedFixedDirectoryPart = Normalize(fixedDirectoryPart);
             /*
              * If a drive enumerating wildcard pattern is detected with the fixed directory and wildcard parts, then
              * this should either be logged or an exception should be thrown.
@@ -2326,7 +2442,7 @@ namespace Microsoft.Build.Shared
                 needsRecursion);
 
             result.SearchData = searchData;
-            result.BaseDirectory = Normalize(fixedDirectoryPart);
+            result.BaseDirectory = normalizedFixedDirectoryPart;
             result.RemainingWildcardDirectory = Normalize(wildcardDirectoryPart);
 
             if (logDriveEnumeratingWildcard)
@@ -2528,20 +2644,29 @@ namespace Microsoft.Build.Shared
             string? projectDirectoryUnescaped,
             string filespecUnescaped,
             List<string>? excludeSpecsUnescaped,
-            DriverSelection selection)
+            DriverSelection selection,
+            IEvaluationInputObserver? evaluationInputObserver,
+            string? globIdentity,
+            string? provider)
         {
             return selection.Driver switch
             {
                 FileMatcherDriver.Legacy => GetFilesImplementation(
                     projectDirectoryUnescaped,
                     filespecUnescaped,
-                    excludeSpecsUnescaped),
+                    excludeSpecsUnescaped,
+                    evaluationInputObserver,
+                    globIdentity,
+                    provider),
                 FileMatcherDriver.OptimizedCallback or FileMatcherDriver.OptimizedDirect =>
                     GetFilesOptimizedImplementation(
                     projectDirectoryUnescaped,
                     filespecUnescaped,
                     excludeSpecsUnescaped,
-                    selection.Driver),
+                    selection.Driver,
+                    evaluationInputObserver,
+                    globIdentity,
+                    provider),
                 _ => throw new NotSupportedException(selection.Driver.ToString()),
             };
         }
@@ -3001,11 +3126,17 @@ namespace Microsoft.Build.Shared
             string? projectDirectoryUnescaped,
             string filespecUnescaped,
             List<string>? excludeSpecsUnescaped,
-            FileMatcherDriver driver)
+            FileMatcherDriver driver,
+            IEvaluationInputObserver? evaluationInputObserver,
+            string? globIdentity,
+            string? provider)
         {
             SearchAction action = GetFileSearchData(
                 projectDirectoryUnescaped,
                 filespecUnescaped,
+                evaluationInputObserver,
+                globIdentity,
+                provider,
                 out bool stripProjectDirectory,
                 out RecursionState state,
                 createRegexFileMatch: false);
@@ -3027,7 +3158,13 @@ namespace Microsoft.Build.Shared
 
             if (action == SearchAction.LogDriveEnumeratingWildcard)
             {
-                return GetFilesImplementation(projectDirectoryUnescaped, filespecUnescaped, excludeSpecsUnescaped);
+                return GetFilesImplementation(
+                    projectDirectoryUnescaped,
+                    filespecUnescaped,
+                    excludeSpecsUnescaped,
+                    evaluationInputObserver,
+                    globIdentity,
+                    provider);
             }
 
             if (action != SearchAction.RunSearch)
@@ -3081,7 +3218,13 @@ namespace Microsoft.Build.Shared
                     }
                     else if (excludeAction == SearchAction.LogDriveEnumeratingWildcard)
                     {
-                        return GetFilesImplementation(projectDirectoryUnescaped, filespecUnescaped, excludeSpecsUnescaped);
+                        return GetFilesImplementation(
+                            projectDirectoryUnescaped,
+                            filespecUnescaped,
+                            excludeSpecsUnescaped,
+                            evaluationInputObserver,
+                            globIdentity,
+                            provider);
                     }
                     else if (excludeAction == SearchAction.RunSearch)
                     {
@@ -3107,18 +3250,31 @@ namespace Microsoft.Build.Shared
             {
                 if (ShouldSkipRecursiveDirectory(state.BaseDirectory))
                 {
+                    evaluationInputObserver?.RecordGlobDirectory(
+                        state.BaseDirectory,
+                        exists: true,
+                        globIdentity: globIdentity,
+                        provider: provider);
                     return ([], trackedAction, trackedExcludeFileSpec, null);
                 }
 
 #if NET || FEATURE_MSIOREDIST
                 if (useDirectEnumeration)
                 {
+                    evaluationInputObserver?.RecordGlobDirectory(
+                        state.BaseDirectory,
+                        exists: true,
+                        globIdentity: globIdentity,
+                        provider: provider);
                     using OptimizedFileSystemEnumerator enumerator = new(
                         state.BaseDirectory,
                         projectDirectoryUnescaped,
                         stripProjectDirectory,
                         includeMatcher,
-                        excludesToMatch);
+                        excludesToMatch,
+                        evaluationInputObserver,
+                        globIdentity,
+                        provider);
 
                     while (enumerator.MoveNext())
                     {
@@ -3154,8 +3310,19 @@ namespace Microsoft.Build.Shared
             {
                 if (ShouldSkipRecursiveDirectory(directory))
                 {
+                    evaluationInputObserver?.RecordGlobDirectory(
+                        directory,
+                        exists: true,
+                        globIdentity: globIdentity,
+                        provider: provider);
                     return;
                 }
+
+                evaluationInputObserver?.RecordGlobDirectory(
+                    directory,
+                    exists: true,
+                    globIdentity: globIdentity,
+                    provider: provider);
 
                 if (includeMatcher.MatchesFilesInDirectory(relativeDirectory))
                 {
@@ -3470,6 +3637,9 @@ namespace Microsoft.Build.Shared
             private readonly MSBuildPathMatcher _includeMatcher;
             private readonly OptimizedFileSearch[] _excludes;
             private readonly byte[] _activeFileExcludes;
+            private readonly IEvaluationInputObserver? _evaluationInputObserver;
+            private readonly string? _globIdentity;
+            private readonly string? _provider;
             private bool _fileStateValid;
             private bool _includeFilesInCurrentDirectory;
 
@@ -3478,12 +3648,18 @@ namespace Microsoft.Build.Shared
                 string? projectDirectory,
                 bool stripProjectDirectory,
                 MSBuildPathMatcher includeMatcher,
-                List<OptimizedFileSearch>? excludes)
+                List<OptimizedFileSearch>? excludes,
+                IEvaluationInputObserver? evaluationInputObserver,
+                string? globIdentity,
+                string? provider)
                 : base(GetFullPath(directory), CreateEnumerationOptions())
             {
                 _enumerationRoot = GetFullPath(directory);
                 _outputRoot = GetOutputRoot(directory, projectDirectory, stripProjectDirectory);
                 _includeMatcher = includeMatcher;
+                _evaluationInputObserver = evaluationInputObserver;
+                _globIdentity = globIdentity;
+                _provider = provider;
 
                 if (excludes is null)
                 {
@@ -3538,6 +3714,11 @@ namespace Microsoft.Build.Shared
 
                 if (ShouldSkipRecursiveDirectory(directory))
                 {
+                    _evaluationInputObserver?.RecordGlobDirectory(
+                        directory,
+                        exists: true,
+                        globIdentity: _globIdentity,
+                        provider: _provider);
                     return false;
                 }
 
@@ -3560,6 +3741,11 @@ namespace Microsoft.Build.Shared
                     }
                 }
 
+                _evaluationInputObserver?.RecordGlobDirectory(
+                    directory,
+                    exists: true,
+                    globIdentity: _globIdentity,
+                    provider: _provider);
                 return true;
             }
 
@@ -3742,18 +3928,29 @@ namespace Microsoft.Build.Shared
         /// <param name="projectDirectoryUnescaped">The project directory.</param>
         /// <param name="filespecUnescaped">Get files that match the given file spec.</param>
         /// <param name="excludeSpecsUnescaped">Exclude files that match this file spec.</param>
+        /// <param name="evaluationInputObserver">Observer active when glob expansion started.</param>
+        /// <param name="globIdentity">The complete cache identity of the observed glob.</param>
+        /// <param name="provider">The filesystem provider used for enumeration.</param>
         /// <returns>The search action, array of files, Exclude file spec (if applicable), and glob failure message (if applicable).</returns>
         private (string[] FileList, SearchAction Action, string ExcludeFileSpec, string? globFailureEvent) GetFilesImplementation(
             string? projectDirectoryUnescaped,
             string filespecUnescaped,
-            List<string>? excludeSpecsUnescaped)
+            List<string>? excludeSpecsUnescaped,
+            IEvaluationInputObserver? evaluationInputObserver,
+            string? globIdentity,
+            string? provider)
         {
             // UNDONE (perf): Short circuit the complex processing when we only have a path and a wildcarded filename
 
             /*
              * Analyze the file spec and get the information we need to do the matching.
              */
-            var action = GetFileSearchData(projectDirectoryUnescaped, filespecUnescaped,
+            var action = GetFileSearchData(
+                projectDirectoryUnescaped,
+                filespecUnescaped,
+                evaluationInputObserver,
+                globIdentity,
+                provider,
                 out bool stripProjectDirectory, out RecursionState state);
 
             if (action == SearchAction.ReturnEmptyList)
@@ -3791,7 +3988,12 @@ namespace Microsoft.Build.Shared
                 foreach (string excludeSpec in excludeSpecsUnescaped)
                 {
                     // This is ignored, we always use the include pattern's value for stripProjectDirectory
-                    var excludeAction = GetFileSearchData(projectDirectoryUnescaped, excludeSpec,
+                    var excludeAction = GetFileSearchData(
+                        projectDirectoryUnescaped,
+                        excludeSpec,
+                        evaluationInputObserver: null,
+                        globIdentity: null,
+                        provider: null,
                         out _, out RecursionState excludeState);
 
                     if (excludeAction == SearchAction.ReturnFileSpec)
@@ -3967,7 +4169,10 @@ namespace Microsoft.Build.Shared
                     stripProjectDirectory,
                     searchesToExclude,
                     searchesToExcludeInSubdirs,
-                    taskOptions);
+                    taskOptions,
+                    evaluationInputObserver,
+                    globIdentity,
+                    provider);
             }
             catch (Exception ex) when (IsIoRelatedExceptionOrAggregate(ex))
             {
