@@ -40,7 +40,10 @@ internal static class EvaluationObservationDetoursRunner
                 "--target-arguments",
                 Encode(arguments),
                 "--comparison-roots",
-                Encode(string.Join("\n", comparisonRoots)),
+                Encode(
+                    comparisonRoots.Count == 0
+                        ? EvaluationObservationDetoursHost.AllFilesystemPathsToken
+                        : string.Join("\n", comparisonRoots)),
                 "--measurement-root",
                 Encode(measurementRoot),
                 "--include-native-only-paths",

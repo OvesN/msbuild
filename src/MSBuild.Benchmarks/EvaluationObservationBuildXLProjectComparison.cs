@@ -19,11 +19,7 @@ internal static class EvaluationObservationBuildXLProjectComparison
         }
 
         string projectPath = Path.GetFullPath(TakeValue(args, "--project"));
-        List<string> comparisonRoots = TakeValues(args, "--root");
-        for (int i = 0; i < comparisonRoots.Count; i++)
-        {
-            comparisonRoots[i] = Path.GetFullPath(comparisonRoots[i]);
-        }
+        List<string> ignoredComparisonRoots = TakeValues(args, "--root");
 
         int iterations = int.Parse(
             TryTakeValue(args, "--iterations") ?? "1",
@@ -43,20 +39,6 @@ internal static class EvaluationObservationBuildXLProjectComparison
             throw new FileNotFoundException("The comparison project was not found.", projectPath);
         }
 
-        if (comparisonRoots.Count == 0)
-        {
-            throw new ArgumentException("At least one '--root' argument is required.");
-        }
-
-        foreach (string comparisonRoot in comparisonRoots)
-        {
-            if (!Directory.Exists(comparisonRoot))
-            {
-                throw new DirectoryNotFoundException(
-                    $"The comparison root '{comparisonRoot}' was not found.");
-            }
-        }
-
         if (iterations <= 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -65,9 +47,11 @@ internal static class EvaluationObservationBuildXLProjectComparison
                 "The iteration count must be positive.");
         }
 
-        foreach (string comparisonRoot in comparisonRoots)
+        Console.WriteLine("EVALUATION_OBSERVATION_COMPARISON_SCOPE|AllFilesystemPaths");
+        foreach (string ignoredComparisonRoot in ignoredComparisonRoots)
         {
-            Console.WriteLine($"EVALUATION_OBSERVATION_COMPARISON_ROOT|{comparisonRoot}");
+            Console.WriteLine(
+                $"EVALUATION_OBSERVATION_IGNORED_COMPARISON_ROOT|{ignoredComparisonRoot}");
         }
 
         EvaluationObservationBenchmarkResult result =
@@ -75,7 +59,7 @@ internal static class EvaluationObservationBuildXLProjectComparison
                 EvaluationObservationBenchmarkMode.NativeAndDetours,
                 EvaluationObservationBenchmarkScenario.ExternalProject,
                 projectPath,
-                comparisonRoots,
+                [],
                 iterations,
                 globalProperties,
                 Path.GetDirectoryName(projectPath)!,

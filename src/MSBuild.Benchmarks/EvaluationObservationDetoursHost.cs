@@ -16,6 +16,7 @@ namespace MSBuild.Benchmarks;
 internal static class EvaluationObservationDetoursHost
 {
     internal const string HostSwitch = "--evaluation-observation-detours-host";
+    internal const string AllFilesystemPathsToken = "<all-filesystem-paths>";
     internal const string DetoursOnlyPathPrefix = "EVALUATION_OBSERVATION_DETOURS_ONLY_PATH|";
     internal const string NativeOnlyPathPrefix = "EVALUATION_OBSERVATION_NATIVE_ONLY_PATH|";
 
@@ -29,8 +30,11 @@ internal static class EvaluationObservationDetoursHost
 
         string targetExecutable = Decode(TakeValue(args, "--target-executable"));
         string targetArguments = Decode(TakeValue(args, "--target-arguments"));
-        string[] comparisonRoots = Decode(TakeValue(args, "--comparison-roots"))
-            .Split(['\n'], StringSplitOptions.RemoveEmptyEntries);
+        string comparisonRootValue = Decode(TakeValue(args, "--comparison-roots"));
+        string[] comparisonRoots =
+            comparisonRootValue == AllFilesystemPathsToken
+                ? []
+                : comparisonRootValue.Split(['\n'], StringSplitOptions.RemoveEmptyEntries);
         string measurementRoot = Decode(TakeValue(args, "--measurement-root"));
         bool includeNativeOnlyPaths = bool.Parse(
             TakeValue(args, "--include-native-only-paths"));
@@ -432,6 +436,11 @@ internal static class EvaluationObservationDetoursHost
 
         private bool IsUnderComparisonRoot(string fullPath)
         {
+            if (_comparisonRoots.Length == 0)
+            {
+                return true;
+            }
+
             for (int i = 0; i < _comparisonRoots.Length; i++)
             {
                 if (string.Equals(
