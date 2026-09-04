@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 #endif
 using Microsoft.Build.Collections;
+using Microsoft.Build.Evaluation.Context;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
@@ -680,6 +681,8 @@ internal partial class Expander<P, I>
                 return string.Empty;
             }
 #endif
+
+            _propertiesUseTracker.InputRecorder?.MarkNonCacheable(NonCacheableReason.RegistryRead, registryExpression);
 
             // Remove "Registry:" prefix
             string registryLocation = registryExpression.Substring(RegistryPrefix.Length);
