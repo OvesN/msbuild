@@ -103,6 +103,29 @@ dotnet run -c Release -f net11.0 -- --filter "*ItemSpecModifiersBenchmark*"
 ```
 dotnet run -c Release -f net11.0 -- --filter "*ItemSpecModifiersBenchmark.IncludeOnly"
 ```
+
+## Evaluation Input Recording
+
+`EvaluationInputRecordingBenchmark` measures what recording evaluation inputs
+(`MSBUILDRECORDEVALUATIONINPUTS=1`) adds to an evaluation, in an isolated and in a shared evaluation
+context, and what validating the recorded inputs costs: unchanged, with every SDK reference resolved
+again, and after a project file, an import, or a glob directory changed. It runs on a synthetic project
+and on any restored projects listed in `MSBUILD_EVALUATION_INPUTS_BENCHMARK_PROJECTS` (path-separator
+delimited). SDK-style projects also need `MSBUILD_EXE_PATH`, `MSBuildSDKsPath`, and
+`DOTNET_MSBUILD_SDK_RESOLVER_CLI_DIR` pointing at the bootstrap SDK, passed to the benchmark process
+with `--envVars` as the class remarks describe. A project that is not cacheable fails setup with the
+reason.
+
+To compare the recorded inputs with every path the process touched, build with
+`-p:EnableEvaluationInputDetours=true` on Windows x64 and run the comparison instead of a benchmark.
+It prints a summary line, then every touched path the recording does not explain: `DETOURS_ONLY|` for
+probes and enumerations, `DETOURS_ONLY_READ|` for content reads, and `RECORDED_ONLY|` for recorded
+paths the sandbox never saw.
+
+```
+dotnet run -c Release -f net11.0 -p:EnableEvaluationInputDetours=true -- --evaluation-input-detours --project <path> [--global-property Name=Value]
+```
+
 ## Command-Line Options
 
 ### Custom Options
