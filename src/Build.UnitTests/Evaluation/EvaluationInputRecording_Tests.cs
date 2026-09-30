@@ -17,6 +17,7 @@ using Microsoft.Build.Execution;
 using Microsoft.Build.FileSystem;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Shared.FileSystem;
 using Microsoft.Build.Unittest;
 using Microsoft.Win32;
 using Shouldly;
@@ -94,6 +95,44 @@ public sealed class EvaluationInputRecording_Tests : IDisposable
         rootDependency.LastWriteTimeUtc.ShouldBe(File.GetLastWriteTimeUtc(project));
         rootDependency.Length.ShouldBe(new FileInfo(project).Length);
         GC.KeepAlive(cachedRoot);
+    }
+
+    [Theory]
+    [InlineData(nameof(EvaluationCacheMode.Record), true, false)]
+    [InlineData(nameof(EvaluationCacheMode.Record), true, true)]
+    [InlineData(nameof(EvaluationCacheMode.SnapshotUnsafe), false, false)]
+    [InlineData(nameof(EvaluationCacheMode.SnapshotUnsafe), false, true)]
+    [InlineData(nameof(EvaluationCacheMode.SnapshotFileSystem), false, false)]
+    [InlineData(nameof(EvaluationCacheMode.SnapshotFileSystem), false, true)]
+    [InlineData(nameof(EvaluationCacheMode.Disabled), false, false)]
+    [InlineData(nameof(EvaluationCacheMode.Disabled), false, true)]
+    public void RestoreRecordingRespectsModeAcrossEvaluationApis(string modeName, bool recordsInputs, bool useProject)
+    {
+        _env.SetEnvironmentVariable(EvaluationCacheConfiguration.ModeEnvironmentVariable, modeName);
+        Traits.UpdateFromEnvironment();
+        string path = CreateProject("<Project />");
+        ProjectCollection collection = _env.CreateProjectCollection().Collection;
+        var globals = new Dictionary<string, string>
+        {
+            [MSBuildConstants.MSBuildRestoreSessionId] = "restore-session",
+        };
+
+        EvaluationInputs? inputs = useProject
+            ? new Project(path, globals, null, collection).EvaluationInputs
+            : ProjectInstance.FromFile(path, new ProjectOptions
+            {
+                ProjectCollection = collection,
+                GlobalProperties = globals,
+            }).EvaluationInputs;
+
+        if (recordsInputs)
+        {
+            inputs.ShouldNotBeNull().Key.GlobalProperties.ShouldContain("MSBUILDRESTORESESSIONID=restore-session\0");
+        }
+        else
+        {
+            inputs.ShouldBeNull();
+        }
     }
 
     [Fact]
@@ -288,6 +327,561 @@ public sealed class EvaluationInputRecording_Tests : IDisposable
         reason.ShouldBe(_folder.Path);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExistenceProbeIgnoresMetadataChangesButStillRequiresThePath(bool directory)
+    {
+        string candidate = Path.Combine(_folder.Path, "candidate");
+        if (directory)
+        {
+            Directory.CreateDirectory(candidate);
+        }
+        else
+        {
+            File.WriteAllText(candidate, "before");
+        }
+
+        string project = CreateProject("""
+            <Project>
+              <PropertyGroup>
+                <Present Condition="Exists('candidate')">true</Present>
+              </PropertyGroup>
+            </Project>
+            """);
+        EvaluationInputs inputs = Evaluate(project);
+        inputs.Files[candidate].RequiresMetadata.ShouldBeFalse();
+
+        if (directory)
+        {
+            AddFile(candidate, "output.txt");
+        }
+        else
+        {
+            Touch(candidate, "a different file length");
+        }
+
+        IsCurrent(inputs, out string? reason).ShouldBeTrue(reason);
+        ProjectInstance.FromFile(project, CreateOptions()).GetPropertyValue("Present").ShouldBe("true");
+
+        if (directory)
+        {
+            Directory.Delete(candidate, recursive: true);
+        }
+        else
+        {
+            File.Delete(candidate);
+        }
+
+        IsCurrent(inputs, out reason).ShouldBeFalse();
+        reason.ShouldBe(candidate);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void MetadataObservationIsNeverDowngradedToAProbe(bool directory, bool metadataFirst)
+    {
+        string candidate = Path.Combine(_folder.Path, "candidate");
+        if (directory)
+        {
+            Directory.CreateDirectory(candidate);
+        }
+        else
+        {
+            File.WriteAllText(candidate, "before");
+        }
+
+        var recorder = new EvaluationInputRecorder();
+        if (metadataFirst)
+        {
+            recorder.RecordPath(candidate);
+        }
+        recorder.RecordProbe(candidate, directory ? ProbeKind.Directory : ProbeKind.File, exists: true);
+        recorder.RecordPath(candidate);
+        recorder.RecordProbe(candidate, ProbeKind.FileOrDirectory, exists: true);
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+        inputs.Files[candidate].RequiresMetadata.ShouldBeTrue();
+        IsCurrent(inputs, out _).ShouldBeTrue();
+
+        if (directory)
+        {
+            AddFile(candidate, "new.txt");
+        }
+        else
+        {
+            Touch(candidate, "longer content");
+        }
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(candidate);
+    }
+
+    [Fact]
+    public void MetadataPromotionPreservesTheFirstObservation()
+    {
+        string file = _env.CreateFile(_folder, "input.txt", "first").Path;
+        var recorder = new EvaluationInputRecorder();
+        recorder.RecordProbe(file, ProbeKind.File, exists: true);
+        Touch(file, "changed after the probe");
+        recorder.RecordPath(file);
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+
+        inputs.Files[file].RequiresMetadata.ShouldBeTrue();
+        inputs.Files[file].Length.ShouldBe(5);
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(file);
+    }
+
+    [Fact]
+    public void DirectoryPropertyFunctionReadPromotesAnExistenceProbe()
+    {
+        string directory = Path.Combine(_folder.Path, "generated");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "before.txt"), string.Empty);
+        string project = CreateProject("""
+            <Project>
+              <PropertyGroup>
+                <Exists>$([System.IO.Directory]::Exists('$(MSBuildProjectDirectory)/generated'))</Exists>
+                <Read>$([System.IO.Directory]::GetFiles('$(MSBuildProjectDirectory)/generated'))</Read>
+              </PropertyGroup>
+            </Project>
+            """);
+        EvaluationInputs inputs = Evaluate(project);
+        inputs.IsCacheable.ShouldBeTrue(inputs.NonCacheableDetail);
+        inputs.Files[directory].RequiresMetadata.ShouldBeTrue();
+        IsCurrent(inputs, out _).ShouldBeTrue();
+
+        AddFile(directory, "after.txt");
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(directory);
+    }
+
+    [Theory]
+    [InlineData("GetLastWriteTimeUtc")]
+    [InlineData("EnumerateFiles")]
+    [InlineData("EnumerateDirectories")]
+    [InlineData("EnumerateFileSystemEntries")]
+    public void FileSystemDirectoryReadPromotesAnExistenceProbe(string operation)
+    {
+        string directory = Path.Combine(_folder.Path, "generated");
+        Directory.CreateDirectory(directory);
+        var recorder = new EvaluationInputRecorder();
+        var fileSystem = new RecordingFileSystem(FileSystems.Default, recorder);
+        fileSystem.DirectoryExists(directory).ShouldBeTrue();
+        switch (operation)
+        {
+            case "GetLastWriteTimeUtc":
+                _ = fileSystem.GetLastWriteTimeUtc(directory);
+                break;
+            case "EnumerateFiles":
+                _ = fileSystem.EnumerateFiles(directory).ToArray();
+                break;
+            case "EnumerateDirectories":
+                _ = fileSystem.EnumerateDirectories(directory).ToArray();
+                break;
+            case "EnumerateFileSystemEntries":
+                _ = fileSystem.EnumerateFileSystemEntries(directory).ToArray();
+                break;
+        }
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+        inputs.Files[directory].RequiresMetadata.ShouldBeTrue();
+        IsCurrent(inputs, out _).ShouldBeTrue();
+
+        AddFile(directory, "new.txt");
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(directory);
+    }
+
+    [Fact]
+    public void ConcurrentObservationsCannotLoseMetadataRequirements()
+    {
+        string directory = _env.CreateFolder(createFolder: true).Path;
+        var recorder = new EvaluationInputRecorder();
+        Parallel.For(0, 128, iteration =>
+        {
+            if (iteration % 3 == 0)
+            {
+                recorder.RecordProbe(directory, ProbeKind.Directory, exists: true);
+            }
+            else if (iteration % 3 == 1)
+            {
+                recorder.RecordPath(directory);
+            }
+            else
+            {
+                recorder.RecordGlobDirectory(directory);
+            }
+        });
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+
+        inputs.Files.Count.ShouldBe(1);
+        inputs.Files[directory].RequiresMetadata.ShouldBeTrue();
+        inputs.Files[directory].RequiresGlobValidation.ShouldBeTrue();
+        IsCurrent(inputs, out _).ShouldBeTrue();
+        AddFile(directory, "new.txt");
+        IsCurrent(inputs, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(EvaluationContext.SharingPolicy.Isolated, false)]
+    [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache, false)]
+    [InlineData(EvaluationContext.SharingPolicy.Shared, false)]
+    [InlineData(EvaluationContext.SharingPolicy.Shared, true)]
+    public void ExcludedDirectoryMetadataChangesDoNotInvalidate(
+        EvaluationContext.SharingPolicy policy,
+        bool prewarmWithoutRecording)
+    {
+        string bin = Path.Combine(_folder.Path, "bin", "Debug", "net8.0");
+        string obj = Path.Combine(_folder.Path, "obj", "Debug", "net8.0");
+        Directory.CreateDirectory(bin);
+        Directory.CreateDirectory(obj);
+        _env.CreateFile(_folder, "input.txt", "included");
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <Asset Include="**/*" Exclude="bin/Debug/net8.0/**/*;obj/Debug/net8.0/**/*" />
+              </ItemGroup>
+            </Project>
+            """);
+        EvaluationContext context = EvaluationContext.Create(policy);
+        ProjectOptions options = CreateOptions();
+        options.EvaluationContext = context;
+        if (prewarmWithoutRecording)
+        {
+            SetRecording(enabled: false);
+            ProjectInstance.FromFile(project, options).EvaluationInputs.ShouldBeNull();
+            SetRecording(enabled: true);
+        }
+
+        ProjectInstance first = ProjectInstance.FromFile(project, options);
+        ProjectInstance cachedGlob = ProjectInstance.FromFile(project, options);
+        EvaluationInputs firstInputs = first.EvaluationInputs.ShouldNotBeNull();
+        EvaluationInputs replayedInputs = cachedGlob.EvaluationInputs.ShouldNotBeNull();
+        EvaluationInputs[] observations = [firstInputs, replayedInputs];
+        foreach (EvaluationInputs inputs in observations)
+        {
+            inputs.IsCacheable.ShouldBeTrue(inputs.NonCacheableDetail);
+            inputs.Files[bin].RequiresMetadata.ShouldBeFalse();
+            inputs.Files[obj].RequiresMetadata.ShouldBeFalse();
+            inputs.Files[_folder.Path].RequiresMetadata.ShouldBeFalse();
+            inputs.Files[_folder.Path].RequiresGlobValidation.ShouldBeTrue();
+            IsCurrent(inputs, out _).ShouldBeTrue();
+        }
+
+        AddFile(bin, "generated.dll");
+        AddFile(obj, "generated.cs");
+
+        IsCurrent(firstInputs, out string? firstReason).ShouldBeTrue(firstReason);
+        IsCurrent(replayedInputs, out string? replayedReason).ShouldBeTrue(replayedReason);
+        ProjectInstance fresh = ProjectInstance.FromFile(project, CreateOptions());
+        first.GetItems("Asset").Select(item => item.EvaluatedInclude)
+            .ShouldBe(fresh.GetItems("Asset").Select(item => item.EvaluatedInclude), ignoreOrder: true);
+        fresh.GetItems("Asset").Select(item => item.EvaluatedInclude)
+            .ShouldBe(["input.txt", "test.proj"], ignoreOrder: true);
+    }
+
+    [Fact]
+    public void AnIncludedGlobPromotesAnExcludedDirectoryProbe()
+    {
+        string generated = Path.Combine(_folder.Path, "obj", "Debug");
+        Directory.CreateDirectory(generated);
+        File.WriteAllText(Path.Combine(generated, "before.cs"), string.Empty);
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <Asset Include="**/*" Exclude="obj/Debug/**/*" />
+                <Generated Include="obj/Debug/*.cs" />
+              </ItemGroup>
+            </Project>
+            """);
+        EvaluationInputs inputs = Evaluate(project);
+        inputs.Files[generated].RequiresMetadata.ShouldBeFalse();
+        inputs.Files[generated].RequiresGlobValidation.ShouldBeTrue();
+        IsCurrent(inputs, out _).ShouldBeTrue();
+
+        AddFile(generated, "after.cs");
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(generated);
+        ProjectInstance.FromFile(project, CreateOptions()).GetItems("Generated").Count.ShouldBe(2);
+    }
+
+    [Theory]
+    [InlineData(EvaluationContext.SharingPolicy.Isolated)]
+    [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache)]
+    [InlineData(EvaluationContext.SharingPolicy.Shared)]
+    public void GlobValidationIgnoresUnmatchedOutputChanges(EvaluationContext.SharingPolicy policy)
+    {
+        string bin = Path.Combine(_folder.Path, "bin", "Debug", "net8.0");
+        string obj = Path.Combine(_folder.Path, "obj", "Debug", "net8.0");
+        Directory.CreateDirectory(bin);
+        Directory.CreateDirectory(obj);
+        _env.CreateFile(_folder, "build.props", "<Project />");
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <None Include="Assets.*;GulpAssets.*;Assets/**;**/*.props;**/*.targets"
+                      Exclude="obj/**/*.props;obj/**/*.targets" />
+                <Asset Include="**/*" Exclude="bin/**;obj/**;**/*.props;**/*.targets" />
+              </ItemGroup>
+            </Project>
+            """);
+        ProjectOptions options = CreateOptions();
+        options.EvaluationContext = EvaluationContext.Create(policy);
+        ProjectInstance first = ProjectInstance.FromFile(project, options);
+        EvaluationInputs inputs = first.EvaluationInputs.ShouldNotBeNull();
+        EvaluationInputs replayed = Evaluate(project, options);
+
+        inputs.Files[bin].RequiresMetadata.ShouldBeFalse();
+        inputs.Files[bin].RequiresGlobValidation.ShouldBeTrue();
+        inputs.Files[obj].RequiresMetadata.ShouldBeFalse();
+        inputs.Files[obj].RequiresGlobValidation.ShouldBeTrue();
+        inputs.Globs.ShouldNotBeEmpty();
+        IsCurrent(inputs, out string? reason).ShouldBeTrue(reason);
+
+        AddFile(bin, "output.dll");
+        AddFile(obj, "output.dll");
+        AddFile(obj, "excluded.props");
+
+        IsCurrent(inputs, out reason).ShouldBeTrue(reason);
+        IsCurrent(replayed, out reason).ShouldBeTrue(reason);
+        ProjectInstance fresh = ProjectInstance.FromFile(project, CreateOptions());
+        first.Items.Select(item => $"{item.ItemType}:{item.EvaluatedInclude}")
+            .ShouldBe(fresh.Items.Select(item => $"{item.ItemType}:{item.EvaluatedInclude}"), ignoreOrder: true);
+
+        AddFile(bin, "included.props");
+        IsCurrent(inputs, out _).ShouldBeFalse();
+        IsCurrent(replayed, out _).ShouldBeFalse();
+        ProjectInstance.FromFile(project, CreateOptions()).GetItems("None").Count.ShouldBe(2);
+    }
+
+    [Theory]
+    [InlineData("add")]
+    [InlineData("remove")]
+    [InlineData("rename")]
+    [InlineData("subdirectory")]
+    public void MatchingGlobMembershipChangesInvalidate(string mutation)
+    {
+        string directory = Path.Combine(_folder.Path, "files");
+        Directory.CreateDirectory(directory);
+        string existing = Path.Combine(directory, "before.props");
+        File.WriteAllText(existing, "<Project />");
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <Input Include="files/**/*.props" />
+              </ItemGroup>
+            </Project>
+            """);
+        EvaluationInputs inputs = Evaluate(project);
+        IsCurrent(inputs, out _).ShouldBeTrue();
+        switch (mutation)
+        {
+            case "add":
+                File.WriteAllText(Path.Combine(directory, "after.props"), "<Project />");
+                break;
+            case "remove":
+                File.Delete(existing);
+                break;
+            case "rename":
+                File.Move(existing, Path.Combine(directory, "renamed.props"));
+                break;
+            case "subdirectory":
+                string child = Path.Combine(directory, "child");
+                Directory.CreateDirectory(child);
+                File.WriteAllText(Path.Combine(child, "after.props"), "<Project />");
+                break;
+        }
+        Directory.SetLastWriteTimeUtc(directory, Directory.GetLastWriteTimeUtc(directory).AddSeconds(2));
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(directory);
+    }
+
+    [Fact]
+    public void CachedGlobResultsAreCheckedEvenWhenReplayedDirectoryStatsAreCurrent()
+    {
+        string directory = Path.Combine(_folder.Path, "files");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "before.props"), "<Project />");
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <Input Include="files/*.props" />
+              </ItemGroup>
+            </Project>
+            """);
+        ProjectOptions options = CreateOptions();
+        options.EvaluationContext = EvaluationContext.Create(EvaluationContext.SharingPolicy.Shared);
+        ProjectInstance.FromFile(project, options).GetItems("Input").Count.ShouldBe(1);
+        AddFile(directory, "after.props");
+
+        ProjectInstance replayed = ProjectInstance.FromFile(project, options);
+        EvaluationInputs inputs = replayed.EvaluationInputs.ShouldNotBeNull();
+        replayed.GetItems("Input").Count.ShouldBe(1);
+        inputs.Globs.ShouldContain(glob => glob.FromCache);
+        inputs.Files[directory].LastWriteTimeUtc.ShouldBe(Directory.GetLastWriteTimeUtc(directory));
+        IsCurrent(inputs, out _).ShouldBeFalse();
+        ProjectInstance.FromFile(project, CreateOptions()).GetItems("Input").Count.ShouldBe(2);
+    }
+
+    [Theory]
+    [InlineData(EvaluationContext.SharingPolicy.Isolated)]
+    [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache)]
+    public void EvaluationScopedGlobCachesKeepUnchangedValidationOnTheStatFastPath(EvaluationContext.SharingPolicy policy)
+    {
+        string directory = Path.Combine(_folder.Path, "files");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "before.props"), "<Project />");
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <First Include="files/*.props" />
+                <Second Include="files/*.props" />
+                <Other Include="files/*.targets" />
+              </ItemGroup>
+            </Project>
+            """);
+        ProjectOptions options = CreateOptions();
+        options.EvaluationContext = EvaluationContext.Create(policy);
+        EvaluationInputs inputs = Evaluate(project, options);
+
+        inputs.Globs.Length.ShouldBeGreaterThanOrEqualTo(3);
+        inputs.Globs.ShouldAllBe(glob => !glob.FromCache);
+        IsCurrent(inputs, out _).ShouldBeTrue();
+        AddFile(directory, "unrelated.dll");
+        IsCurrent(inputs, out string? reason).ShouldBeTrue(reason);
+        AddFile(directory, "changed.targets");
+        IsCurrent(inputs, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(EvaluationContext.SharingPolicy.Isolated)]
+    [InlineData(EvaluationContext.SharingPolicy.SharedSDKCache)]
+    public void PrewarmedNonSharedGlobCachesStillRequireResultValidation(EvaluationContext.SharingPolicy policy)
+    {
+        string directory = Path.Combine(_folder.Path, "files");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "before.props"), "<Project />");
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <Input Include="files/*.props" />
+              </ItemGroup>
+            </Project>
+            """);
+        EvaluationContext context = EvaluationContext.Create(policy);
+        context.FileMatcher.GetFiles(_folder.Path, "files/*.props").FileList.Length.ShouldBe(1);
+        AddFile(directory, "after.props");
+        ProjectOptions options = CreateOptions();
+        options.EvaluationContext = context;
+
+        ProjectInstance instance = ProjectInstance.FromFile(project, options);
+        EvaluationInputs inputs = instance.EvaluationInputs.ShouldNotBeNull();
+        instance.GetItems("Input").Count.ShouldBe(1);
+        inputs.Globs.ShouldContain(glob => glob.FromCache);
+        IsCurrent(inputs, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GlobObservationDoesNotWeakenDirectDirectoryMetadataReads(bool metadataFirst)
+    {
+        string directory = Path.Combine(_folder.Path, "files");
+        Directory.CreateDirectory(directory);
+        var recorder = new EvaluationInputRecorder();
+        if (metadataFirst)
+        {
+            recorder.RecordPath(directory);
+        }
+        recorder.RecordGlobDirectory(directory);
+        recorder.RecordPath(directory);
+        recorder.RecordProbe(directory, ProbeKind.Directory, exists: true);
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+
+        inputs.Files[directory].RequiresMetadata.ShouldBeTrue();
+        inputs.Files[directory].RequiresGlobValidation.ShouldBeTrue();
+        Directory.SetLastWriteTimeUtc(directory, Directory.GetLastWriteTimeUtc(directory).AddSeconds(2));
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(directory);
+    }
+
+    [Fact]
+    public void RecordedGlobOwnsItsInputsAndResults()
+    {
+        _env.CreateFile(_folder, "input.props", "<Project />");
+        string[] files = ["input.props"];
+        List<string> excludes = [];
+        var recorder = new EvaluationInputRecorder();
+        recorder.RecordGlobDirectory(_folder.Path);
+        recorder.RecordGlob(new FileMatcher.GlobResultObservation(
+            _folder.Path, "*.props", excludes, files,
+            FileMatcherDriver.Legacy, FileMatcherCaseFolding.InvariantCulture,
+            FromCache: true, Succeeded: true));
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+        files[0] = "changed.props";
+        excludes.Add("**/*");
+
+        IsCurrent(inputs, out string? reason).ShouldBeTrue(reason);
+        inputs.Globs.Single().RetainedSizeBytes.ShouldBeGreaterThan(0);
+    }
+
+    [Fact]
+    public void FailedGlobExpansionIsNotCacheable()
+    {
+        var recorder = new EvaluationInputRecorder();
+        recorder.RecordGlob(new FileMatcher.GlobResultObservation(
+            _folder.Path, "*.props", null, ["*.props"],
+            FileMatcherDriver.Legacy, FileMatcherCaseFolding.InvariantCulture,
+            FromCache: false, Succeeded: false));
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+
+        inputs.NonCacheable.ShouldBe(NonCacheableReason.RecorderFailure);
+        IsCurrent(inputs, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void EmptyGlobDetectsItsFirstMatchingFile()
+    {
+        string directory = Path.Combine(_folder.Path, "empty");
+        Directory.CreateDirectory(directory);
+        string project = CreateProject("""
+            <Project>
+              <ItemGroup>
+                <Input Include="empty/**/*.props" />
+              </ItemGroup>
+            </Project>
+            """);
+        EvaluationInputs inputs = Evaluate(project);
+        inputs.Globs.ShouldNotBeEmpty();
+        IsCurrent(inputs, out _).ShouldBeTrue();
+
+        AddFile(directory, "unrelated.dll");
+        IsCurrent(inputs, out string? reason).ShouldBeTrue(reason);
+        AddFile(directory, "first.props");
+        IsCurrent(inputs, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ChangedGlobDirectoryWithoutCapturedResultsFailsClosed()
+    {
+        string directory = _env.CreateFolder(createFolder: true).Path;
+        var recorder = new EvaluationInputRecorder();
+        recorder.RecordGlobDirectory(directory);
+        EvaluationInputs inputs = recorder.Freeze(Evaluate(CreateProject("<Project />")).Key);
+        IsCurrent(inputs, out _).ShouldBeTrue();
+        AddFile(directory, "new.props");
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(directory);
+    }
+
     [Fact]
     public void NearerFileAboveCandidateInvalidates()
     {
@@ -374,6 +968,29 @@ public sealed class EvaluationInputRecording_Tests : IDisposable
 
         IsCurrent(inputs, out string? reason).ShouldBeFalse();
         reason.ShouldBe(empty);
+    }
+
+    [Fact]
+    public void IgnoredInvalidImportBecomingValidInvalidates()
+    {
+        string import = _env.CreateFile(_folder, "invalid.props", "<Project>").Path;
+        string project = CreateProject("""
+            <Project>
+              <Import Project="invalid.props" />
+            </Project>
+            """);
+        ProjectOptions options = CreateOptions();
+        options.LoadSettings = ProjectLoadSettings.IgnoreInvalidImports;
+        EvaluationInputs inputs = Evaluate(project, options);
+        inputs.Files[import].RequiresMetadata.ShouldBeTrue();
+        inputs.Files[import].Length.ShouldBe(new FileInfo(import).Length);
+        IsCurrent(inputs, out _).ShouldBeTrue();
+
+        Touch(import, "<Project><PropertyGroup><Imported>now-valid</Imported></PropertyGroup></Project>");
+
+        IsCurrent(inputs, out string? reason).ShouldBeFalse();
+        reason.ShouldBe(import);
+        ProjectInstance.FromFile(project, CreateOptions()).GetPropertyValue("Imported").ShouldBe("now-valid");
     }
 
     [Fact]

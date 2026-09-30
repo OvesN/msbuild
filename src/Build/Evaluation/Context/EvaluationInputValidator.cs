@@ -9,26 +9,54 @@ using Microsoft.Build.Framework;
 namespace Microsoft.Build.Evaluation.Context;
 
 /// <summary>
+/// A validation failure with a category and privacy-safe detail, never captured values or diagnostic text.
+/// </summary>
+internal readonly record struct EvaluationInputValidationFailure(string? Reason, string? Detail);
+
+/// <summary>
 /// Checks recorded inputs that can be validated without rerunning external resolvers.
 /// </summary>
 internal static class EvaluationInputValidator
 {
     /// <summary>
     /// Returns true when recording completed without a non-cacheable reason, direct environment reads are unchanged,
-    /// and every recorded path still has the same kind, timestamp, and length.
+    /// and every recorded path still has the required kind and metadata or matching glob results.
     /// </summary>
     /// <param name="inputs">The recorded inputs.</param>
     /// <param name="reason">The first input that differs, or the non-cacheable reason.</param>
     internal static bool IsFileSystemCurrent(EvaluationInputs inputs, out string? reason)
+        => IsFileSystemCurrentCore(inputs, captureDetails: false, out reason, out _);
+
+    /// <summary>
+    /// Checks recorded inputs, retaining the legacy reason separately from privacy-safe failure details.
+    /// </summary>
+    internal static bool IsFileSystemCurrent(
+        EvaluationInputs inputs,
+        out string? reason,
+        out EvaluationInputValidationFailure failure)
+        => IsFileSystemCurrentCore(inputs, captureDetails: true, out reason, out failure);
+
+    private static bool IsFileSystemCurrentCore(
+        EvaluationInputs inputs,
+        bool captureDetails,
+        out string? reason,
+        out EvaluationInputValidationFailure failure)
     {
+        failure = default;
         if (!inputs.IsCacheable)
         {
             reason = $"{inputs.NonCacheable}: {inputs.NonCacheableDetail}";
+            if (captureDetails)
+            {
+                failure = new("NonCacheable", inputs.NonCacheable.ToString());
+            }
+
             return false;
         }
 
         try
         {
+            string? changedGlobDirectory = null;
             foreach (KeyValuePair<string, string?> environmentRead in inputs.EnvironmentReads)
             {
                 if (!string.Equals(
@@ -37,16 +65,74 @@ internal static class EvaluationInputValidator
                         StringComparison.Ordinal))
                 {
                     reason = environmentRead.Key;
+                    if (captureDetails)
+                    {
+                        failure = new("EnvironmentReadChanged", environmentRead.Key);
+                    }
+
                     return false;
                 }
             }
 
             foreach (KeyValuePair<string, FileDependency> file in inputs.Files)
             {
-                if (!EvaluationInputRecorder.TryStat(file.Key, out FileDependency current) || current != file.Value)
+                if (!EvaluationInputRecorder.TryStat(file.Key, out FileDependency current))
                 {
                     reason = file.Key;
+                    if (captureDetails)
+                    {
+                        failure = new("FileSystemInputUnstatable", file.Key);
+                    }
+
                     return false;
+                }
+
+                bool metadataChanged = current.LastWriteTimeUtc != file.Value.LastWriteTimeUtc
+                    || current.Length != file.Value.Length;
+                if (current.Kind != file.Value.Kind
+                    || (file.Value.RequiresMetadata && metadataChanged))
+                {
+                    reason = file.Key;
+                    if (captureDetails)
+                    {
+                        failure = new("FileSystemInputChanged", file.Key);
+                    }
+
+                    return false;
+                }
+
+                if (file.Value.RequiresGlobValidation && metadataChanged)
+                {
+                    changedGlobDirectory ??= file.Key;
+                }
+            }
+
+            if (changedGlobDirectory is not null && inputs.Globs.IsDefaultOrEmpty)
+            {
+                reason = changedGlobDirectory;
+                if (captureDetails)
+                {
+                    failure = new("FileSystemInputChanged", reason);
+                }
+
+                return false;
+            }
+
+            if (!inputs.Globs.IsDefaultOrEmpty)
+            {
+                foreach (GlobDependency glob in inputs.Globs)
+                {
+                    // Cached expansions may precede the directory stats captured by this evaluation.
+                    if ((changedGlobDirectory is not null || glob.FromCache) && !glob.IsCurrent())
+                    {
+                        reason = changedGlobDirectory ?? glob.ProjectDirectory;
+                        if (captureDetails)
+                        {
+                            failure = new("FileSystemInputChanged", reason);
+                        }
+
+                        return false;
+                    }
                 }
             }
         }
@@ -57,6 +143,11 @@ internal static class EvaluationInputValidator
         {
             // A failed check is a miss, never a failed build.
             reason = ex.Message;
+            if (captureDetails)
+            {
+                failure = new("MetadataCheckException", ex.GetType().Name);
+            }
+
             return false;
         }
 
