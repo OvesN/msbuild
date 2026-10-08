@@ -170,6 +170,24 @@ timestamp reads, synchronized timing accumulation, environment-name hashing,
 candidate comparisons, formatting, and buffered logging. Without it, these captures,
 comparisons, buffers, and timestamp reads are not performed. Diagnostics never enable caching.
 
+At the end of each build the console also gets a short, human-readable result,
+at any verbosity. It does not start with `EvaluationCache`, so the machine-readable
+searches below never match it:
+
+```text
+Evaluation cache: 455 hits, 2 invalidated, 0 not cached
+  invalidated: OrchardCore.Abstractions.csproj (FileSystemInputChanged: C:\src\OrchardCore.Abstractions)
+  hit: OrchardCore.Admin.csproj
+```
+
+A hit is an evaluation that was reused. Invalidated means a cached evaluation was found
+but an input had changed, so the project was evaluated again; the reason and the input
+follow. Not cached means there was nothing usable to validate (a first build, or a
+different environment or global properties). Invalidated projects are listed first, then
+hit projects, each list capped at 500 entries (`... and N more`). A project built
+for several target frameworks appears once per evaluation. Nothing is printed on nodes
+that made no cache decisions.
+
 Search binlogs for `EvaluationCacheDiagnostic|Version=1|` and
 `EvaluationCacheDiagnosticSummary|Version=1|`. Records identify process, owning
 BuildManager, tracing session (`TraceId`), build ordinal, configuration, submission,

@@ -279,6 +279,55 @@ public sealed class EvaluationCacheDiagnostics_Tests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void CacheSummaryListsInvalidatedAndReusedProjects()
+    {
+        var diagnostics = new EvaluationCacheDiagnostics();
+        diagnostics.BeginBuild("manager", 1, EvaluationCacheMode.SnapshotFileSystem, []);
+        string folder = Path.Combine(Path.GetTempPath(), "summary");
+        diagnostics.StartRequest(Path.Combine(folder, "reused.proj"), 1, 1, 1).Record("Reuse", "Materialized");
+        diagnostics.StartRequest(Path.Combine(folder, "changed.proj"), 2, 1, 1).Record("Validation", "FileSystemInputChanged", Path.Combine(folder, "input.props"));
+        diagnostics.StartRequest(Path.Combine(folder, "new.proj"), 3, 1, 1).Record("Lookup", "NoEntryOrHistory");
+
+        string[] lines = Flush(diagnostics).Split([Environment.NewLine], StringSplitOptions.None)
+            .Where(line => line.StartsWith("Evaluation cache:", StringComparison.Ordinal) || line.StartsWith("  ", StringComparison.Ordinal))
+            .ToArray();
+
+        lines.ShouldBe(
+        [
+            "Evaluation cache: 1 hits, 1 invalidated, 1 not cached",
+            $"  invalidated: changed.proj (FileSystemInputChanged: {Path.Combine(folder, "input.props")})",
+            "  hit: reused.proj",
+        ]);
+    }
+
+    [Fact]
+    public void CacheSummaryCapsEachProjectListAndKeepsTheTotals()
+    {
+        var diagnostics = new EvaluationCacheDiagnostics();
+        diagnostics.BeginBuild("manager", 1, EvaluationCacheMode.SnapshotFileSystem, []);
+        for (int i = 0; i < EvaluationCacheDiagnostics.MaximumListedProjects + 3; i++)
+        {
+            diagnostics.StartRequest($"p{i}.proj", i, 1, 1).Record("Reuse", "Materialized");
+        }
+
+        string log = Flush(diagnostics);
+
+        log.ShouldContain($"Evaluation cache: {EvaluationCacheDiagnostics.MaximumListedProjects + 3} hits, 0 invalidated, 0 not cached");
+        log.ShouldContain("  hit: ... and 3 more");
+        log.Split([Environment.NewLine], StringSplitOptions.None).Count(line => line.StartsWith("  hit: p", StringComparison.Ordinal))
+            .ShouldBe(EvaluationCacheDiagnostics.MaximumListedProjects);
+    }
+
+    [Fact]
+    public void CacheSummaryIsAbsentWhenNothingWasLookedUp()
+    {
+        var diagnostics = new EvaluationCacheDiagnostics();
+        diagnostics.BeginBuild("manager", 1, EvaluationCacheMode.SnapshotFileSystem, []);
+
+        Flush(diagnostics).ShouldNotContain("Evaluation cache:");
+    }
+
+    [Fact]
     public void StatsThatReachTheFileSystemAreClassifiedByPlaceResultAndRepetition()
     {
         using TestEnvironment env = TestEnvironment.Create(_output);
@@ -588,9 +637,9 @@ public sealed class EvaluationCacheDiagnostics_Tests(ITestOutputHelper output)
         string log = Flush(diagnostics);
         log.ShouldContain("|DroppedEvents=6|ForgottenHistory=1|");
         log.ShouldContain("Lookup.NoEntryOrHistory:10005");
-        // The events, the detailed and timing count summaries, and the process summary.
+        // The events, the detailed and timing count summaries, the process summary, and the cache summary.
         log.Split([Environment.NewLine], StringSplitOptions.RemoveEmptyEntries).Length
-            .ShouldBe(EvaluationCacheDiagnostics.MaximumEventsPerBuild + 3);
+            .ShouldBe(EvaluationCacheDiagnostics.MaximumEventsPerBuild + 4);
         Flush(diagnostics).ShouldContain("|DroppedEvents=0|ForgottenHistory=0|Counts=");
     }
 

@@ -28,6 +28,7 @@ internal sealed class EvaluationCacheDiagnostics
     internal const int MaximumExamplesPerReason = 3;
     internal const int MaximumExamplesPerBuild = 96;
     internal const int MaximumExampleFieldLength = 512;
+    internal const int MaximumListedProjects = 500;
 
     internal enum Phase
     {
@@ -67,6 +68,8 @@ internal sealed class EvaluationCacheDiagnostics
     private ProcessSnapshot? _processStart;
     private readonly List<string> _examples = [];
     private readonly Dictionary<string, int> _exampleCounts = new(StringComparer.Ordinal);
+    private readonly ProjectList _reusedProjects = new();
+    private readonly ProjectList _invalidatedProjects = new();
     private long _suppressedExamples;
     private string _buildManagerId = string.Empty;
     private long _buildNumber;
@@ -294,6 +297,7 @@ internal sealed class EvaluationCacheDiagnostics
         string[] events;
         string[] examples;
         string summary;
+        string[] cacheSummary;
         string timingSummary;
         string identity;
         PhaseTiming[] timings;
@@ -320,6 +324,7 @@ internal sealed class EvaluationCacheDiagnostics
             bucketFamilies = [.. _buckets];
             processStart = _processStart;
             examples = [.. _examples];
+            cacheSummary = BuildCacheSummary();
             _events.Clear();
             _counts.Clear();
             Array.Clear(_timings, 0, _timings.Length);
@@ -328,6 +333,8 @@ internal sealed class EvaluationCacheDiagnostics
             _processStart = null;
             _examples.Clear();
             _exampleCounts.Clear();
+            _reusedProjects.Clear();
+            _invalidatedProjects.Clear();
             _suppressedExamples = 0;
             _requestCount = 0;
             _droppedEvents = 0;
@@ -390,6 +397,110 @@ internal sealed class EvaluationCacheDiagnostics
         {
             loggingService.LogCommentFromText(context ?? BuildEventContext.Invalid, MessageImportance.High, message);
         }
+
+        foreach (string line in cacheSummary)
+        {
+            loggingService.LogCommentFromText(context ?? BuildEventContext.Invalid, MessageImportance.High, line);
+        }
+    }
+
+    // The human-readable result: one count line, then the invalidated projects, then the projects whose evaluation was reused.
+    // Empty when this flush saw no cache decisions, for example on a worker node that never had a cache.
+    private string[] BuildCacheSummary()
+    {
+        long hits = CountOf("Reuse.Materialized");
+        long notCached = CountOf("Lookup.NoEntryOrHistory") + CountOf("Lookup.KeyMismatch");
+        long invalidated = 0;
+        foreach (KeyValuePair<string, long> count in _counts)
+        {
+            if (count.Key.StartsWith("Validation.", StringComparison.Ordinal) && count.Key is not ("Validation.Accepted" or "Validation.UnsafeBypass"))
+            {
+                invalidated += count.Value;
+            }
+        }
+
+        if (hits + invalidated + notCached == 0)
+        {
+            return [];
+        }
+
+        List<string> lines = [FormattableString.Invariant($"Evaluation cache: {hits} hits, {invalidated} invalidated, {notCached} not cached")];
+        _invalidatedProjects.AppendTo(lines, "invalidated");
+        _reusedProjects.AppendTo(lines, "hit");
+        return [.. lines];
+    }
+
+    private long CountOf(string name) => _counts.TryGetValue(name, out long count) ? count : 0;
+
+    private void RecordProjectOutcome(Request? request, string action, string reason, string? detail)
+    {
+        if (action == "Reuse" && reason == "Materialized")
+        {
+            _reusedProjects.Add(FileNameOf(request?.Project));
+        }
+        else if (action == "Validation" && reason is not ("Accepted" or "UnsafeBypass"))
+        {
+            string changed = string.IsNullOrEmpty(detail) ? string.Empty : ": " + SingleLine(detail!);
+            _invalidatedProjects.Add(FileNameOf(request?.Project) + " (" + reason + changed + ")");
+        }
+    }
+
+    // Path.GetFileName throws on .NET Framework for characters that are invalid in paths, and diagnostics must never throw.
+    private static string FileNameOf(string? path) =>
+        path is null ? string.Empty : path.Substring(path.LastIndexOfAny(['\\', '/']) + 1);
+
+    private static string SingleLine(string value)
+    {
+        value = value.Replace('\r', ' ').Replace('\n', ' ');
+        if (value.Length <= MaximumExampleFieldLength)
+        {
+            return value;
+        }
+
+        int length = MaximumExampleFieldLength;
+        if (char.IsHighSurrogate(value[length - 1]) && char.IsLowSurrogate(value[length]))
+        {
+            length--;
+        }
+
+        return value.Substring(0, length) + "...";
+    }
+
+    private sealed class ProjectList
+    {
+        private readonly List<string> _entries = [];
+        private long _omitted;
+
+        internal void Add(string entry)
+        {
+            if (_entries.Count == MaximumListedProjects)
+            {
+                _omitted++;
+            }
+            else
+            {
+                _entries.Add(entry);
+            }
+        }
+
+        internal void AppendTo(List<string> lines, string label)
+        {
+            foreach (string entry in _entries)
+            {
+                lines.Add("  " + label + ": " + entry);
+            }
+
+            if (_omitted > 0)
+            {
+                lines.Add(FormattableString.Invariant($"  {label}: ... and {_omitted} more"));
+            }
+        }
+
+        internal void Clear()
+        {
+            _entries.Clear();
+            _omitted = 0;
+        }
     }
 
     // A counter the runtime does not provide is -1 in both snapshots, and its difference stays -1.
@@ -413,6 +524,7 @@ internal sealed class EvaluationCacheDiagnostics
     {
         Increment(action + "." + reason);
         RecordExample(request, action, reason, detail);
+        RecordProjectOutcome(request, action, reason, detail);
         if (_events.Count == MaximumEventsPerBuild)
         {
             _droppedEvents++;
