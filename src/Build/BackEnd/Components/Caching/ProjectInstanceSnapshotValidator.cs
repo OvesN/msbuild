@@ -143,7 +143,13 @@ internal sealed class FileSystemProjectInstanceSnapshotValidator : IProjectInsta
             return ProjectInstanceSnapshotValidationResult.Invalid;
         }
 
-        if (key.GetMismatch(data.Inputs.Key) is string field)
+        string? mismatchedField;
+        using (diagnosticRequest?.Time(EvaluationCacheDiagnostics.Phase.KeyCheck))
+        {
+            mismatchedField = key.GetMismatch(data.Inputs.Key);
+        }
+
+        if (mismatchedField is string field)
         {
             if (captureDetails)
             {
@@ -154,11 +160,20 @@ internal sealed class FileSystemProjectInstanceSnapshotValidator : IProjectInsta
         }
 
         bool fileSystemCurrent;
+        ValidationMeasurements? measurements = diagnosticRequest is null ? null : new ValidationMeasurements();
         using (diagnosticRequest?.Time(EvaluationCacheDiagnostics.Phase.ManifestValidation))
         {
             fileSystemCurrent = captureDetails
-                ? EvaluationInputValidator.IsFileSystemCurrent(data.Inputs, out _, out failure, validationContext?.FileStatCache, validationContext?.DirectoryListings)
-                : EvaluationInputValidator.IsFileSystemCurrent(data.Inputs, out _, validationContext?.FileStatCache, validationContext?.DirectoryListings);
+                ? EvaluationInputValidator.IsFileSystemCurrent(data.Inputs, out _, out failure, validationContext?.FileStatCache, validationContext?.DirectoryListings, measurements)
+                : EvaluationInputValidator.IsFileSystemCurrent(data.Inputs, out _, validationContext?.FileStatCache, validationContext?.DirectoryListings, measurements);
+        }
+
+        if (measurements is not null && diagnosticRequest is not null)
+        {
+            using (diagnosticRequest.Time(EvaluationCacheDiagnostics.Phase.DiagnosticsPublish))
+            {
+                measurements.Publish(diagnosticRequest);
+            }
         }
         if (!fileSystemCurrent)
         {
