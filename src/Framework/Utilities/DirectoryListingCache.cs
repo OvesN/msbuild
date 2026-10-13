@@ -16,7 +16,24 @@ namespace Microsoft.Build.Shared;
 internal sealed class DirectoryListingCache
 {
     private readonly ConcurrentDictionary<(string Directory, FileMatcher.FileSystemEntity Kind), Listing> _listings = new();
+    private readonly bool _sharingEnabled;
+#if FEATURE_WINDOWSINTEROP
+    private readonly DirectoryJournal? _journal;
+#endif
 
+    internal DirectoryListingCache()
+    {
+        string? mode = Environment.GetEnvironmentVariable("MSBUILDDIRECTORYCACHEVALIDATION");
+        bool journal = string.IsNullOrEmpty(mode) || string.Equals(mode, "journal", StringComparison.OrdinalIgnoreCase);
+        _sharingEnabled = journal || string.Equals(mode, "ctime-identity", StringComparison.OrdinalIgnoreCase);
+        if (!_sharingEnabled)
+        {
+            DebugTrace.WriteLine($"Unknown directory validation mode '{mode}'; shared reuse is disabled.", category: nameof(DirectoryListingCache));
+        }
+#if FEATURE_WINDOWSINTEROP
+        if (journal && NativeMethods.IsWindows) { _journal = new DirectoryJournal(); }
+#endif
+    }
 
     internal IReadOnlyList<string> Store(string directory, FileMatcher.FileSystemEntity kind, IReadOnlyList<string> entries, DirectoryChangeStamp changeTime)
     {
@@ -71,10 +88,14 @@ internal sealed class DirectoryListingCache
         return false;
     }
 
-    internal static bool TryReadDirectoryChangeTime(string directory, out DirectoryChangeStamp changeTime)
+    internal bool TryReadDirectoryChangeTime(string directory, out DirectoryChangeStamp changeTime)
     {
+        if (!_sharingEnabled) { changeTime = default; return false; }
         try
         {
+#if FEATURE_WINDOWSINTEROP
+            if (NativeMethods.IsWindows && _journal is not null) { return _journal.TryRead(directory, out changeTime); }
+#endif
             return DirectoryChangeTime.TryRead(directory, out changeTime);
         }
         catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
@@ -89,6 +110,9 @@ internal sealed class DirectoryListingCache
     {
         _listings.Clear();
         GlobResultExperiment.Clear(this);
+#if FEATURE_WINDOWSINTEROP
+        if (NativeMethods.IsWindows) { _journal?.Clear(); }
+#endif
     }
 
     private readonly record struct Listing(IReadOnlyList<string> Entries, DirectoryChangeStamp ChangeTime);
