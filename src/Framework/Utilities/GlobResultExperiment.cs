@@ -8,6 +8,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Microsoft.Build.Framework;
 
 namespace Microsoft.Build.Shared;
 
@@ -75,11 +76,20 @@ internal sealed class GlobResultExperiment
         foreach (Dependency dependency in dependencies)
         {
             long started = Stopwatch.GetTimestamp();
-            bool valid = dependency.Kind < 0
-                ? directoryExists(dependency.Path) == dependency.Exists
-                : ReferenceEquals(rawEntries((FileMatcher.FileSystemEntity)dependency.Kind, dependency.Path, "*", null, false), dependency.Entries);
+            bool valid;
+            try
+            {
+                valid = dependency.Kind < 0
+                    ? directoryExists(dependency.Path) == dependency.Exists
+                    : ReferenceEquals(rawEntries((FileMatcher.FileSystemEntity)dependency.Kind, dependency.Path, "*", null, false), dependency.Entries);
+            }
+            catch (Exception ex) when (FileMatcher.IsIoRelatedExceptionOrAggregate(ex))
+            {
+                DebugTrace.WriteLine($"Could not validate cached glob dependency '{dependency.Path}': {ex.Message}", category: nameof(GlobResultExperiment));
+                valid = false;
+            }
             Interlocked.Increment(ref _probes);
-            Interlocked.Add(ref _probeTicks, Stopwatch.GetTimestamp()-started);
+            Interlocked.Add(ref _probeTicks, Stopwatch.GetTimestamp() - started);
             if (!valid) { return false; }
         }
         return true;

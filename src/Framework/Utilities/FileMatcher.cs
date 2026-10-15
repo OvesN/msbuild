@@ -4155,7 +4155,7 @@ namespace Microsoft.Build.Shared
         }
 #nullable disable
 
-        private static bool IsIoRelatedExceptionOrAggregate(Exception exception) =>
+        internal static bool IsIoRelatedExceptionOrAggregate(Exception exception) =>
             ExceptionHandling.IsIoRelatedException(exception)
             || (exception is AggregateException aggregateException
                 && aggregateException.Flatten().InnerExceptions.All(ExceptionHandling.IsIoRelatedException));
