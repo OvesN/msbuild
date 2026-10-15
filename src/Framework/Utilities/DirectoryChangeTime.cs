@@ -1,8 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#if NET
 using System;
+#if NET
 using System.Text;
 using Microsoft.Build.Utilities;
 #endif
@@ -24,7 +24,33 @@ internal readonly record struct DirectoryChangeStamp(
     ulong IdentityLow,
     ulong IdentityHigh,
     long Value,
-    uint Nanoseconds = 0);
+    uint Nanoseconds = 0)
+{
+    internal bool IsOldEnoughToCache(DateTime utcNow)
+    {
+        const long minimumAgeTicks = 3 * TimeSpan.TicksPerMillisecond;
+        if (NativeMethods.IsWindows)
+        {
+            return Value > 0 && Value <= utcNow.ToFileTimeUtc() - minimumAgeTicks;
+        }
+
+#if NET
+        if (NativeMethods.IsLinux)
+        {
+            long cutoff = utcNow.Ticks - DateTime.UnixEpoch.Ticks - minimumAgeTicks;
+            long seconds = Math.DivRem(cutoff, TimeSpan.TicksPerSecond, out long ticks);
+            if (ticks < 0)
+            {
+                seconds--;
+                ticks += TimeSpan.TicksPerSecond;
+            }
+
+            return Value < seconds || (Value == seconds && Nanoseconds <= ticks * 100);
+        }
+#endif
+        return false;
+    }
+}
 
 internal static partial class DirectoryChangeTime
 {

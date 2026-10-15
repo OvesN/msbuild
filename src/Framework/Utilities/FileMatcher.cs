@@ -275,7 +275,8 @@ namespace Microsoft.Build.Shared
             {
                 if (!cache.TryGet(path, type, out var entries))
                 {
-                    bool hasChangeTime = DirectoryListingCache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp before);
+                    bool hasChangeTime = DirectoryListingCache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp before)
+                        && before.IsOldEnoughToCache(DateTime.UtcNow);
                     bool enumerationSucceeded = false;
                     entries = enumerateWithStatus is not null
                         ? enumerateWithStatus(type, path, out enumerationSucceeded)
