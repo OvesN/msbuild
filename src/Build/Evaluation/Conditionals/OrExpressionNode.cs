@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Diagnostics;
-using Microsoft.Build.Shared;
+using Microsoft.Build.Internal;
 
 namespace Microsoft.Build.Evaluation
 {
@@ -50,14 +50,5 @@ namespace Microsoft.Build.Evaluation
         }
 
         internal override string DebuggerDisplay => $"(or {LeftChild.DebuggerDisplay} {RightChild.DebuggerDisplay})";
-
-        #region REMOVE_COMPAT_WARNING
-        private bool _possibleOrCollision = true;
-        internal override bool PossibleOrCollision
-        {
-            set { _possibleOrCollision = value; }
-            get { return _possibleOrCollision; }
-        }
-        #endregion
     }
 }
