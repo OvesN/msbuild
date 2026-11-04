@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using Microsoft.Build.Framework;
 
 namespace Microsoft.Build.Shared;
@@ -16,7 +17,40 @@ namespace Microsoft.Build.Shared;
 internal sealed class DirectoryListingCache
 {
     private readonly ConcurrentDictionary<(string Directory, FileMatcher.FileSystemEntity Kind), Listing> _listings = new();
+    private readonly string[] _excludedRoots;
+#if FEATURE_WINDOWSINTEROP
+    private readonly DirectoryJournal? _journal;
+#endif
 
+    internal DirectoryListingCache()
+    {
+        string? excludedRoots = Environment.GetEnvironmentVariable("MSBUILDDIRECTORYCACHEEXCLUDEROOTS");
+        _excludedRoots = string.IsNullOrEmpty(excludedRoots)
+            ? []
+            : excludedRoots.Split([Path.PathSeparator], StringSplitOptions.RemoveEmptyEntries);
+        try
+        {
+            for (int i = 0; i < _excludedRoots.Length; i++)
+            {
+                _excludedRoots[i] = Path.GetFullPath(_excludedRoots[i].Trim())
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+        }
+        catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
+        {
+            _excludedRoots = [""];
+        }
+
+#if FEATURE_WINDOWSINTEROP
+        if (NativeMethods.IsWindows)
+        {
+            _journal = new DirectoryJournal();
+        }
+#endif
+    }
+
+    internal bool CanStore(DirectoryChangeStamp stamp, DateTime utcNow)
+        => NativeMethods.IsWindows || stamp.IsOldEnoughToCache(utcNow);
 
     internal IReadOnlyList<string> Store(string directory, FileMatcher.FileSystemEntity kind, IReadOnlyList<string> entries, DirectoryChangeStamp changeTime)
     {
@@ -71,10 +105,19 @@ internal sealed class DirectoryListingCache
         return false;
     }
 
-    internal static bool TryReadDirectoryChangeTime(string directory, out DirectoryChangeStamp changeTime)
+    internal bool TryReadDirectoryChangeTime(string directory, out DirectoryChangeStamp changeTime)
     {
         try
         {
+            if (IsExcluded(directory))
+            {
+                changeTime = default;
+                return false;
+            }
+
+#if FEATURE_WINDOWSINTEROP
+            if (NativeMethods.IsWindows && _journal is not null) { return _journal.TryRead(directory, out changeTime); }
+#endif
             return DirectoryChangeTime.TryRead(directory, out changeTime);
         }
         catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
@@ -85,10 +128,33 @@ internal sealed class DirectoryListingCache
         }
     }
 
+    internal bool IsExcluded(string directory)
+    {
+        if (_excludedRoots.Length == 0)
+        {
+            return false;
+        }
+
+        string fullPath = Path.GetFullPath(directory);
+        foreach (string root in _excludedRoots)
+        {
+            if (fullPath.StartsWith(root, FileUtilities.PathComparison)
+                && (root.Length == 0 || fullPath.Length == root.Length || FileUtilities.IsAnySlash(fullPath[root.Length])))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     internal void Clear()
     {
         _listings.Clear();
         GlobResultExperiment.Clear(this);
+#if FEATURE_WINDOWSINTEROP
+        if (NativeMethods.IsWindows) { _journal?.Clear(); }
+#endif
     }
 
     private readonly record struct Listing(IReadOnlyList<string> Entries, DirectoryChangeStamp ChangeTime);

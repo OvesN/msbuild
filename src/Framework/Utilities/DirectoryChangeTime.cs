@@ -138,6 +138,7 @@ internal static partial class DirectoryChangeTime
         Type = 0x1,
         ChangeTime = 0x80,
         Identity = 0x100,
+        MountId = 0x1000,
     }
 
     [Flags]
@@ -171,24 +172,39 @@ internal static partial class DirectoryChangeTime
         internal uint DeviceMajor;
         [FieldOffset(140)]
         internal uint DeviceMinor;
+        [FieldOffset(144)]
+        internal ulong MountId;
     }
 
     [LibraryImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static unsafe partial int Statx(int directoryDescriptor, byte* path, StatxFlags flags, StatxFields fields, StatxData* result);
 
+    [LibraryImport("libc", EntryPoint = "statfs", SetLastError = true)]
+    private static unsafe partial int Statfs(byte* path, void* result);
+
     private static unsafe bool TryReadLinux(string path, out DirectoryChangeStamp stamp)
     {
         stamp = default;
         const int currentDirectory = -100; // AT_FDCWD
-        const StatxFields required = StatxFields.Type | StatxFields.ChangeTime | StatxFields.Identity;
+        const StatxFields required = StatxFields.Type | StatxFields.ChangeTime | StatxFields.Identity | StatxFields.MountId;
         int length = Encoding.UTF8.GetByteCount(path);
         using BufferScope<byte> buffer = new(stackalloc byte[512], checked(length + 1));
         Encoding.UTF8.GetBytes(path.AsSpan(), buffer.AsSpan());
         buffer[length] = 0;
         StatxData data;
         int result;
+        using BufferScope<byte> fileSystem = new(stackalloc byte[256]);
         fixed (byte* pointer = buffer)
         {
+            fixed (byte* information = fileSystem)
+            {
+                if (Statfs(pointer, information) != 0
+                    || !IsSupportedLinuxFileSystem(unchecked((uint)MemoryMarshal.Read<nint>(fileSystem.AsSpan()))))
+                {
+                    return false;
+                }
+            }
+
             result = Statx(currentDirectory, pointer, StatxFlags.NoFollow | StatxFlags.ForceSync, required, &data);
         }
         if (result != 0)
@@ -206,11 +222,18 @@ internal static partial class DirectoryChangeTime
         stamp = new DirectoryChangeStamp(
             ((ulong)data.DeviceMajor << 32) | data.DeviceMinor,
             data.Identity,
-            0,
+            data.MountId,
             data.ChangeSeconds,
             data.ChangeNanoseconds);
         return true;
     }
+
+    // Filesystem identification is an admission policy, not proof of timestamp uniqueness.
+    private static bool IsSupportedLinuxFileSystem(uint type) => type is
+        0xEF53       // ext2/ext3/ext4
+        or 0x58465342 // XFS
+        or 0x9123683E // Btrfs
+        or 0x01021994; // tmpfs
 #endif
 
 #if FEATURE_WINDOWSINTEROP || NET

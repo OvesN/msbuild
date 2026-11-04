@@ -25,6 +25,8 @@ namespace Microsoft.Build.Shared.FileSystem
         public bool SupportsDirectEnumeration =>
             _fileSystem is IDirectFileSystemEnumeration { SupportsDirectEnumeration: true };
 
+        internal IFileSystem UnderlyingFileSystem => _fileSystem;
+
         public bool FileOrDirectoryExists(string path)
         {
             // A positive result from either specific cache implies existence, so we can avoid a redundant filesystem stat.

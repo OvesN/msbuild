@@ -9,10 +9,11 @@ using Xunit;
 
 namespace Microsoft.Build.UnitTests;
 
-public class GlobResultExperimentTest
+public class GlobResultExperimentTest(ITestOutputHelper output)
 {
     private const string Key = "glob";
     private const string DirectoryPath = "scope";
+    private readonly ITestOutputHelper _output = output;
 
     [Theory]
     [InlineData(false)]
@@ -68,6 +69,44 @@ public class GlobResultExperimentTest
 
         actual.ShouldBeSameAs(failure);
     }
+
+    [Fact]
+    public void UnsupportedExistenceDependenciesCannotSeedSharedGlobs()
+    {
+        GlobResultExperiment experiment = GlobResultExperiment.Create(new DirectoryListingCache())!;
+        var collector = new GlobResultExperiment.Collector();
+        experiment.RecordExistence(collector, "missing", false);
+        collector.Admissible.ShouldBeFalse();
+        experiment.Store(Key, [], FileMatcher.SearchAction.ReturnEmptyList, null, collector);
+        experiment.TryGet(Key, (_, _, _, _, _) => [], _ => false, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ExcludedRootsRespectDirectoryBoundariesAndTheOwnerLifetime()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        string root = env.CreateFolder().Path;
+        env.SetEnvironmentVariable("MSBUILDDIRECTORYCACHEEXCLUDEROOTS", root + Path.DirectorySeparatorChar);
+        var cache = new DirectoryListingCache();
+        cache.IsExcluded(root).ShouldBeTrue();
+        cache.IsExcluded(Path.Combine(root, "child")).ShouldBeTrue();
+        cache.IsExcluded(root + "-sibling").ShouldBeFalse();
+
+        env.SetEnvironmentVariable("MSBUILDDIRECTORYCACHEEXCLUDEROOTS", null);
+        cache.IsExcluded(root).ShouldBeTrue();
+        new DirectoryListingCache().IsExcluded(root).ShouldBeFalse();
+
+        env.SetEnvironmentVariable("MSBUILDDIRECTORYCACHEEXCLUDEROOTS", " ");
+        new DirectoryListingCache().IsExcluded(root).ShouldBeTrue();
+    }
+
+#if NET
+    [LinuxOnlyFact]
+    public void UnsupportedLinuxFilesystemDoesNotProduceAReusableStamp()
+    {
+        DirectoryChangeTime.TryRead("/proc", out _).ShouldBeFalse();
+    }
+#endif
 
     private static GlobResultExperiment CreateCachedGlob()
     {

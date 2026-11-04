@@ -179,8 +179,8 @@ namespace Microsoft.Build.Shared
             implementation,
             allowDirectEnumeration: true,
             caseFolding,
-            directoryListingCache,
-            directoryListingCache is not null
+            FileSystems.SupportsDirectoryCache(fileSystem) ? directoryListingCache : null,
+            directoryListingCache is not null && FileSystems.SupportsDirectoryCache(fileSystem)
                 ? (FileSystemEntity entityType, string path, out bool succeeded) =>
                     GetAccessibleFileSystemEntries(fileSystem, entityType, path, "*", null, false, out succeeded)
                 : null)
@@ -248,8 +248,8 @@ namespace Microsoft.Build.Shared
             {
                 if (!cache.TryGet(path, type, out var entries))
                 {
-                    bool hasChangeTime = DirectoryListingCache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp before)
-                        && before.IsOldEnoughToCache(DateTime.UtcNow);
+                    bool hasChangeTime = cache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp before)
+                        && cache.CanStore(before, DateTime.UtcNow);
                     bool enumerationSucceeded = false;
                     entries = enumerateWithStatus is not null
                         ? enumerateWithStatus(type, path, out enumerationSucceeded)
@@ -257,7 +257,7 @@ namespace Microsoft.Build.Shared
                     if (hasChangeTime
                         // An empty result is reusable only when enumeration completed, not when access was denied.
                         && (entries.Count != 0 || enumerationSucceeded)
-                        && DirectoryListingCache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp after)
+                        && cache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp after)
                         && before == after)
                     {
                         entries = cache.Store(path, type, entries, before);
@@ -1877,7 +1877,7 @@ namespace Microsoft.Build.Shared
         private bool DirectoryExistsForGlob(string path, GlobResultExperiment.Collector collector)
         {
             bool exists = _fileSystem.DirectoryExists(path);
-            collector?.RecordExistence(path, exists);
+            _globResultExperiment?.RecordExistence(collector, path, exists);
             return exists;
         }
 

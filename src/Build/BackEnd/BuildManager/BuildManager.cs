@@ -3767,6 +3767,7 @@ namespace Microsoft.Build.Execution
                     // We should always have finished cleaning up before calling Dispose.
                     RequireState(BuildManagerState.Idle, "ShouldNotDisposeWhenBuildManagerActive");
 
+                    _directoryListingCache?.Clear();
                     _directoryListingCache = null;
 
                     _componentFactories?.ShutdownComponents();

@@ -53,6 +53,22 @@ internal sealed class GlobResultExperiment
         collector.Record((path, (int)kind), new Dependency(path, (int)kind, entries, true));
     }
 
+    internal void RecordExistence(Collector? collector, string path, bool exists)
+    {
+        if (collector is null)
+        {
+            return;
+        }
+
+        if (!exists || !_listings.TryReadDirectoryChangeTime(path, out _))
+        {
+            collector.Reject();
+            return;
+        }
+
+        collector.RecordExistence(path, exists);
+    }
+
     internal bool TryGet(string key, FileMatcher.GetFileSystemEntries rawEntries, Func<string, bool> directoryExists, out string[] files)
     {
         Interlocked.Increment(ref _lookups);
