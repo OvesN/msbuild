@@ -640,7 +640,9 @@ namespace Microsoft.Build.Execution
 #else
                     _loggingService.LogWarning(
 #endif
-                        _loggingContext?.BuildEventContext ?? BuildEventContext.Invalid, null, ElementLocation.Empty,
+                        _loggingContext?.BuildEventContext ?? BuildEventContext.Invalid,
+                        DiagnosticSubcategory.None,
+                        ElementLocation.Empty,
                         "DeprecatedEventSerialization",
                         buildEvent?.GetType().Name ?? string.Empty);
                 }

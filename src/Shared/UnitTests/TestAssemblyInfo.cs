@@ -13,6 +13,7 @@ using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Shared.Debugging;
 using Microsoft.Build.Shared.FileSystem;
 using Microsoft.Build.UnitTests;
 using Microsoft.Build.UnitTests.Shared;
@@ -235,6 +236,9 @@ namespace Microsoft.Build.UnitTests
             // https://github.com/dotnet/msbuild/pull/6274
             _testEnvironment.SetEnvironmentVariable("DOTNET_PERFLOG_DIR", null);
 
+            // Tests and the MSBuild.exe processes they launch must never send VS telemetry.
+            _testEnvironment.SetEnvironmentVariable("MSBUILD_TELEMETRY_OPTOUT", "1");
+
             // The `dotnet` muxer always injects MSBuildSDKsPath / MSBuildExtensionsPath (pointing at the SDK it
             // resolved) into the environment of the MSBuild process it launches. In the bootstrapped CI build the
             // test hosts are spawned by the stage 1 bootstrap `dotnet`, so these leak in pointing at the stage 1
@@ -257,8 +261,8 @@ namespace Microsoft.Build.UnitTests
                     "MSBUILDDEBUGPATH",
                     Path.Combine(ambientDebugPath, $"test_{EnvironmentUtilities.CurrentProcessId}"));
 
-                // Let's re-resolve FrameworkDebugUtils.DebugPath, which is cached, so it picks up new MSBUILDDEBUGPATH
-                FrameworkDebugUtils.SetDebugPath();
+                // Let's re-resolve DebugUtils.DebugPath, which is cached, so it picks up new MSBUILDDEBUGPATH
+                DebugUtils.SetDebugPath();
             }
 
             // Use a project-specific temporary path

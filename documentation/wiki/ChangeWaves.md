@@ -35,11 +35,16 @@ Change wave checks around features will be removed in the release that accompani
 
 ## Current Rotation of Change Waves
 
+### 18.14
+- [AddToWin32Manifest preserves the generated manifest's timestamp when its contents are unchanged, allowing CoreCompile to skip unchanged builds with PreferNativeArm64 enabled.](https://github.com/dotnet/msbuild/issues/15417) Set `MSBUILDDISABLEFEATURESFROMVERSION=18.14` to retain unconditional manifest writes.
+
 ### 18.13
 - Experimental directory-listing reuse retains identity-and-change-time-validated raw listings across evaluations and builds. Windows validation uses volume serial number, directory file ID and `ChangeTime`; Linux validation uses device, inode and `ctime`, including nanoseconds. No modification time is stored or compared. Unavailable required metadata prevents shared reuse. Before enumeration, the directory change time must be at least 3 ms old for the resulting snapshot to enter the shared cache; younger or future timestamps use normal enumeration without waiting. Evaluation-local caches reference the same immutable snapshots, including successful empty listings; failed enumeration results are not shared.
 - Experimental glob-result reuse validates dependencies through those same evaluation-local directory snapshots. Unknown or skipped symbolic-link dependencies prevent sharing a glob result. If validation encounters an I/O failure, the cached glob is discarded and normal glob evaluation determines the result and diagnostics. The 3 ms admission guard is a timestamp-collision mitigation, not a guarantee against concurrent mutation, coarse clocks, or restored change times.
+- [Task hosts preserve ordinary task-environment variables while retaining Windows bitness adjustments.](https://github.com/dotnet/msbuild/pull/15032)
 - [ResolveAssemblyReference discovers redist and subset lists relative to the project directory when `TargetFrameworkDirectories` contains relative paths.](https://github.com/dotnet/msbuild/pull/15089)
 - [ClickOnce application manifest generation resolves relative sentinel assembly dependencies against the task project directory before reading their identities, preventing duplicate .NET Framework 3.0/3.5 prerequisite entries.](https://github.com/dotnet/msbuild/pull/15222)
+- [The logging event queue grows from its default 200,000 events instead of blocking the threads that log, as long as the memory that the GC reports as still available could hold the added capacity. This prevents stalls such as the one of ResolveAssemblyReference in multithreaded builds, and applies to .NET only.](https://github.com/dotnet/msbuild/pull/15281) Setting `MSBUILDLOGGINGQUEUECAPACITY` keeps the queue at a fixed capacity.
 
 ### 18.12
 - [Multi-threaded builds use an empty sentinel current directory, check CWD after tasks, and detect unresolved relative-path writes at project/build completion.](https://github.com/dotnet/msbuild/pull/14917)
