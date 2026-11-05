@@ -212,6 +212,18 @@ namespace Microsoft.Build.Shared
             _implementation = implementation;
             _caseFolding = caseFolding;
             _allowDirectEnumeration = allowDirectEnumeration;
+            if (directoryListingCache is not null && ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_13))
+            {
+                if (fileSystem is CachingFileSystemWrapper { DirectoryListingCache: { } local }
+                    && ReferenceEquals(local.Shared, directoryListingCache.Shared))
+                {
+                    directoryListingCache = local;
+                }
+                else if (getFileSystemDirectoryEntriesCache is not null)
+                {
+                    directoryListingCache = directoryListingCache.ForEvaluation();
+                }
+            }
             _globResultExperiment = directoryListingCache is not null && getFileSystemEntriesWithStatus is not null
                 && ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_13)
                 ? GlobResultExperiment.Create(directoryListingCache)
@@ -260,7 +272,7 @@ namespace Microsoft.Build.Shared
                     if (hasChangeTime
                         // An empty result is reusable only when enumeration completed, not when access was denied.
                         && (entries.Count != 0 || enumerationSucceeded)
-                        && cache.TryReadDirectoryChangeTime(path, out DirectoryChangeStamp after)
+                        && cache.TryReadDirectoryChangeTimeAfterEnumeration(path, out DirectoryChangeStamp after)
                         && before == after)
                     {
                         entries = cache.Store(path, type, entries, before);
@@ -1915,7 +1927,7 @@ namespace Microsoft.Build.Shared
         private bool DirectoryExistsForGlob(string path, GlobResultExperiment.Collector collector)
         {
             bool exists = _fileSystem.DirectoryExists(path);
-            _globResultExperiment?.RecordExistence(collector, path, exists);
+            _globResultExperiment?.RecordExistence(collector, path, exists, _fileSystem);
             return exists;
         }
 

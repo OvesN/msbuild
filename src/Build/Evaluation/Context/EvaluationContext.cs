@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Threading;
 using Microsoft.Build.BackEnd.SdkResolution;
 using Microsoft.Build.FileSystem;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.Shared.FileSystem;
 
@@ -70,9 +71,11 @@ namespace Microsoft.Build.Evaluation.Context
 
             SdkResolverService = sdkResolverService ?? new CachingSdkResolverService();
             FileEntryExpansionCache = fileEntryExpansionCache ?? new ConcurrentDictionary<string, IReadOnlyList<string>>();
-            SharedDirectoryListingCache = directoryListingCache;
-            FileSystem = fileSystem ?? new CachingFileSystemWrapper(FileSystems.Default);
-            FileMatcher = new FileMatcher(FileSystem, FileEntryExpansionCache, directoryListingCache: directoryListingCache);
+            SharedDirectoryListingCache = directoryListingCache?.Shared;
+            DirectoryListingCache evaluationCache = ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave18_13)
+                ? SharedDirectoryListingCache?.CreateEvaluationCache() : null;
+            FileSystem = fileSystem ?? new CachingFileSystemWrapper(FileSystems.Default, evaluationCache);
+            FileMatcher = new FileMatcher(FileSystem, FileEntryExpansionCache, directoryListingCache: evaluationCache);
         }
 
         /// <summary>

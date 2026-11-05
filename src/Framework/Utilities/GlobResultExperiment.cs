@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Shared.FileSystem;
 
 namespace Microsoft.Build.Shared;
 
@@ -30,7 +31,7 @@ internal sealed class GlobResultExperiment
     private GlobResultExperiment(DirectoryListingCache cache)
     {
         _listings = cache;
-        _shared = SharedStates.GetValue(cache, _ => new SharedState());
+        _shared = SharedStates.GetValue(cache.Shared, _ => new SharedState());
     }
 
     internal static GlobResultExperiment? Create(DirectoryListingCache cache)
@@ -43,7 +44,7 @@ internal sealed class GlobResultExperiment
 
     internal static void Clear(DirectoryListingCache cache)
     {
-        if (SharedStates.TryGetValue(cache, out SharedState? state)) { state.Results.Clear(); }
+        if (SharedStates.TryGetValue(cache.Shared, out SharedState? state)) { state.Results.Clear(); }
     }
 
     internal void RecordListing(Collector? collector, string path, FileMatcher.FileSystemEntity kind, IReadOnlyList<string> entries)
@@ -53,14 +54,17 @@ internal sealed class GlobResultExperiment
         collector.Record((path, (int)kind), new Dependency(path, (int)kind, entries, true));
     }
 
-    internal void RecordExistence(Collector? collector, string path, bool exists)
+    internal void RecordExistence(Collector? collector, string path, bool exists, IFileSystem? fileSystem = null)
     {
         if (collector is null)
         {
             return;
         }
 
-        if (!exists || !_listings.CanAttemptSharing(path))
+        if (!_listings.CanAttemptSharing(path)
+            || (!exists && (fileSystem is null || !FileSystems.SupportsDirectoryCache(fileSystem)
+                || (_listings.ValidateMissingPath(path) != DirectorySnapshotStatus.Valid
+                    && !_listings.TryRecordMissingPath(path, fileSystem)))))
         {
             collector.Reject();
             return;
@@ -104,9 +108,13 @@ internal sealed class GlobResultExperiment
             DirectorySnapshotStatus status;
             try
             {
-                status = dependency.Kind < 0
-                    ? (directoryExists(dependency.Path) == dependency.Exists ? DirectorySnapshotStatus.Valid : DirectorySnapshotStatus.Mismatch)
-                    : validateSnapshot(dependency.Path, (FileMatcher.FileSystemEntity)dependency.Kind, dependency.Entries!);
+                status = dependency.Kind switch
+                {
+                    < 0 when dependency.Exists => directoryExists(dependency.Path)
+                        ? DirectorySnapshotStatus.Valid : DirectorySnapshotStatus.Mismatch,
+                    < 0 => _listings.ValidateMissingPath(dependency.Path),
+                    _ => validateSnapshot(dependency.Path, (FileMatcher.FileSystemEntity)dependency.Kind, dependency.Entries!),
+                };
             }
             catch (Exception ex) when (FileMatcher.IsIoRelatedExceptionOrAggregate(ex))
             {
@@ -135,11 +143,12 @@ internal sealed class GlobResultExperiment
         foreach (Dependency dependency in collector.Dependencies.Values)
         {
             if (dependency.Kind < 0
-                && (!dependency.Exists
-                    || (!collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.Files))
+                && (dependency.Exists
+                    ? (!collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.Files))
                         && !collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.Directories))
                         && !collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.FilesAndDirectories))
-                        && !_listings.TryReadDirectoryChangeTime(dependency.Path, out _))))
+                        && !_listings.TryReadDirectoryChangeTime(dependency.Path, out _))
+                    : _listings.ValidateMissingPath(dependency.Path) != DirectorySnapshotStatus.Valid))
             {
                 return;
             }
