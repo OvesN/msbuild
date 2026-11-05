@@ -20,6 +20,25 @@ public class GlobResultExperimentTest(ITestOutputHelper output)
     private readonly ITestOutputHelper _output = output;
 
     [Theory]
+    [InlineData(0, 10_499_999, false)]
+    [InlineData(0, 10_500_000, true)]
+    [InlineData(123_000_000, 9_999, false)]
+    [InlineData(123_000_000, 10_000, true)]
+    [InlineData(123_456_700, 0, true)]
+    [InlineData(123_456_700, -1, false)]
+    [InlineData(999_000_000, 9_999, false)]
+    [InlineData(999_000_000, 10_000, true)]
+    public void CtimeAdmissionUsesBazelTimestampGranularity(int nanoseconds, int elapsedTicks, bool expected)
+    {
+        DateTime second = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        const long unixEpochTicks = 621355968000000000;
+        var stamp = new DirectoryChangeStamp(0, 0, 0,
+            (second.Ticks - unixEpochTicks) / TimeSpan.TicksPerSecond, (uint)nanoseconds);
+
+        stamp.IsOldEnoughToCache(second.AddTicks(nanoseconds / 100 + elapsedTicks)).ShouldBe(expected);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void MissingDirectoryInvalidatesCachedGlob(bool aggregateException)

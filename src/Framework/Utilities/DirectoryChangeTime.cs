@@ -26,13 +26,7 @@ internal readonly record struct DirectoryChangeStamp(
 {
     internal bool IsOldEnoughToCache(DateTime utcNow)
     {
-        // Reject recent ctime values to avoid reuse within one coarse timestamp tick.
-        // 3 ms is an experimental bound, not a filesystem-independent guarantee.
-        // Git likewise distrusts racy timestamps, but its filesystem qualification
-        // waits one second; that test does not justify this shorter ctime-only bound.
-        // See git/git@0ffa3e35c7c8: read-cache.c (is_racy_stat) and
-        // builtin/update-index.c (avoid_racy). Qualify the kernel/filesystem before relying on 3 ms.
-        const long minimumAgeTicks = 3 * TimeSpan.TicksPerMillisecond;
+        long minimumAgeTicks = GetMinimumAgeTicks(Nanoseconds);
         const long unixEpochTicks = 621355968000000000;
         long cutoff = utcNow.Ticks - unixEpochTicks - minimumAgeTicks;
         long seconds = Math.DivRem(cutoff, TimeSpan.TicksPerSecond, out long ticks);
@@ -44,6 +38,16 @@ internal readonly record struct DirectoryChangeStamp(
 
         return Value < seconds || (Value == seconds && Nanoseconds <= ticks * 100);
     }
+
+    // Follow Bazel's TimestampGranularityMonitor (bazelbuild/bazel@fad396b9a3d1):
+    // whole seconds need 1 s + 50 ms slack, whole milliseconds need 1 ms, finer ctime needs no delay.
+    // Instead of waiting at command end, age-rejected or future stamps use fresh enumeration.
+    private static long GetMinimumAgeTicks(uint nanoseconds) => nanoseconds switch
+    {
+        0 => TimeSpan.TicksPerSecond + 50 * TimeSpan.TicksPerMillisecond,
+        _ when nanoseconds % 1_000_000 == 0 => TimeSpan.TicksPerMillisecond,
+        _ => 0,
+    };
 }
 
 internal static partial class DirectoryChangeTime
