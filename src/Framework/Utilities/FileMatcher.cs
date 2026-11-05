@@ -155,6 +155,7 @@ namespace Microsoft.Build.Shared
         private readonly GetFileSystemEntries _getFileSystemEntries;
         private readonly GlobResultExperiment _globResultExperiment;
         private readonly GetFileSystemEntries _getRawDirectoryEntries;
+        private readonly GlobResultExperiment.SnapshotValidator _validateDirectorySnapshot;
 
         /// <summary>
         /// The Default FileMatcher does not cache directory enumeration.
@@ -223,7 +224,8 @@ namespace Microsoft.Build.Shared
                     getFileSystemEntries,
                     getFileSystemDirectoryEntriesCache,
                     getFileSystemEntriesWithStatus,
-                    out _getRawDirectoryEntries);
+                    out _getRawDirectoryEntries,
+                    out _validateDirectorySnapshot);
             }
             else if (getFileSystemDirectoryEntriesCache is not null)
             {
@@ -242,7 +244,8 @@ namespace Microsoft.Build.Shared
             GetFileSystemEntries enumerate,
             ConcurrentDictionary<string, IReadOnlyList<string>> fileEntryExpansionCache,
             GetFileSystemEntriesWithStatus enumerateWithStatus,
-            out GetFileSystemEntries rawEntries)
+            out GetFileSystemEntries rawEntries,
+            out GlobResultExperiment.SnapshotValidator validateSnapshot)
         {
             GetFileSystemEntries getEntries = (type, path, pattern, directory, stripProjectDirectory) =>
             {
@@ -276,6 +279,26 @@ namespace Microsoft.Build.Shared
                     return fileEntryExpansionCache.GetOrAdd(key, _ => getEntries(type, path, "*", directory, false));
                 };
             GetFileSystemEntries acquireRaw = rawEntries;
+            validateSnapshot = (path, type, snapshot) =>
+            {
+                string key = GetDirectoryEntryCacheKey(type, path);
+                if (fileEntryExpansionCache is not null && fileEntryExpansionCache.TryGetValue(key, out var current))
+                {
+                    return ReferenceEquals(current, snapshot)
+                        ? DirectorySnapshotStatus.Valid
+                        : cache.IsSnapshot(path, type, snapshot) ? DirectorySnapshotStatus.Unavailable : DirectorySnapshotStatus.Mismatch;
+                }
+                DirectorySnapshotStatus status = cache.TryValidate(path, type, snapshot);
+                if (status == DirectorySnapshotStatus.Valid && fileEntryExpansionCache is not null)
+                {
+                    current = fileEntryExpansionCache.GetOrAdd(key, snapshot);
+                    if (!ReferenceEquals(current, snapshot))
+                    {
+                        return cache.IsSnapshot(path, type, snapshot) ? DirectorySnapshotStatus.Unavailable : DirectorySnapshotStatus.Mismatch;
+                    }
+                }
+                return status;
+            };
             return (type, path, pattern, directory, strip) =>
                 FilterDirectoryEntries(acquireRaw(type, path, pattern, directory, strip), pattern, directory, strip);
         }
@@ -1810,7 +1833,7 @@ namespace Microsoft.Build.Shared
                     category: nameof(FileMatcher));
             }
 
-            if (_cachedGlobExpansions == null)
+            if (_cachedGlobExpansions == null || string.IsNullOrEmpty(projectDirectoryUnescaped))
             {
                 return GetFilesForImplementation(
                     projectDirectoryUnescaped,
@@ -1843,12 +1866,13 @@ namespace Microsoft.Build.Shared
                                 enumerationKey,
                                 (_) =>
                                 {
-                                    if (_globResultExperiment is not null
-                                        && _globResultExperiment.TryGet(enumerationKey, _getRawDirectoryEntries, _fileSystem.DirectoryExists, out string[] sharedFiles))
+                                    bool share = CanShareGlob(projectDirectoryUnescaped, filespecUnescaped);
+                                    if (share && _globResultExperiment is not null
+                                        && _globResultExperiment.TryGet(enumerationKey, _validateDirectorySnapshot, _fileSystem.DirectoryExists, out string[] sharedFiles))
                                     {
                                         return sharedFiles;
                                     }
-                                    var collector = _globResultExperiment is null ? null : new GlobResultExperiment.Collector();
+                                    var collector = share ? new GlobResultExperiment.Collector() : null;
                                     (fileList, action, excludeFileSpec, globFailure) = GetFilesForImplementation(
                                         projectDirectoryUnescaped,
                                         filespecUnescaped,
@@ -1871,6 +1895,20 @@ namespace Microsoft.Build.Shared
             var filesToReturn = files.ToArray();
 
             return (filesToReturn, action, excludeFileSpec, globFailure);
+        }
+
+        private bool CanShareGlob(string? projectDirectory, string filespec)
+        {
+            if (_globResultExperiment is null || string.IsNullOrEmpty(projectDirectory)) { return false; }
+            try
+            {
+                string? directory = Path.IsPathRooted(filespec) ? Path.GetPathRoot(filespec) : projectDirectory;
+                return directory is not null && directory.Length != 0 && _globResultExperiment.CanAttemptSharing(directory);
+            }
+            catch (Exception ex) when (IsIoRelatedExceptionOrAggregate(ex))
+            {
+                return false;
+            }
         }
 #nullable disable
 

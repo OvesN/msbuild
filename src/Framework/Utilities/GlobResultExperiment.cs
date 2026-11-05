@@ -60,7 +60,7 @@ internal sealed class GlobResultExperiment
             return;
         }
 
-        if (!exists || !_listings.TryReadDirectoryChangeTime(path, out _))
+        if (!exists || !_listings.CanAttemptSharing(path))
         {
             collector.Reject();
             return;
@@ -69,46 +69,58 @@ internal sealed class GlobResultExperiment
         collector.RecordExistence(path, exists);
     }
 
-    internal bool TryGet(string key, FileMatcher.GetFileSystemEntries rawEntries, Func<string, bool> directoryExists, out string[] files)
+    internal delegate DirectorySnapshotStatus SnapshotValidator(string path, FileMatcher.FileSystemEntity kind, IReadOnlyList<string> entries);
+
+    internal bool CanAttemptSharing(string directory) => _listings.CanAttemptSharing(directory);
+
+    internal bool TryGet(string key, SnapshotValidator validateSnapshot, Func<string, bool> directoryExists, out string[] files)
     {
         Interlocked.Increment(ref _lookups);
         if (_shared.Results.TryGetValue(key, out Entry? entry))
         {
-            if (Validate(entry.Dependencies, rawEntries, directoryExists))
+            DirectorySnapshotStatus status = Validate(entry.Dependencies, validateSnapshot, directoryExists);
+            if (status == DirectorySnapshotStatus.Valid)
             {
                 Interlocked.Increment(ref _hits);
                 files = entry.Files;
                 return true;
             }
-            Interlocked.Increment(ref _invalidated);
-            ((ICollection<KeyValuePair<string, Entry>>)_shared.Results).Remove(new KeyValuePair<string, Entry>(key, entry));
+            if (status == DirectorySnapshotStatus.Mismatch)
+            {
+                Interlocked.Increment(ref _invalidated);
+                ((ICollection<KeyValuePair<string, Entry>>)_shared.Results).Remove(new KeyValuePair<string, Entry>(key, entry));
+            }
         }
         files = [];
         return false;
     }
 
-    private static bool Validate(ImmutableArray<Dependency> dependencies, FileMatcher.GetFileSystemEntries rawEntries, Func<string, bool> directoryExists)
+    private DirectorySnapshotStatus Validate(ImmutableArray<Dependency> dependencies, SnapshotValidator validateSnapshot, Func<string, bool> directoryExists)
     {
+        DirectorySnapshotStatus result = DirectorySnapshotStatus.Valid;
         foreach (Dependency dependency in dependencies)
         {
             long started = Stopwatch.GetTimestamp();
-            bool valid;
+            DirectorySnapshotStatus status;
             try
             {
-                valid = dependency.Kind < 0
-                    ? directoryExists(dependency.Path) == dependency.Exists
-                    : ReferenceEquals(rawEntries((FileMatcher.FileSystemEntity)dependency.Kind, dependency.Path, "*", null, false), dependency.Entries);
+                status = dependency.Kind < 0
+                    ? (directoryExists(dependency.Path) == dependency.Exists ? DirectorySnapshotStatus.Valid : DirectorySnapshotStatus.Mismatch)
+                    : validateSnapshot(dependency.Path, (FileMatcher.FileSystemEntity)dependency.Kind, dependency.Entries!);
             }
             catch (Exception ex) when (FileMatcher.IsIoRelatedExceptionOrAggregate(ex))
             {
                 DebugTrace.WriteLine($"Could not validate cached glob dependency '{dependency.Path}': {ex.Message}", category: nameof(GlobResultExperiment));
-                valid = false;
+                status = dependency.Kind >= 0
+                    && _listings.IsSnapshot(dependency.Path, (FileMatcher.FileSystemEntity)dependency.Kind, dependency.Entries!)
+                    ? DirectorySnapshotStatus.Unavailable : DirectorySnapshotStatus.Mismatch;
             }
             Interlocked.Increment(ref _probes);
             Interlocked.Add(ref _probeTicks, Stopwatch.GetTimestamp() - started);
-            if (!valid) { return false; }
+            if (status == DirectorySnapshotStatus.Mismatch) { return status; }
+            if (status == DirectorySnapshotStatus.Unavailable) { result = status; }
         }
-        return true;
+        return result;
     }
 
     internal void Store(string key, string[] files, FileMatcher.SearchAction action, string? failure, Collector collector)
@@ -120,7 +132,19 @@ internal sealed class GlobResultExperiment
             return;
         }
         var dependencies = ImmutableArray.CreateBuilder<Dependency>(collector.Dependencies.Count);
-        foreach (Dependency dependency in collector.Dependencies.Values) { dependencies.Add(dependency); }
+        foreach (Dependency dependency in collector.Dependencies.Values)
+        {
+            if (dependency.Kind < 0
+                && (!dependency.Exists
+                    || (!collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.Files))
+                        && !collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.Directories))
+                        && !collector.Dependencies.ContainsKey((dependency.Path, (int)FileMatcher.FileSystemEntity.FilesAndDirectories))
+                        && !_listings.TryReadDirectoryChangeTime(dependency.Path, out _))))
+            {
+                return;
+            }
+            dependencies.Add(dependency);
+        }
         if (dependencies.Count == 0) { return; }
         if (_shared.Results.TryAdd(key, new Entry(files, dependencies.MoveToImmutable())))
         {

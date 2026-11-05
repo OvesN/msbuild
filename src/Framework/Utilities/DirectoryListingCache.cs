@@ -16,13 +16,20 @@ namespace Microsoft.Build.Shared;
 /// </summary>
 internal sealed class DirectoryListingCache
 {
+    private const int MaximumUnsupportedDirectories = 65536;
     private readonly ConcurrentDictionary<(string Directory, FileMatcher.FileSystemEntity Kind), Listing> _listings = new();
     private readonly string[] _excludedRoots;
+    private readonly DirectoryStampReader _readStamp;
+    private readonly ConcurrentDictionary<string, byte> _unsupportedDirectories = new(FileUtilities.PathComparer);
 #if FEATURE_WINDOWSINTEROP
     private readonly DirectoryJournal? _journal;
 #endif
 
-    internal DirectoryListingCache()
+    internal DirectoryListingCache() : this(null)
+    {
+    }
+
+    internal DirectoryListingCache(DirectoryStampReader? readStamp)
     {
         string? excludedRoots = Environment.GetEnvironmentVariable("MSBUILDDIRECTORYCACHEEXCLUDEROOTS");
         _excludedRoots = string.IsNullOrEmpty(excludedRoots)
@@ -47,6 +54,7 @@ internal sealed class DirectoryListingCache
             _journal = new DirectoryJournal();
         }
 #endif
+        _readStamp = readStamp ?? ReadNativeStamp;
     }
 
     internal bool CanStore(DirectoryChangeStamp stamp, DateTime utcNow)
@@ -91,41 +99,84 @@ internal sealed class DirectoryListingCache
     internal bool IsSnapshot(string directory, FileMatcher.FileSystemEntity kind, IReadOnlyList<string> entries)
         => _listings.TryGetValue((directory, kind), out Listing listing) && ReferenceEquals(listing.Entries, entries);
 
-    private bool IsUpToDate(string directory, Listing listing)
+    internal DirectorySnapshotStatus TryValidate(string directory, FileMatcher.FileSystemEntity kind, IReadOnlyList<string> entries)
     {
-        if (TryReadDirectoryChangeTime(directory, out DirectoryChangeStamp current)
-            && listing.ChangeTime == current)
+        if (!_listings.TryGetValue((directory, kind), out Listing listing) || !ReferenceEquals(listing.Entries, entries))
         {
-            return true;
+            return DirectorySnapshotStatus.Mismatch;
+        }
+
+        return Validate(directory, listing);
+    }
+
+    private bool IsUpToDate(string directory, Listing listing)
+        => Validate(directory, listing) == DirectorySnapshotStatus.Valid;
+
+    private DirectorySnapshotStatus Validate(string directory, Listing listing)
+    {
+        DirectoryStampStatus status = ReadStamp(directory, out DirectoryChangeStamp current);
+        if (status == DirectoryStampStatus.Unavailable)
+        {
+            return DirectorySnapshotStatus.Unavailable;
+        }
+
+        if (status == DirectoryStampStatus.Available && listing.ChangeTime == current)
+        {
+            return DirectorySnapshotStatus.Valid;
         }
 
         _listings.TryRemove((directory, FileMatcher.FileSystemEntity.Files), out _);
         _listings.TryRemove((directory, FileMatcher.FileSystemEntity.Directories), out _);
         _listings.TryRemove((directory, FileMatcher.FileSystemEntity.FilesAndDirectories), out _);
-        return false;
+        return DirectorySnapshotStatus.Mismatch;
     }
 
     internal bool TryReadDirectoryChangeTime(string directory, out DirectoryChangeStamp changeTime)
+        => ReadStamp(directory, out changeTime) == DirectoryStampStatus.Available;
+
+    internal bool CanAttemptSharing(string directory)
+    {
+        if (_unsupportedDirectories.ContainsKey(directory) || IsExcluded(directory))
+        {
+            return false;
+        }
+#if FEATURE_WINDOWSINTEROP
+        if (NativeMethods.IsWindows && _journal is not null) { return _journal.CanAttemptSharing(directory); }
+#endif
+        return true;
+    }
+
+    private DirectoryStampStatus ReadStamp(string directory, out DirectoryChangeStamp changeTime)
     {
         try
         {
-            if (IsExcluded(directory))
+            if (!CanAttemptSharing(directory))
             {
                 changeTime = default;
-                return false;
+                return DirectoryStampStatus.Unavailable;
             }
 
-#if FEATURE_WINDOWSINTEROP
-            if (NativeMethods.IsWindows && _journal is not null) { return _journal.TryRead(directory, out changeTime); }
-#endif
-            return DirectoryChangeTime.TryRead(directory, out changeTime);
+            return _readStamp(directory, out changeTime);
         }
         catch (Exception ex) when (ExceptionHandling.IsIoRelatedException(ex))
         {
             DebugTrace.WriteLine($"Could not read directory change time for '{directory}': {ex.Message}", category: nameof(DirectoryListingCache));
             changeTime = default;
-            return false;
+            return DirectoryStampStatus.Unavailable;
         }
+    }
+
+    private DirectoryStampStatus ReadNativeStamp(string directory, out DirectoryChangeStamp stamp)
+    {
+#if FEATURE_WINDOWSINTEROP
+        if (NativeMethods.IsWindows && _journal is not null) { return _journal.Read(directory, out stamp); }
+#endif
+        DirectoryStampStatus status = DirectoryChangeTime.Read(directory, out stamp, out bool unsupportedFileSystem);
+        if (unsupportedFileSystem && _unsupportedDirectories.Count < MaximumUnsupportedDirectories)
+        {
+            _unsupportedDirectories.TryAdd(directory, 0);
+        }
+        return status;
     }
 
     internal bool IsExcluded(string directory)
@@ -151,6 +202,7 @@ internal sealed class DirectoryListingCache
     internal void Clear()
     {
         _listings.Clear();
+        _unsupportedDirectories.Clear();
         GlobResultExperiment.Clear(this);
 #if FEATURE_WINDOWSINTEROP
         if (NativeMethods.IsWindows) { _journal?.Clear(); }

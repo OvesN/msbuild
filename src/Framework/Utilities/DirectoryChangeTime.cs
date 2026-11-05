@@ -6,18 +6,16 @@ using System;
 using System.Text;
 using Microsoft.Build.Utilities;
 #endif
-#if FEATURE_WINDOWSINTEROP || NET
+#if NET
 using System.Runtime.InteropServices;
 using Microsoft.Build.Framework;
 #endif
-#if FEATURE_WINDOWSINTEROP
-using System.Runtime.Versioning;
-using Windows.Win32;
-using Windows.Win32.Foundation;
-using Windows.Win32.Storage.FileSystem;
-#endif
 
 namespace Microsoft.Build.Shared;
+
+internal enum DirectoryStampStatus { Unavailable, Available, Missing }
+internal enum DirectorySnapshotStatus { Unavailable, Valid, Mismatch }
+internal delegate DirectoryStampStatus DirectoryStampReader(string path, out DirectoryChangeStamp stamp);
 
 internal readonly record struct DirectoryChangeStamp(
     ulong VolumeOrDevice,
@@ -29,45 +27,33 @@ internal readonly record struct DirectoryChangeStamp(
     internal bool IsOldEnoughToCache(DateTime utcNow)
     {
         const long minimumAgeTicks = 3 * TimeSpan.TicksPerMillisecond;
-        if (NativeMethods.IsWindows)
+        const long unixEpochTicks = 621355968000000000;
+        long cutoff = utcNow.Ticks - unixEpochTicks - minimumAgeTicks;
+        long seconds = Math.DivRem(cutoff, TimeSpan.TicksPerSecond, out long ticks);
+        if (ticks < 0)
         {
-            return Value > 0 && Value <= utcNow.ToFileTimeUtc() - minimumAgeTicks;
+            seconds--;
+            ticks += TimeSpan.TicksPerSecond;
         }
 
-#if NET
-        if (NativeMethods.IsLinux)
-        {
-            long cutoff = utcNow.Ticks - DateTime.UnixEpoch.Ticks - minimumAgeTicks;
-            long seconds = Math.DivRem(cutoff, TimeSpan.TicksPerSecond, out long ticks);
-            if (ticks < 0)
-            {
-                seconds--;
-                ticks += TimeSpan.TicksPerSecond;
-            }
-
-            return Value < seconds || (Value == seconds && Nanoseconds <= ticks * 100);
-        }
-#endif
-        return false;
+        return Value < seconds || (Value == seconds && Nanoseconds <= ticks * 100);
     }
 }
 
 internal static partial class DirectoryChangeTime
 {
     internal static bool TryRead(string path, out DirectoryChangeStamp stamp)
+        => Read(path, out stamp, out _) == DirectoryStampStatus.Available;
+
+    internal static DirectoryStampStatus Read(string path, out DirectoryChangeStamp stamp, out bool unsupportedFileSystem)
     {
-#if FEATURE_WINDOWSINTEROP
-        if (NativeMethods.IsWindows)
-        {
-            return TryReadWindows(path, out stamp);
-        }
-#endif
+        unsupportedFileSystem = false;
 #if NET
         if (NativeMethods.IsLinux)
         {
             try
             {
-                return TryReadLinux(path, out stamp);
+                return ReadLinux(path, out stamp, out unsupportedFileSystem);
             }
             catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
             {
@@ -76,60 +62,8 @@ internal static partial class DirectoryChangeTime
         }
 #endif
         stamp = default;
-        return false;
+        return DirectoryStampStatus.Unavailable;
     }
-
-#if FEATURE_WINDOWSINTEROP
-    [SupportedOSPlatform("windows6.1")]
-    private static unsafe bool TryReadWindows(string path, out DirectoryChangeStamp stamp)
-    {
-        stamp = default;
-        HANDLE handle;
-        fixed (char* pointer = path)
-        {
-            handle = PInvoke.CreateFile(
-                new PCWSTR(pointer),
-                (uint)(FILE_ACCESS_RIGHTS.FILE_READ_ATTRIBUTES | FILE_ACCESS_RIGHTS.FILE_LIST_DIRECTORY),
-                FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE,
-                null,
-                FILE_CREATION_DISPOSITION.OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OPEN_REPARSE_POINT,
-                HANDLE.Null);
-        }
-        if (handle == HANDLE.INVALID_HANDLE_VALUE)
-        {
-            TraceFailure(path, Marshal.GetLastWin32Error());
-            return false;
-        }
-        try
-        {
-            FILE_ID_INFO identity;
-            FILE_BASIC_INFO basic;
-            if (!PInvoke.GetFileInformationByHandleEx(handle, FILE_INFO_BY_HANDLE_CLASS.FileIdInfo, &identity, (uint)sizeof(FILE_ID_INFO))
-                || !PInvoke.GetFileInformationByHandleEx(handle, FILE_INFO_BY_HANDLE_CLASS.FileBasicInfo, &basic, (uint)sizeof(FILE_BASIC_INFO)))
-            {
-                TraceFailure(path, Marshal.GetLastWin32Error());
-                return false;
-            }
-            if ((basic.FileAttributes & (uint)(FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY | FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_REPARSE_POINT))
-                != (uint)FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY
-                || basic.ChangeTime == 0)
-            {
-                return false;
-            }
-            ulong* identifier = (ulong*)&identity.FileId;
-            stamp = new DirectoryChangeStamp(identity.VolumeSerialNumber, identifier[0], identifier[1], basic.ChangeTime);
-            return true;
-        }
-        finally
-        {
-            if (!PInvoke.CloseHandle(handle))
-            {
-                TraceFailure(path, Marshal.GetLastWin32Error());
-            }
-        }
-    }
-#endif
 
 #if NET
     [Flags]
@@ -182,9 +116,10 @@ internal static partial class DirectoryChangeTime
     [LibraryImport("libc", EntryPoint = "statfs", SetLastError = true)]
     private static unsafe partial int Statfs(byte* path, void* result);
 
-    private static unsafe bool TryReadLinux(string path, out DirectoryChangeStamp stamp)
+    private static unsafe DirectoryStampStatus ReadLinux(string path, out DirectoryChangeStamp stamp, out bool unsupportedFileSystem)
     {
         stamp = default;
+        unsupportedFileSystem = false;
         const int currentDirectory = -100; // AT_FDCWD
         const StatxFields required = StatxFields.Type | StatxFields.ChangeTime | StatxFields.Identity | StatxFields.MountId;
         int length = Encoding.UTF8.GetByteCount(path);
@@ -198,10 +133,15 @@ internal static partial class DirectoryChangeTime
         {
             fixed (byte* information = fileSystem)
             {
-                if (Statfs(pointer, information) != 0
-                    || !IsSupportedLinuxFileSystem(unchecked((uint)MemoryMarshal.Read<nint>(fileSystem.AsSpan()))))
+                if (Statfs(pointer, information) != 0)
                 {
-                    return false;
+                    return MissingOrUnavailable(Marshal.GetLastPInvokeError());
+                }
+
+                if (!IsSupportedLinuxFileSystem(unchecked((uint)MemoryMarshal.Read<nint>(fileSystem.AsSpan()))))
+                {
+                    unsupportedFileSystem = true;
+                    return DirectoryStampStatus.Unavailable;
                 }
             }
 
@@ -209,15 +149,16 @@ internal static partial class DirectoryChangeTime
         }
         if (result != 0)
         {
-            TraceFailure(path, Marshal.GetLastPInvokeError());
-            return false;
+            int error = Marshal.GetLastPInvokeError();
+            TraceFailure(path, error);
+            return MissingOrUnavailable(error);
         }
         if ((data.Fields & required) != required
             || (data.FileType & UnixFileType.Mask) != UnixFileType.Directory
             || data.ChangeNanoseconds >= 1_000_000_000)
         {
             DebugTrace.WriteLine($"Directory change-time metadata is incomplete for '{path}'.", category: nameof(DirectoryChangeTime));
-            return false;
+            return DirectoryStampStatus.Unavailable;
         }
         stamp = new DirectoryChangeStamp(
             ((ulong)data.DeviceMajor << 32) | data.DeviceMinor,
@@ -225,8 +166,11 @@ internal static partial class DirectoryChangeTime
             data.MountId,
             data.ChangeSeconds,
             data.ChangeNanoseconds);
-        return true;
+        return DirectoryStampStatus.Available;
     }
+
+    private static DirectoryStampStatus MissingOrUnavailable(int error)
+        => error is 2 or 20 ? DirectoryStampStatus.Missing : DirectoryStampStatus.Unavailable;
 
     // Filesystem identification is an admission policy, not proof of timestamp uniqueness.
     private static bool IsSupportedLinuxFileSystem(uint type) => type is
@@ -236,7 +180,7 @@ internal static partial class DirectoryChangeTime
         or 0x01021994; // tmpfs
 #endif
 
-#if FEATURE_WINDOWSINTEROP || NET
+#if NET
     private static void TraceFailure(string path, int error)
         => DebugTrace.WriteLine($"Could not read directory change time for '{path}': native error {error}.", category: nameof(DirectoryChangeTime));
 #endif
