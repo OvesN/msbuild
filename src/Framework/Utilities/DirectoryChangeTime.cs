@@ -26,6 +26,12 @@ internal readonly record struct DirectoryChangeStamp(
 {
     internal bool IsOldEnoughToCache(DateTime utcNow)
     {
+        // Reject recent ctime values to avoid reuse within one coarse timestamp tick.
+        // 3 ms is an experimental bound, not a filesystem-independent guarantee.
+        // Git likewise distrusts racy timestamps, but its filesystem qualification
+        // waits one second; that test does not justify this shorter ctime-only bound.
+        // See git/git@0ffa3e35c7c8: read-cache.c (is_racy_stat) and
+        // builtin/update-index.c (avoid_racy). Qualify the kernel/filesystem before relying on 3 ms.
         const long minimumAgeTicks = 3 * TimeSpan.TicksPerMillisecond;
         const long unixEpochTicks = 621355968000000000;
         long cutoff = utcNow.Ticks - unixEpochTicks - minimumAgeTicks;

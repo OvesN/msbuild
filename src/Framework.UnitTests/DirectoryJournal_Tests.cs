@@ -186,6 +186,27 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     }
 
     [WindowsOnlyFact]
+    public void CurrentHeadBootstrapRechecksAncestorEligibilityWithoutNewJournalRecords()
+    {
+        var journal = new DirectoryJournal();
+        var state = new DirectoryJournal.JournalState(new()
+        {
+            UsnJournalID = 1, FirstUsn = 64, NextUsn = 128,
+        });
+        var reader = new FakeReader
+        {
+            Head = _ => new() { UsnJournalID = 1, FirstUsn = 64, NextUsn = 128 },
+        };
+        int walks = 0;
+        bool Walk(string _) => ++walks == 1;
+        DirectoryStampStatus Qualify() => journal.Qualify(@"C:\fixture", Guid.Empty, new(10), state, reader, Walk, out _);
+
+        Qualify().ShouldBe(DirectoryStampStatus.Available);
+        Qualify().ShouldBe(DirectoryStampStatus.Unavailable);
+        walks.ShouldBe(2);
+    }
+
+    [WindowsOnlyFact]
     public void BasicInformationChangesDoNotInvalidateNameOnlyListings()
     {
         var state = CreateState();
@@ -278,6 +299,26 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     }
 
     [WindowsOnlyFact]
+    public void AnEmptyNonProgressingReadDefersWithoutDisablingTracking()
+    {
+        var state = CreateState();
+        var reader = new FakeReader
+        {
+            Head = _ => new() { UsnJournalID = 1, NextUsn = 64 },
+            ReadBuffer = start => Buffer(start),
+        };
+        DirectoryJournal.DirectoryId directory = new(10);
+        DirectoryJournal.CatchUp(state, reader, directory, out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        state.Cursor.ShouldBe(0);
+        state.Disabled.ShouldBeFalse();
+
+        reader.ReadBuffer = _ => Buffer(64, Entry(0, new(20), directory,
+            PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_CLOSE));
+        DirectoryJournal.CatchUp(state, reader, directory, out long version).ShouldBe(DirectoryStampStatus.Available);
+        version.ShouldBeGreaterThan(0);
+    }
+
+    [WindowsOnlyFact]
     public void RejectedRootsAvoidNativeCallsUntilClearWithoutPoisoningOtherRoots()
     {
         int calls = 0;
@@ -304,10 +345,10 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     }
 
     [WindowsOnlyTheory]
-    [InlineData(1, 0)]
-    [InlineData(0, 1)]
-    [InlineData(1, 1)]
-    public void IncompleteStartupHistoryCannotSeedSnapshots(long firstUsn, long lowestUsn)
+    [InlineData(64, 0)]
+    [InlineData(0, 64)]
+    [InlineData(64, 64)]
+    public void RetainedStartupHistoryTracksOnlyChangesAfterTheCurrentCheckpoint(long firstUsn, long lowestUsn)
     {
         USN_JOURNAL_DATA_V0 info = new()
         {
@@ -316,8 +357,52 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
             LowestValidUsn = lowestUsn,
             NextUsn = 128,
         };
-        DirectoryJournal.JournalState.HasCompleteHistory(info).ShouldBeFalse();
         var state = new DirectoryJournal.JournalState(info);
+        state.Disabled.ShouldBeFalse();
+        state.Cursor.ShouldBe(128);
+        var reader = new FakeReader
+        {
+            Head = _ => info,
+            ReadBuffer = _ => throw new InvalidOperationException("Historical records must not be replayed at startup."),
+        };
+        DirectoryJournal.DirectoryId directory = new(10);
+        DirectoryJournal.CatchUp(state, reader, directory, out long before).ShouldBe(DirectoryStampStatus.Available);
+
+        info.NextUsn = 192;
+        reader.ReadBuffer = _ => Buffer(192, Entry(128, new(20), directory,
+            PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_CLOSE));
+        DirectoryJournal.CatchUp(state, reader, directory, out long after).ShouldBe(DirectoryStampStatus.Available);
+        after.ShouldBeGreaterThan(before);
+    }
+
+    [WindowsOnlyFact]
+    public void TrimmingBeforeTheCurrentCheckpointIsAllowedButLosingUnreadChangesIsNot()
+    {
+        var state = new DirectoryJournal.JournalState(new()
+        {
+            UsnJournalID = 1, FirstUsn = 64, NextUsn = 128,
+        });
+        var reader = new FakeReader
+        {
+            Head = _ => new() { UsnJournalID = 1, FirstUsn = 96, LowestValidUsn = 64, NextUsn = 128 },
+        };
+        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Available);
+        reader.Head = _ => new() { UsnJournalID = 1, FirstUsn = 129, NextUsn = 192 };
+        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        state.Disabled.ShouldBeTrue();
+    }
+
+    [WindowsOnlyTheory]
+    [InlineData(-1, 0, 128)]
+    [InlineData(0, -1, 128)]
+    [InlineData(129, 0, 128)]
+    [InlineData(0, 129, 128)]
+    public void InvalidStartupCheckpointsCannotSeedSnapshots(long firstUsn, long lowestUsn, long nextUsn)
+    {
+        var state = new DirectoryJournal.JournalState(new()
+        {
+            UsnJournalID = 1, FirstUsn = firstUsn, LowestValidUsn = lowestUsn, NextUsn = nextUsn,
+        });
         state.Track(new(10));
         state.TryGetVersion(new(10), out _).ShouldBeFalse();
     }

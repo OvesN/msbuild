@@ -248,7 +248,8 @@ internal sealed unsafe class DirectoryJournal
 
         ulong epoch = state.Epoch;
         var qualification = new Qualification(volumeId, id, epoch);
-        if (_qualifications.TryGetValue(path, out Qualification current) && current == qualification)
+        if (!state.RequiresAncestorValidation
+            && _qualifications.TryGetValue(path, out Qualification current) && current == qualification)
         {
             return DirectoryStampStatus.Available;
         }
@@ -261,8 +262,11 @@ internal sealed unsafe class DirectoryJournal
             return DirectoryStampStatus.Unavailable;
         }
 
-        if (_qualifications.Count >= MaximumQualifications) { _qualifications.Clear(); }
-        _qualifications[path] = qualification;
+        if (!state.RequiresAncestorValidation)
+        {
+            if (_qualifications.Count >= MaximumQualifications) { _qualifications.Clear(); }
+            _qualifications[path] = qualification;
+        }
         return DirectoryStampStatus.Available;
     }
 
@@ -352,14 +356,9 @@ internal sealed unsafe class DirectoryJournal
             }
 
             DebugTrace.WriteLine($"Directory journal '{path}': initial NextUsn={info.NextUsn}.", category: nameof(DirectoryJournal));
-            if (!JournalState.HasCompleteHistory(info))
+            if (!JournalState.HasValidCheckpoint(info))
             {
-                rejection = RejectionReason.IncompleteHistory;
-                return null;
-            }
-            if (info.NextUsn > MaximumReadBytes)
-            {
-                rejection = RejectionReason.InitialHistoryTooLarge;
+                rejection = RejectionReason.InvalidJournal;
                 return null;
             }
 
@@ -401,6 +400,10 @@ internal sealed unsafe class DirectoryJournal
                 }
                 remainingReadBytes -= data.Length;
                 if (remainingReadBytes < 0) { return DirectoryStampStatus.Unavailable; }
+                if (data.Length == sizeof(long) && BinaryPrimitives.ReadInt64LittleEndian(data.Span) == state.Cursor)
+                {
+                    return DirectoryStampStatus.Unavailable;
+                }
                 if (!state.ApplyBuffer(data.Span))
                 {
                     state.Disable();
@@ -509,6 +512,7 @@ internal sealed unsafe class DirectoryJournal
         private readonly HashSet<DirectoryId> _globalPending = new();
         private bool _requiresCompleteHistory;
         internal readonly ulong JournalId;
+        internal readonly bool RequiresAncestorValidation;
         internal long Cursor { get; private set; }
         internal ulong Epoch { get; private set; } = NextEpoch();
         internal bool Disabled { get; private set; }
@@ -516,16 +520,22 @@ internal sealed unsafe class DirectoryJournal
         internal JournalState(USN_JOURNAL_DATA_V0 info)
         {
             JournalId = info.UsnJournalID;
-            Cursor = info.FirstUsn;
-            Disabled = !HasCompleteHistory(info);
+            Cursor = info.NextUsn;
+            // Pre-checkpoint coalesced reparse/security changes cannot safely qualify the ancestor memo.
+            RequiresAncestorValidation = Cursor != 0;
+            Disabled = !HasValidCheckpoint(info);
         }
 
-        // Otherwise an unclosed, coalesced change may predate the first retained record.
+        internal static bool HasValidCheckpoint(USN_JOURNAL_DATA_V0 info)
+            => info.FirstUsn >= 0 && info.LowestValidUsn >= 0
+                && info.NextUsn >= info.FirstUsn && info.NextUsn >= info.LowestValidUsn;
+
+        // A zero-start read can skip records silently if the journal is trimmed during the read.
         internal static bool HasCompleteHistory(USN_JOURNAL_DATA_V0 info)
             => info.FirstUsn == 0 && info.LowestValidUsn == 0 && info.NextUsn >= 0;
 
         internal bool IsContinuous(USN_JOURNAL_DATA_V0 info)
-            => !Disabled && info.UsnJournalID == JournalId
+            => !Disabled && HasValidCheckpoint(info) && info.UsnJournalID == JournalId
                 && Cursor >= info.FirstUsn && Cursor >= info.LowestValidUsn && Cursor <= info.NextUsn
                 && (!(Cursor == 0 || _requiresCompleteHistory) || HasCompleteHistory(info));
 
