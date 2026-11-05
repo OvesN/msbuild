@@ -28,16 +28,16 @@ internal readonly record struct DirectoryChangeStamp(
 {
     internal bool IsOldEnoughToCache(DateTime utcNow)
     {
-        const long minimumAgeTicks = 3 * TimeSpan.TicksPerMillisecond;
         if (NativeMethods.IsWindows)
         {
-            return Value > 0 && Value <= utcNow.ToFileTimeUtc() - minimumAgeTicks;
+            return Value > 0 && Value <= utcNow.ToFileTimeUtc()
+                - GetMinimumAgeTicks((uint)(Value % TimeSpan.TicksPerSecond) * 100);
         }
 
 #if NET
         if (NativeMethods.IsLinux)
         {
-            long cutoff = utcNow.Ticks - DateTime.UnixEpoch.Ticks - minimumAgeTicks;
+            long cutoff = utcNow.Ticks - DateTime.UnixEpoch.Ticks - GetMinimumAgeTicks(Nanoseconds);
             long seconds = Math.DivRem(cutoff, TimeSpan.TicksPerSecond, out long ticks);
             if (ticks < 0)
             {
@@ -50,6 +50,16 @@ internal readonly record struct DirectoryChangeStamp(
 #endif
         return false;
     }
+
+    // Follow Bazel's TimestampGranularityMonitor (bazelbuild/bazel@fad396b9a3d1):
+    // whole seconds need 1 s + 50 ms slack, whole milliseconds need 1 ms, finer ctime needs no delay.
+    // Instead of waiting at command end, age-rejected or future stamps use fresh enumeration.
+    private static long GetMinimumAgeTicks(uint nanoseconds) => nanoseconds switch
+    {
+        0 => TimeSpan.TicksPerSecond + 50 * TimeSpan.TicksPerMillisecond,
+        _ when nanoseconds % 1_000_000 == 0 => TimeSpan.TicksPerMillisecond,
+        _ => 0,
+    };
 }
 
 internal static partial class DirectoryChangeTime

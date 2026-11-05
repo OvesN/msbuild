@@ -6,6 +6,7 @@ using System.IO;
 using Microsoft.Build.Shared;
 using Shouldly;
 using Xunit;
+using Xunit.NetCore.Extensions;
 
 namespace Microsoft.Build.UnitTests;
 
@@ -13,6 +14,24 @@ public class GlobResultExperimentTest
 {
     private const string Key = "glob";
     private const string DirectoryPath = "scope";
+
+    [WindowsOnlyTheory]
+    [InlineData(0, 10_499_999, false)]
+    [InlineData(0, 10_500_000, true)]
+    [InlineData(123_000_000, 9_999, false)]
+    [InlineData(123_000_000, 10_000, true)]
+    [InlineData(123_456_700, 0, true)]
+    [InlineData(123_456_700, -1, false)]
+    [InlineData(999_000_000, 9_999, false)]
+    [InlineData(999_000_000, 10_000, true)]
+    public void CtimeAdmissionUsesBazelTimestampGranularity(int nanoseconds, int elapsedTicks, bool expected)
+    {
+        DateTime changeTime = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        changeTime = changeTime.AddTicks(nanoseconds / 100);
+        var stamp = new DirectoryChangeStamp(0, 0, 0, changeTime.ToFileTimeUtc());
+
+        stamp.IsOldEnoughToCache(changeTime.AddTicks(elapsedTicks)).ShouldBe(expected);
+    }
 
     [Theory]
     [InlineData(false)]
