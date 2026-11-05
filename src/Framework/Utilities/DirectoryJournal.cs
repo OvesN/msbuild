@@ -328,7 +328,7 @@ internal sealed unsafe class DirectoryJournal
         HANDLE handle;
         fixed (char* pointer = path)
         {
-            handle = PInvoke.CreateFile(new PCWSTR(pointer), (uint)FILE_ACCESS_RIGHTS.FILE_GENERIC_READ,
+            handle = PInvoke.CreateFile(new PCWSTR(pointer), (uint)FILE_ACCESS_RIGHTS.FILE_TRAVERSE,
                 FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE,
                 null, FILE_CREATION_DISPOSITION.OPEN_EXISTING, 0, HANDLE.Null);
         }
@@ -664,9 +664,15 @@ internal sealed unsafe class DirectoryJournal
             fixed (byte* pointer = Buffer)
             {
                 uint returned;
-                if (!PInvoke.DeviceIoControl((HANDLE)Handle.DangerousGetHandle(), PInvoke.FSCTL_READ_USN_JOURNAL,
+                if (!PInvoke.DeviceIoControl((HANDLE)Handle.DangerousGetHandle(), PInvoke.FSCTL_READ_UNPRIVILEGED_USN_JOURNAL,
                     &request, (uint)sizeof(READ_USN_JOURNAL_DATA_V1), pointer, (uint)Buffer.Length, &returned, null))
                 {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error is (int)WIN32_ERROR.ERROR_INVALID_FUNCTION or (int)WIN32_ERROR.ERROR_NOT_SUPPORTED)
+                    {
+                        State.Disable();
+                    }
+                    TraceError("reading unprivileged directory change journal", error);
                     data = default;
                     return false;
                 }

@@ -372,6 +372,22 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     }
 
     [WindowsOnlyFact]
+    public void UnprivilegedRecordsWithoutNamesInvalidateTheirParent()
+    {
+        // Captured from our file's CREATE|CLOSE record; identifying fields are normalized.
+        byte[] fixture = Convert.FromBase64String("UAAAAAMAAAAKAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAQCAAAAAAAAAAAAgAAAAAABMAAAAAAA=");
+        DirectoryJournal.TryParse(fixture, out DirectoryJournal.Record record).ShouldBeTrue();
+        DirectoryJournal.DirectoryId parent = new(20);
+        record.Parent.ShouldBe(parent);
+        var state = CreateState();
+        state.Track(parent);
+        state.TryGetVersion(parent, out long before).ShouldBeTrue();
+        state.ApplyBuffer(Buffer(128, fixture)).ShouldBeTrue();
+        state.TryGetVersion(parent, out long after).ShouldBeTrue();
+        after.ShouldBeGreaterThan(before);
+    }
+
+    [WindowsOnlyFact]
     public void MalformedAndNonProgressingJournalBuffersAreRejected()
     {
         byte[] entry = Entry(0, new(10), new(20), PInvoke.USN_REASON_FILE_CREATE);
