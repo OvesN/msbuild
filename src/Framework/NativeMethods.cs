@@ -444,18 +444,10 @@ internal static class NativeMethods
     }
 
     /// <summary>
-    /// Cached value for IsUnixLike (this method is called frequently during evaluation).
-    /// </summary>
-    private static readonly bool s_isUnixLike = IsLinux || IsOSX || IsBSD || IsHaiku;
-
-    /// <summary>
     /// Gets a flag indicating if we are running under a Unix-like system (Mac, Linux, etc.)
     /// </summary>
     [UnsupportedOSPlatformGuard("windows")]
-    internal static bool IsUnixLike
-    {
-        get { return s_isUnixLike; }
-    }
+    internal static bool IsUnixLike => !IsWindows;
 
     /// <summary>
     /// Gets a flag indicating if we are running under Linux
@@ -464,32 +456,6 @@ internal static class NativeMethods
     internal static bool IsLinux
     {
         get { return RuntimeInformation.IsOSPlatform(OSPlatform.Linux); }
-    }
-
-    /// <summary>
-    /// Gets a flag indicating if we are running under flavor of BSD (NetBSD, OpenBSD, FreeBSD)
-    /// </summary>
-    [SupportedOSPlatformGuard("freebsd")]
-    internal static bool IsBSD
-    {
-        get
-        {
-            return RuntimeInformation.IsOSPlatform(OSPlatform.Create("FREEBSD")) ||
-                   RuntimeInformation.IsOSPlatform(OSPlatform.Create("NETBSD")) ||
-                   RuntimeInformation.IsOSPlatform(OSPlatform.Create("OPENBSD"));
-        }
-    }
-
-    /// <summary>
-    /// Gets a flag indicating if we are running under Haiku
-    /// </summary>
-    [SupportedOSPlatformGuard("haiku")]
-    internal static bool IsHaiku
-    {
-        get
-        {
-            return RuntimeInformation.IsOSPlatform(OSPlatform.Create("HAIKU"));
-        }
     }
 
     private static bool? _isWindows;
@@ -555,34 +521,6 @@ internal static class NativeMethods
     {
         return IsOSX ? "osx" : IsUnixLike ? "unix" : "windows";
     }
-
-    internal static bool OSUsesCaseSensitivePaths
-    {
-        get { return IsLinux; }
-    }
-
-    /// <summary>
-    /// Determines whether the file system is case sensitive by creating a test file.
-    /// Copied from FileUtilities.GetIsFileSystemCaseSensitive() in Shared.
-    /// FIXME: shared code should be consolidated to Framework https://github.com/dotnet/msbuild/issues/6984
-    /// </summary>
-    private static readonly Lazy<bool> s_isFileSystemCaseSensitive = new(() =>
-    {
-        try
-        {
-            string pathWithUpperCase = Path.Combine(Path.GetTempPath(), $"INTCASESENSITIVETEST{Guid.NewGuid():N}");
-            using (new FileStream(pathWithUpperCase, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 0x1000, FileOptions.DeleteOnClose))
-            {
-                return !File.Exists(pathWithUpperCase.ToLowerInvariant());
-            }
-        }
-        catch
-        {
-            return OSUsesCaseSensitivePaths;
-        }
-    });
-
-    internal static bool IsFileSystemCaseSensitive => s_isFileSystemCaseSensitive.Value;
 
     /// <summary>
     /// The base directory for all framework paths in Mono
@@ -697,12 +635,16 @@ internal static class NativeMethods
     /// <param name="fullPath">Full path to the file in the filesystem</param>
     /// <param name="fileModifiedTimeUtc">The UTC last write time for the directory</param>
     internal static bool GetLastWriteDirectoryUtcTime(string fullPath, out DateTime fileModifiedTimeUtc)
+        => GetLastWriteDirectoryUtcTime(fullPath, out fileModifiedTimeUtc, rejectReparsePoints: false);
+
+    internal static bool GetLastWriteDirectoryUtcTime(string fullPath, out DateTime fileModifiedTimeUtc, bool rejectReparsePoints)
     {
 #if FEATURE_WINDOWSINTEROP
         if (IsWindows)
         {
             if (PInvoke.GetFileAttributesEx(fullPath, out WIN32_FILE_ATTRIBUTE_DATA data)
-                && ((FILE_FLAGS_AND_ATTRIBUTES)data.dwFileAttributes & FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY) != 0)
+                && ((FILE_FLAGS_AND_ATTRIBUTES)data.dwFileAttributes & FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY) != 0
+                && (!rejectReparsePoints || ((FileAttributes)data.dwFileAttributes & FileAttributes.ReparsePoint) == 0))
             {
                 fileModifiedTimeUtc = DateTime.FromFileTimeUtc(data.ftLastWriteTime.ToLong());
                 return true;
@@ -715,6 +657,12 @@ internal static class NativeMethods
 
         if (Directory.Exists(fullPath))
         {
+            if (rejectReparsePoints && (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                fileModifiedTimeUtc = DateTime.MinValue;
+                return false;
+            }
+
             fileModifiedTimeUtc = Directory.GetLastWriteTimeUtc(fullPath);
             return true;
         }
@@ -915,7 +863,9 @@ internal static class NativeMethods
             }
 #endif
 
+            // CodeQL [SM00414] False positive: GetLastWriteFileUtcTime operates on trusted build paths.
             return File.Exists(path)
+                // CodeQL [SM00414] False positive: GetLastWriteFileUtcTime operates on trusted build paths.
                 ? File.GetLastWriteTimeUtc(path)
                 : DateTime.MinValue;
         }

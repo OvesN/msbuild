@@ -19,7 +19,6 @@ using System.Runtime.Remoting;
 #endif
 using System.Text;
 using System.Threading;
-
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
@@ -27,10 +26,10 @@ using Microsoft.Build.Evaluation;
 using Microsoft.Build.Exceptions;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Internal;
 using Microsoft.Build.Shared;
-
-using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 using Task = System.Threading.Tasks.Task;
+using TaskItem = Microsoft.Build.Execution.ProjectItemInstance.TaskItem;
 
 #nullable disable
 
@@ -2180,7 +2179,7 @@ namespace Microsoft.Build.BackEnd
                 // Reflection related exception
                 _targetLoggingContext.LogError(_taskLocation, "AttributeTypeLoadError", _taskName, e.Message);
 
-                ProjectErrorUtilities.VerifyThrowInvalidProject(false, _taskLocation, "TaskDeclarationOrUsageError", _taskName);
+                ProjectErrorUtilities.ThrowInvalidProject(_taskLocation, "TaskDeclarationOrUsageError", _taskName);
             }
 
             return requiredParameters;
@@ -2194,7 +2193,7 @@ namespace Microsoft.Build.BackEnd
             string message = ResourceUtilities.FormatResourceStringStripCodeAndKeyword(out string warningCode, out string helpKeyword, "UnableToCancelTask", _taskName);
             try
             {
-                _taskLoggingContext.LogWarningFromText(null, warningCode, helpKeyword, _taskLocation, message);
+                _taskLoggingContext.LogWarningFromText(DiagnosticSubcategory.None, warningCode, helpKeyword, _taskLocation, message);
             }
             catch (InternalErrorException) when (!_taskLoggingContext.IsValid)
             {

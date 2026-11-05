@@ -2011,12 +2011,12 @@ namespace Microsoft.Build.Execution
         /// <summary>
         /// Get any property in the item that has the specified name,
         /// otherwise returns null.
-        /// Name is the segment of the provided string with the provided start and end indexes.
+        /// Name is the segment of the provided string with the provided start index and length.
         /// </summary>
         [DebuggerStepThrough]
-        ProjectPropertyInstance IPropertyProvider<ProjectPropertyInstance>.GetProperty(string name, int startIndex, int endIndex)
+        ProjectPropertyInstance IPropertyProvider<ProjectPropertyInstance>.GetProperty(string name, int startIndex, int length)
         {
-            return _properties.GetProperty(name, startIndex, endIndex);
+            return _properties.GetProperty(name, startIndex, length);
         }
 
         /// <summary>
@@ -3340,7 +3340,10 @@ namespace Microsoft.Build.Execution
 
             Assumed.Equal(EvaluationId, BuildEventContext.InvalidEvaluationId, "Evaluation ID is invalid prior to evaluation");
 
-            evaluationContext = evaluationContext?.ContextForNewProject() ?? EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated);
+            evaluationContext = evaluationContext?.ContextForNewProject()
+                ?? (buildParameters.DirectoryListingCache is not null
+                    ? EvaluationContext.CreateForBuild(buildParameters.DirectoryListingCache)
+                    : EvaluationContext.Create(EvaluationContext.SharingPolicy.Isolated));
 
             Evaluator<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.Evaluate(
                 data: this,

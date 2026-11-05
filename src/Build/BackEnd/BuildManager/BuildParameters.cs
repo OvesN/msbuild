@@ -228,6 +228,8 @@ namespace Microsoft.Build.Execution
         /// </summary>
         private bool _multiThreaded;
 
+        private bool _precompute;
+
         private ProjectIsolationMode _projectIsolationMode;
 
         private string[] _inputResultsCacheFiles;
@@ -302,6 +304,7 @@ namespace Microsoft.Build.Execution
             _loggers = other._loggers != null ? new List<ILogger>(other._loggers) : null;
             _maxNodeCount = other._maxNodeCount;
             MultiThreaded = other.MultiThreaded;
+            _precompute = other._precompute;
             _memoryUseLimit = other._memoryUseLimit;
             _nodeExeLocation = other._nodeExeLocation;
             NodeId = other.NodeId;
@@ -314,6 +317,7 @@ namespace Microsoft.Build.Execution
             DetailedSummary = other.DetailedSummary;
             _shutdownInProcNodeOnBuildFinish = other._shutdownInProcNodeOnBuildFinish;
             ProjectRootElementCache = other.ProjectRootElementCache;
+            DirectoryListingCache = other.DirectoryListingCache;
             ResetCaches = other.ResetCaches;
             LegacyThreadingSemantics = other.LegacyThreadingSemantics;
             SaveOperatingEnvironment = other.SaveOperatingEnvironment;
@@ -589,6 +593,15 @@ namespace Microsoft.Build.Execution
         }
 
         /// <summary>
+        /// Gets or sets whether precompute mode was requested.
+        /// </summary>
+        public bool Precompute
+        {
+            get => _precompute;
+            set => _precompute = value;
+        }
+
+        /// <summary>
         /// The amount of memory the build should limit itself to using, in megabytes.
         /// </summary>
         public int MemoryUseLimit
@@ -816,6 +829,8 @@ namespace Microsoft.Build.Execution
         /// </summary>
         internal ProjectRootElementCacheBase ProjectRootElementCache { get; set; }
 
+        internal DirectoryListingCache DirectoryListingCache { get; set; }
+
 #if FEATURE_APPDOMAIN
         /// <summary>
         /// Information for configuring child AppDomains.
@@ -1014,6 +1029,7 @@ namespace Microsoft.Build.Execution
             translator.Translate(ref _question);
             translator.Translate(ref _isBuildCheckEnabled);
             translator.Translate(ref _isTelemetryEnabled);
+            translator.Translate(ref _precompute);
             translator.TranslateEnum(ref _projectIsolationMode, (int)_projectIsolationMode);
             translator.Translate(ref _reportFileAccesses);
             translator.Translate(ref _enableTargetOutputLogging);
@@ -1021,6 +1037,7 @@ namespace Microsoft.Build.Execution
             translator.Translate(ref _ParserIgnoreConfiguration, ParserIgnoreConfiguration.FactoryForDeserialization);
 
             // ProjectRootElementCache is not transmitted.
+            // DirectoryListingCache is process-local and supplied by the build manager or worker.
             // ResetCaches is not transmitted.
             // LegacyThreadingSemantics is not transmitted.
             // InputResultsCacheFiles and OutputResultsCacheFile are not transmitted, as they are only used by the BuildManager

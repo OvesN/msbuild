@@ -637,6 +637,13 @@
                      (Short form: -mt)
     </value>
   </data>
+  <data name="HelpMessage_PrecomputeSwitch" xml:space="preserve">
+    <value>  -precompute[:true|false]
+                     Enables EXPERIMENTAL precompute mode, which
+                     separates creation of the build graph from execution
+                     of that graph.
+    </value>
+  </data>
   <data name="HelpMessage_24_NodeReuse" xml:space="preserve">
     <value>  -nodeReuse:&lt;parameters&gt;
                      Enables or Disables the reuse of MSBuild nodes.
@@ -1537,6 +1544,15 @@
       LOCALIZATION: The prefix "MSBUILD : error MSBxxxx:" should not be localized.
     </comment>
   </data>
+  <data name="InvalidPrecomputeValue" xml:space="preserve">
+    <value>MSBUILD : error MSB1074: Precompute mode value is not valid. {0}</value>
+    <comment>
+      {StrBegin="MSBUILD : error MSB1074: "}
+      UE: This message does not need in-line parameters because the exception takes care of displaying the invalid arg.
+      This error is shown when a user specifies a value for the -precompute parameter that is not equivalent to Boolean.TrueString or Boolean.FalseString.
+      LOCALIZATION: The prefix "MSBUILD : error MSBxxxx:" should not be localized.
+    </comment>
+  </data>
   <data name="ReportFileAccessesIncompatibleWithMultiThreaded" xml:space="preserve">
     <value>MSBUILD : error MSB1073: Multi-threaded mode and -reportFileAccesses cannot be used together. File-access reporting attributes accesses to one project per worker process, but multi-threaded mode can execute multiple projects in the same process. Remove -reportFileAccesses, or disable multi-threaded mode with -mt:false. If MSBUILDFORCEMULTITHREADED is set, unset it first; MSBUILDENABLEMULTITHREADED can be overridden by -mt:false.</value>
     <comment>
@@ -1860,15 +1876,6 @@
   <data name="ModifyingTaskHostEnvironmentVariable" xml:space="preserve">
     <value>  Setting '{0}' to '{1}' rather than the parent environment's value, '{2}'.</value>
     <comment>Only ever used when MSBuild is run under a "secret" environment variable switch, MSBuildTaskHostUpdateEnvironmentAndLog=1</comment>
-  </data>
-  <data name="SubCategoryForSchemaValidationErrors" xml:space="preserve">
-    <value>Schema validation</value>
-    <comment>
-      UE: this fragment is used to describe errors that are caused by schema validation. For example, if a normal error is
-      displayed like this: "MSBUILD : error MSB0000: This is an error.", then an error from schema validation would look like this:
-      "MSBUILD : Schema validation error MSB0000: This is an error."
-      LOCALIZATION: This fragment needs to be localized.
-    </comment>
   </data>
     <!--
         The command line message bucket is: MSB1001 - MSB1999
