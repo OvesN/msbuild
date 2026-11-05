@@ -26,10 +26,11 @@ internal sealed unsafe class DirectoryJournal
     private const int MaximumReadBytes = 16 * 1024 * 1024;
     private const int MaximumQualifications = 65536;
     private const uint MembershipReasons = PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_FILE_DELETE
-        | PInvoke.USN_REASON_RENAME_OLD_NAME | PInvoke.USN_REASON_RENAME_NEW_NAME;
-    private const uint GlobalReasons = PInvoke.USN_REASON_HARD_LINK_CHANGE | PInvoke.USN_REASON_REPARSE_POINT_CHANGE
-        | PInvoke.USN_REASON_SECURITY_CHANGE | PInvoke.USN_REASON_FILE_DELETE
-        | PInvoke.USN_REASON_RENAME_OLD_NAME | PInvoke.USN_REASON_RENAME_NEW_NAME;
+        | PInvoke.USN_REASON_RENAME_OLD_NAME | PInvoke.USN_REASON_RENAME_NEW_NAME | PInvoke.USN_REASON_HARD_LINK_CHANGE;
+    private const uint AllLinkReasons = PInvoke.USN_REASON_FILE_DELETE | PInvoke.USN_REASON_DATA_EXTEND
+        | PInvoke.USN_REASON_DATA_OVERWRITE | PInvoke.USN_REASON_DATA_TRUNCATION
+        | PInvoke.USN_REASON_STREAM_CHANGE | PInvoke.USN_REASON_REPARSE_POINT_CHANGE;
+    private const uint SingleLinkReasons = PInvoke.USN_REASON_HARD_LINK_CHANGE | PInvoke.USN_REASON_RENAME_OLD_NAME;
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Volume> _volumes = new();
     private readonly Dictionary<char, RejectionReason> _rejectedRoots = new();
@@ -44,8 +45,9 @@ internal sealed unsafe class DirectoryJournal
 
     internal enum RejectionReason { None, UnsupportedVolume, AccessDenied, JournalInactive, IncompleteHistory, InitialHistoryTooLarge, InvalidJournal }
     internal delegate DirectoryStampStatus NativeReader(string fullPath, out DirectoryChangeStamp stamp, out RejectionReason rejection);
+    internal delegate bool AncestorReader(string path, out Record record);
     internal readonly record struct Statistics(long NativeReads, long Stamps, long NegativeHits, long AncestorWalks, long Deferrals);
-    private readonly record struct Qualification(Guid Volume, DirectoryId Id, ulong Epoch);
+    private readonly record struct Qualification(Guid Volume, DirectoryId Id, ulong Epoch, long Version);
 
     internal DirectoryJournal() : this(null)
     {
@@ -194,28 +196,13 @@ internal sealed unsafe class DirectoryJournal
                 }
             }
 
-            READ_FILE_USN_DATA request = new() { MinMajorVersion = 2, MaxMajorVersion = 3 };
-            using BufferScope<byte> recordBuffer = new(stackalloc byte[1024]);
-            uint returned;
-            Record record;
-            fixed (byte* pointer = recordBuffer)
+            if (!TryReadDirectoryRecord(directory, out Record record))
             {
-                if (!PInvoke.DeviceIoControl(directory, PInvoke.FSCTL_READ_FILE_USN_DATA,
-                    &request, (uint)sizeof(READ_FILE_USN_DATA), pointer, (uint)recordBuffer.Length, &returned, null))
-                {
-                    TraceError(path);
-                    return DirectoryStampStatus.Unavailable;
-                }
-
-                if (returned > recordBuffer.Length || !TryParse(recordBuffer.AsSpan().Slice(0, (int)returned), out record)
-                    || (record.Attributes & (uint)(FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY | FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_REPARSE_POINT))
-                    != (uint)FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY)
-                {
-                    return DirectoryStampStatus.Unavailable;
-                }
+                return DirectoryStampStatus.Unavailable;
             }
 
-            if (Qualify(path, volumeId, record.Id, volume.State, volume, HasOrdinaryAncestors, out long version) != DirectoryStampStatus.Available)
+            if (Qualify(path, volumeId, record.Id, volume.State, volume, null, out long version,
+                record.Usn, record.Parent) != DirectoryStampStatus.Available)
             {
                 if (volume.State.Disabled)
                 {
@@ -238,16 +225,18 @@ internal sealed unsafe class DirectoryJournal
     }
 
     internal DirectoryStampStatus Qualify(string path, Guid volumeId, DirectoryId id, JournalState state, IJournalReader reader,
-        Func<string, bool> walkAncestors, out long version)
+        Func<string, bool>? walkAncestors, out long version, long usn = -1, DirectoryId parent = default)
     {
         int remainingReadBytes = MaximumReadBytes;
-        if (CatchUp(state, reader, id, out version, ref remainingReadBytes) != DirectoryStampStatus.Available)
+        state.Track(path, id, usn);
+        version = 0;
+        if (!CatchUp(state, reader, ref remainingReadBytes) || !state.TryGetVersion(path, out version))
         {
             return DirectoryStampStatus.Unavailable;
         }
 
         ulong epoch = state.Epoch;
-        var qualification = new Qualification(volumeId, id, epoch);
+        var qualification = new Qualification(volumeId, id, epoch, version);
         if (!state.RequiresAncestorValidation
             && _qualifications.TryGetValue(path, out Qualification current) && current == qualification)
         {
@@ -255,9 +244,11 @@ internal sealed unsafe class DirectoryJournal
         }
 
         _ancestorWalks++;
-        if (!walkAncestors(path)
-            || CatchUp(state, reader, id, out version, ref remainingReadBytes) != DirectoryStampStatus.Available
-            || state.Epoch != epoch)
+        bool qualified = walkAncestors is not null
+            ? walkAncestors(path)
+            : HasOrdinaryAncestors(path) && TrackAncestors(path, parent, state);
+        if (!qualified || !CatchUp(state, reader, ref remainingReadBytes)
+            || !state.TryGetVersion(path, out version) || state.Epoch != epoch || version != qualification.Version)
         {
             return DirectoryStampStatus.Unavailable;
         }
@@ -268,6 +259,62 @@ internal sealed unsafe class DirectoryJournal
             _qualifications[path] = qualification;
         }
         return DirectoryStampStatus.Available;
+    }
+
+    private static bool TryReadDirectoryRecord(HANDLE directory, out Record record)
+    {
+        record = default;
+        READ_FILE_USN_DATA request = new() { MinMajorVersion = 2, MaxMajorVersion = 3 };
+        using BufferScope<byte> recordBuffer = new(stackalloc byte[1024]);
+        uint returned;
+        fixed (byte* pointer = recordBuffer)
+        {
+            if (!PInvoke.DeviceIoControl(directory, PInvoke.FSCTL_READ_FILE_USN_DATA,
+                &request, (uint)sizeof(READ_FILE_USN_DATA), pointer, (uint)recordBuffer.Length, &returned, null))
+            {
+                TraceError("reading directory identity");
+                return false;
+            }
+
+            return returned <= recordBuffer.Length
+                && TryParse(recordBuffer.AsSpan().Slice(0, (int)returned), out record)
+                && record.Usn >= 0
+                && (record.Attributes & (uint)(FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY | FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_REPARSE_POINT))
+                    == (uint)FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_DIRECTORY;
+        }
+    }
+
+    internal static bool TrackAncestors(string path, DirectoryId parent, JournalState state, AncestorReader? readAncestor = null)
+    {
+        string? ancestor = Path.GetDirectoryName(path.TrimEnd('\\'));
+        while (ancestor is not null)
+        {
+            if (state.IsAnchored(ancestor, parent)) { return state.TryAnchor(path); }
+            Record record;
+            bool read = readAncestor is null ? TryReadAncestor(ancestor, out record) : readAncestor(ancestor, out record);
+            if (!read || record.Id != parent) { return false; }
+            state.Track(ancestor, record.Id, record.Usn, enumerated: false);
+            parent = record.Parent;
+
+            ancestor = Path.GetDirectoryName(ancestor);
+        }
+        return state.TryAnchor(path);
+    }
+
+    private static bool TryReadAncestor(string path, out Record record)
+    {
+        record = default;
+        HANDLE directory;
+        fixed (char* pointer = path)
+        {
+            directory = PInvoke.CreateFile(new PCWSTR(pointer), 0,
+                FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE,
+                null, FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OPEN_REPARSE_POINT, HANDLE.Null);
+        }
+        if (directory == HANDLE.INVALID_HANDLE_VALUE) { return false; }
+        try { return TryReadDirectoryRecord(directory, out record); }
+        finally { PInvoke.CloseHandle(directory); }
     }
 
     internal static bool IsSupportedPath(string path)
@@ -378,48 +425,47 @@ internal sealed unsafe class DirectoryJournal
         bool Read(long start, out ReadOnlyMemory<byte> data);
     }
 
-    internal static DirectoryStampStatus CatchUp(JournalState state, IJournalReader reader, DirectoryId id, out long version,
+    internal static DirectoryStampStatus CatchUp(JournalState state, IJournalReader reader, string path, DirectoryId id, out long version,
         int maximumReadBytes = MaximumReadBytes)
-        => CatchUp(state, reader, id, out version, ref maximumReadBytes);
-
-    private static DirectoryStampStatus CatchUp(JournalState state, IJournalReader reader, DirectoryId id, out long version,
-        ref int remainingReadBytes)
     {
+        state.Track(path, id);
         version = 0;
-        if (state.Disabled) { return DirectoryStampStatus.Unavailable; }
-        if (!reader.Query(out USN_JOURNAL_DATA_V0 info)) { return DirectoryStampStatus.Unavailable; }
-        if (!state.ObserveHead(info)) { return DirectoryStampStatus.Unavailable; }
-        state.Track(id);
+        return CatchUp(state, reader, ref maximumReadBytes) && state.TryGetVersion(path, out version)
+            ? DirectoryStampStatus.Available : DirectoryStampStatus.Unavailable;
+    }
+
+    private static bool CatchUp(JournalState state, IJournalReader reader, ref int remainingReadBytes)
+    {
+        if (state.Disabled || !reader.Query(out USN_JOURNAL_DATA_V0 info) || !state.ObserveHead(info)) { return false; }
         for (int pass = 0; pass < 3; pass++)
         {
             while (state.Cursor < info.NextUsn)
             {
                 if (remainingReadBytes < sizeof(long) || !reader.Read(state.Cursor, out ReadOnlyMemory<byte> data))
                 {
-                    return DirectoryStampStatus.Unavailable;
+                    return false;
                 }
                 remainingReadBytes -= data.Length;
-                if (remainingReadBytes < 0) { return DirectoryStampStatus.Unavailable; }
+                if (remainingReadBytes < 0) { return false; }
                 if (data.Length == sizeof(long) && BinaryPrimitives.ReadInt64LittleEndian(data.Span) == state.Cursor)
                 {
-                    return DirectoryStampStatus.Unavailable;
+                    return false;
                 }
                 if (!state.ApplyBuffer(data.Span))
                 {
                     state.Disable();
-                    return DirectoryStampStatus.Unavailable;
+                    return false;
                 }
             }
 
-            if (!reader.Query(out info)) { return DirectoryStampStatus.Unavailable; }
-            if (!state.ObserveHead(info)) { return DirectoryStampStatus.Unavailable; }
+            if (!reader.Query(out info) || !state.ObserveHead(info)) { return false; }
             if (state.Cursor == info.NextUsn)
             {
-                return state.TryGetVersion(id, out version) ? DirectoryStampStatus.Available : DirectoryStampStatus.Unavailable;
+                return true;
             }
         }
 
-        return DirectoryStampStatus.Unavailable;
+        return false;
     }
 
     private static bool TryQuery(HANDLE handle, out USN_JOURNAL_DATA_V0 info, out int error)
@@ -506,10 +552,10 @@ internal sealed unsafe class DirectoryJournal
 
     internal sealed class JournalState
     {
-        private readonly Dictionary<DirectoryId, long> _versions = new();
-        private readonly Dictionary<DirectoryId, DirectoryId> _pendingCreates = new();
-        private readonly Dictionary<DirectoryId, int> _pendingParents = new();
-        private readonly HashSet<DirectoryId> _globalPending = new();
+        private readonly Dictionary<string, Tracking> _paths = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<DirectoryId, List<Tracking>> _recordsByFileId = new();
+        private readonly Queue<Tracking> _invalidations = new();
+        private long _version;
         private bool _requiresCompleteHistory;
         internal readonly ulong JournalId;
         internal readonly bool RequiresAncestorValidation;
@@ -521,7 +567,7 @@ internal sealed unsafe class DirectoryJournal
         {
             JournalId = info.UsnJournalID;
             Cursor = info.NextUsn;
-            // Pre-checkpoint coalesced reparse/security changes cannot safely qualify the ancestor memo.
+            // Pre-checkpoint coalesced reparse changes cannot safely qualify the ancestor memo.
             RequiresAncestorValidation = Cursor != 0;
             Disabled = !HasValidCheckpoint(info);
         }
@@ -550,12 +596,86 @@ internal sealed unsafe class DirectoryJournal
             return true;
         }
 
-        internal void Track(DirectoryId id)
+        internal void Track(string path, DirectoryId id, long usn = -1, bool enumerated = true)
         {
-            if (!_versions.ContainsKey(id))
+            path = Normalize(path);
+            if (!_paths.TryGetValue(path, out Tracking? tracking))
             {
-                _versions.Add(id, 0);
+                if (_paths.Count >= MaximumQualifications)
+                {
+                    _paths.Clear();
+                    _recordsByFileId.Clear();
+                    Epoch = NextEpoch();
+                }
+
+                tracking = new Tracking(path);
+                _paths.Add(path, tracking);
+                Tracking child = tracking;
+                string? parentPath = Path.GetDirectoryName(path);
+                while (parentPath is not null)
+                {
+                    if (_paths.TryGetValue(parentPath, out Tracking? existing))
+                    {
+                        child.Parent = existing;
+                        (existing.Children ??= []).Add(child);
+                        break;
+                    }
+
+                    var container = new Tracking(parentPath);
+                    _paths.Add(parentPath, container);
+                    child.Parent = container;
+                    (container.Children ??= []).Add(child);
+                    child = container;
+                    parentPath = Path.GetDirectoryName(parentPath);
+                }
             }
+
+            if (tracking.Registered && tracking.Id != id)
+            {
+                Invalidate(tracking);
+                List<Tracking> oldRecords = _recordsByFileId[tracking.Id];
+                oldRecords.Remove(tracking);
+                if (oldRecords.Count == 0) { _recordsByFileId.Remove(tracking.Id); }
+                tracking.Registered = false;
+            }
+            if (!tracking.Registered)
+            {
+                if (!_recordsByFileId.TryGetValue(id, out List<Tracking>? records))
+                {
+                    records = [];
+                    _recordsByFileId.Add(id, records);
+                }
+                records.Add(tracking);
+                tracking.Registered = true;
+            }
+            if (!tracking.Active)
+            {
+                tracking.Id = id;
+                // Zero also means no prior record, so it cannot supersede the journal's first event.
+                tracking.Usn = usn == 0 ? -1 : usn;
+                tracking.Version = ++_version;
+                tracking.Active = true;
+            }
+            tracking.Enumerated |= enumerated;
+        }
+
+        internal bool IsAnchored(string path, DirectoryId id)
+            => _paths.TryGetValue(Normalize(path), out Tracking? tracking)
+                && tracking.Active && tracking.Anchored && tracking.Id == id;
+
+        internal bool TryAnchor(string path)
+        {
+            if (!_paths.TryGetValue(Normalize(path), out Tracking? tracking)) { return false; }
+            for (Tracking? current = tracking; current is not null; current = current.Parent)
+            {
+                if (!current.Active) { return false; }
+                if (current.Anchored) { break; }
+            }
+            for (Tracking? current = tracking; current is not null && !current.Anchored; current = current.Parent)
+            {
+                current.Anchored = true;
+            }
+            return true;
         }
 
         internal bool ApplyBuffer(ReadOnlySpan<byte> data)
@@ -580,45 +700,17 @@ internal sealed unsafe class DirectoryJournal
                     return false;
                 }
 
-                if ((record.Reason & GlobalReasons) != 0)
+                if ((record.Reason & (AllLinkReasons | SingleLinkReasons)) != 0)
                 {
-                    Epoch = NextEpoch();
-                    RemovePendingCreate(record.Id);
-                    _globalPending.Add(record.Id);
+                    ApplyLinkImpact(record);
                 }
-                else if ((record.Reason & PInvoke.USN_REASON_FILE_CREATE) != 0 && !_globalPending.Contains(record.Id))
+                if ((record.Reason & MembershipReasons) != 0
+                    && _recordsByFileId.TryGetValue(record.Parent, out List<Tracking>? parents))
                 {
-                    if (!_pendingCreates.TryGetValue(record.Id, out DirectoryId parent))
+                    foreach (Tracking container in parents)
                     {
-                        _pendingCreates.Add(record.Id, record.Parent);
-                        _pendingParents.TryGetValue(record.Parent, out int count);
-                        _pendingParents[record.Parent] = count + 1;
+                        if (container.Active && container.Enumerated) { container.Version = ++_version; }
                     }
-                    else if (parent != record.Parent)
-                    {
-                        RemovePendingCreate(record.Id);
-                        _globalPending.Add(record.Id);
-                        Epoch = NextEpoch();
-                    }
-                }
-
-                if ((record.Reason & (MembershipReasons | GlobalReasons)) != 0)
-                {
-                    if (_versions.ContainsKey(record.Parent))
-                    {
-                        _versions[record.Parent] = record.Usn + 1;
-                    }
-
-                    if (_versions.ContainsKey(record.Id))
-                    {
-                        _versions[record.Id] = record.Usn + 1;
-                    }
-                }
-
-                if ((record.Reason & PInvoke.USN_REASON_CLOSE) != 0)
-                {
-                    RemovePendingCreate(record.Id);
-                    _globalPending.Remove(record.Id);
                 }
 
                 previous = record.Usn;
@@ -629,22 +721,83 @@ internal sealed unsafe class DirectoryJournal
             return true;
         }
 
-        internal bool TryGetVersion(DirectoryId id, out long version)
+        internal bool TryGetVersion(string path, out long version)
         {
             version = 0;
-            return !Disabled && _globalPending.Count == 0 && !_pendingParents.ContainsKey(id)
-                && _versions.TryGetValue(id, out version);
+            if (Disabled || !_paths.TryGetValue(Normalize(path), out Tracking? tracking)
+                || !tracking.Active || !tracking.Enumerated) { return false; }
+            version = tracking.Version;
+            return true;
         }
 
-        private void RemovePendingCreate(DirectoryId file)
+        private void ApplyLinkImpact(Record record)
         {
-            if (_pendingCreates.TryGetValue(file, out DirectoryId parent))
+            if (!_recordsByFileId.TryGetValue(record.Id, out List<Tracking>? records)) { return; }
+            Tracking? parentFilter = null;
+            if ((record.Reason & AllLinkReasons) == 0)
             {
-                _pendingCreates.Remove(file);
-                int count = _pendingParents[parent];
-                if (count == 1) { _pendingParents.Remove(parent); }
-                else { _pendingParents[parent] = count - 1; }
+                if (!_recordsByFileId.TryGetValue(record.Parent, out List<Tracking>? parents)) { return; }
+                foreach (Tracking parent in parents)
+                {
+                    if (!parent.Active) { continue; }
+                    if (parentFilter is not null && parentFilter != parent)
+                    {
+                        parentFilter = null;
+                        break;
+                    }
+                    parentFilter = parent;
+                }
+                if (parentFilter is null && !HasActiveRecord(parents)) { return; }
             }
+
+            foreach (Tracking tracking in records)
+            {
+                if (tracking.Active && tracking.Usn < record.Usn
+                    && (parentFilter is null || tracking.Parent == parentFilter))
+                {
+                    Invalidate(tracking);
+                }
+            }
+        }
+
+        private static bool HasActiveRecord(List<Tracking> records)
+        {
+            foreach (Tracking tracking in records)
+            {
+                if (tracking.Active) { return true; }
+            }
+            return false;
+        }
+
+        private void Invalidate(Tracking root)
+        {
+            _invalidations.Enqueue(root);
+            while (_invalidations.Count != 0)
+            {
+                Tracking tracking = _invalidations.Dequeue();
+                tracking.Active = tracking.Enumerated = tracking.Anchored = false;
+                tracking.Version = ++_version;
+                if (tracking.Children is not null)
+                {
+                    foreach (Tracking child in tracking.Children) { _invalidations.Enqueue(child); }
+                }
+            }
+        }
+
+        private static string Normalize(string path) => path.Length > 3 ? path.TrimEnd('\\') : path;
+
+        private sealed class Tracking(string path)
+        {
+            internal readonly string Path = path;
+            internal DirectoryId Id;
+            internal long Usn;
+            internal long Version;
+            internal bool Active;
+            internal bool Anchored;
+            internal bool Enumerated;
+            internal bool Registered;
+            internal Tracking? Parent;
+            internal List<Tracking>? Children;
         }
 
         internal void Disable() => Disabled = true;
@@ -666,7 +819,7 @@ internal sealed unsafe class DirectoryJournal
             {
                 StartUsn = start,
                 // BASIC_INFO does not change membership; the raw name enumerators do not filter these attributes.
-                ReasonMask = MembershipReasons | GlobalReasons | PInvoke.USN_REASON_CLOSE,
+                ReasonMask = MembershipReasons | AllLinkReasons | SingleLinkReasons | PInvoke.USN_REASON_CLOSE,
                 UsnJournalID = State.JournalId,
                 MinMajorVersion = 2,
                 MaxMajorVersion = 3,

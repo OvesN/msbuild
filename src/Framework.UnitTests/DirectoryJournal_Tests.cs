@@ -4,9 +4,12 @@
 #if FEATURE_WINDOWSINTEROP
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.Versioning;
 using Microsoft.Build.Shared;
+using Microsoft.Build.Shared.FileSystem;
 using Shouldly;
 using Windows.Win32;
 using Windows.Win32.System.Ioctl;
@@ -22,6 +25,16 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         WindowsTemporaryDirectoryAvailable && new RequiresSymbolicLinksFactAttribute().Skip is null;
     public static bool WindowsTemporaryDirectoryAvailable =>
         Microsoft.Build.Framework.NativeMethods.IsWindows && DirectoryJournal.IsSupportedPath(Path.GetTempPath());
+    public static bool WindowsJournalAvailable
+    {
+        get
+        {
+            if (!WindowsTemporaryDirectoryAvailable) { return false; }
+            var journal = new DirectoryJournal();
+            try { return journal.TryRead(Path.GetTempPath(), out _); }
+            finally { journal.Clear(); }
+        }
+    }
 
     [WindowsOnlyFact]
     public void RenameInvalidatesOldAndNewParentsIncludingTheFirstUsn()
@@ -30,17 +43,17 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         DirectoryJournal.DirectoryId oldParent = new(10);
         DirectoryJournal.DirectoryId newParent = new(20);
         DirectoryJournal.DirectoryId file = new(30);
-        state.Track(oldParent);
-        state.Track(newParent);
-        state.TryGetVersion(oldParent, out long oldVersion).ShouldBeTrue();
-        state.TryGetVersion(newParent, out long newVersion).ShouldBeTrue();
+        state.Track(@"C:\old", oldParent);
+        state.Track(@"C:\new", newParent);
+        state.TryGetVersion(@"C:\old", out long oldVersion).ShouldBeTrue();
+        state.TryGetVersion(@"C:\new", out long newVersion).ShouldBeTrue();
 
         state.ApplyBuffer(Buffer(128,
             Entry(0, file, oldParent, PInvoke.USN_REASON_RENAME_OLD_NAME),
             Entry(64, file, newParent, PInvoke.USN_REASON_RENAME_NEW_NAME | PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
 
-        state.TryGetVersion(oldParent, out long currentOld).ShouldBeTrue();
-        state.TryGetVersion(newParent, out long currentNew).ShouldBeTrue();
+        state.TryGetVersion(@"C:\old", out long currentOld).ShouldBeTrue();
+        state.TryGetVersion(@"C:\new", out long currentNew).ShouldBeTrue();
         currentOld.ShouldNotBe(oldVersion);
         currentNew.ShouldNotBe(newVersion);
     }
@@ -52,84 +65,194 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     [InlineData(PInvoke.USN_REASON_RENAME_OLD_NAME)]
     [InlineData(PInvoke.USN_REASON_FILE_DELETE)]
     [InlineData(PInvoke.USN_REASON_FILE_CREATE)]
-    public void UnclosedChangesPreventReuseUntilTheirCloseRecord(uint reason)
+    public void UnrelatedUnclosedChangesDoNotInvalidateTrackedPaths(uint reason)
     {
         var state = CreateState();
         DirectoryJournal.DirectoryId directory = new(10);
-        DirectoryJournal.DirectoryId file = new(20);
-        state.Track(directory);
+        state.Track(@"C:\fixture", directory);
+        state.TryGetVersion(@"C:\fixture", out long before).ShouldBeTrue();
         ulong epoch = state.Epoch;
 
-        state.ApplyBuffer(Buffer(64, Entry(0, file, directory, reason))).ShouldBeTrue();
-        state.TryGetVersion(directory, out _).ShouldBeFalse();
-        state.TryGetVersion(directory, out _).ShouldBeFalse("A repeated change may have no additional journal record.");
+        state.ApplyBuffer(Buffer(64, Entry(0, new(20), new(30), reason))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out long after).ShouldBeTrue();
+        after.ShouldBe(before);
+        state.Epoch.ShouldBe(epoch);
 
-        state.ApplyBuffer(Buffer(128, Entry(64, file, directory, reason | PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
-        state.TryGetVersion(directory, out long version).ShouldBeTrue();
-        version.ShouldBeGreaterThan(0);
-        if (reason != PInvoke.USN_REASON_FILE_CREATE)
-        {
-            state.Epoch.ShouldNotBe(epoch);
-        }
+        state.ApplyBuffer(Buffer(128, Entry(64, new(20), new(30), reason | PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out after).ShouldBeTrue();
+        after.ShouldBe(before);
     }
 
-    [WindowsOnlyFact]
-    public void OpenCreatesOnlyBlockTheirOriginalParentAndAreCountedOnce()
+    [WindowsOnlyTheory]
+    [InlineData(PInvoke.USN_REASON_FILE_CREATE)]
+    [InlineData(PInvoke.USN_REASON_FILE_DELETE)]
+    [InlineData(PInvoke.USN_REASON_HARD_LINK_CHANGE)]
+    [InlineData(PInvoke.USN_REASON_RENAME_OLD_NAME)]
+    [InlineData(PInvoke.USN_REASON_RENAME_NEW_NAME)]
+    public void MembershipChangesAffectOnlyEnumeratedParentsWithoutAVolumeWideCloseWait(uint reason)
     {
         var state = CreateState();
         DirectoryJournal.DirectoryId parent = new(10);
-        DirectoryJournal.DirectoryId unrelated = new(11);
-        state.Track(parent);
-        state.Track(unrelated);
-        state.ApplyBuffer(Buffer(192,
-            Entry(0, new(20), parent, PInvoke.USN_REASON_FILE_CREATE),
-            Entry(64, new(20), parent, PInvoke.USN_REASON_FILE_CREATE),
-            Entry(128, new(21), parent, PInvoke.USN_REASON_FILE_CREATE))).ShouldBeTrue();
-        state.TryGetVersion(unrelated, out _).ShouldBeTrue();
-        state.TryGetVersion(parent, out _).ShouldBeFalse();
+        state.Track(@"C:\", new(1), enumerated: false);
+        state.Track(@"C:\fixture", parent);
+        state.Track(@"C:\fixture\child", new(11));
+        state.TryGetVersion(@"C:\fixture", out long before).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture\child", out long childBefore).ShouldBeTrue();
 
-        state.ApplyBuffer(Buffer(256, Entry(192, new(20), unrelated, PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
-        state.TryGetVersion(parent, out _).ShouldBeFalse("The other open file still blocks its original parent.");
-        state.ApplyBuffer(Buffer(320, Entry(256, new(21), unrelated, PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
-        state.TryGetVersion(parent, out _).ShouldBeTrue();
+        state.ApplyBuffer(Buffer(64, Entry(0, new(20), new(1), reason))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out long after).ShouldBeTrue();
+        after.ShouldBe(before, "The volume root is a container, not an enumerated input.");
+        state.ApplyBuffer(Buffer(128, Entry(64, new(20), parent, reason))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out after).ShouldBeTrue();
+        after.ShouldNotBe(before);
+        state.TryGetVersion(@"C:\fixture\child", out long childAfter).ShouldBeTrue();
+        childAfter.ShouldBe(childBefore, "Parent membership changes do not replace the child directory.");
     }
 
-    [WindowsOnlyFact]
-    public void CoalescedCreatePromotionInvalidatesEvenUnknownParents()
+    [WindowsOnlyTheory]
+    [InlineData(PInvoke.USN_REASON_FILE_DELETE)]
+    [InlineData(PInvoke.USN_REASON_REPARSE_POINT_CHANGE)]
+    [InlineData(PInvoke.USN_REASON_DATA_OVERWRITE)]
+    [InlineData(PInvoke.USN_REASON_DATA_EXTEND)]
+    [InlineData(PInvoke.USN_REASON_DATA_TRUNCATION)]
+    [InlineData(PInvoke.USN_REASON_STREAM_CHANGE)]
+    [InlineData(PInvoke.USN_REASON_RENAME_OLD_NAME)]
+    public void DirectAncestorChangesInvalidateOnlyTheirTrackedSubtree(uint reason)
     {
         var state = CreateState();
-        DirectoryJournal.DirectoryId tracked = new(10);
-        state.Track(tracked);
-        state.TryGetVersion(tracked, out long version).ShouldBeTrue();
-        ulong epoch = state.Epoch;
-        state.ApplyBuffer(Buffer(64, Entry(0, new(20), new(30), PInvoke.USN_REASON_FILE_CREATE))).ShouldBeTrue();
-        state.TryGetVersion(tracked, out _).ShouldBeTrue();
-        state.ApplyBuffer(Buffer(128, Entry(64, new(20), new(40),
-            PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_RENAME_NEW_NAME))).ShouldBeTrue();
-        state.TryGetVersion(tracked, out _).ShouldBeFalse();
-        state.Epoch.ShouldNotBe(epoch);
-        state.ApplyBuffer(Buffer(192, Entry(128, new(20), new(40), PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
-        state.TryGetVersion(tracked, out long current).ShouldBeTrue();
-        current.ShouldBe(version, "The epoch, not a known-parent version, must invalidate this snapshot.");
+        state.Track(@"C:\", new(1), enumerated: false);
+        state.Track(@"C:\fixture", new(10), enumerated: false);
+        state.Track(@"C:\fixture\child", new(11));
+        state.Track(@"C:\unrelated", new(12));
+        state.TryGetVersion(@"C:\unrelated", out long before).ShouldBeTrue();
+        state.ApplyBuffer(Buffer(64, Entry(0, new(10), new(1), reason))).ShouldBeTrue();
+        state.IsAnchored(@"C:\fixture", new(10)).ShouldBeFalse();
+        state.TryGetVersion(@"C:\fixture\child", out _).ShouldBeFalse();
+        state.TryGetVersion(@"C:\unrelated", out long after).ShouldBeTrue();
+        after.ShouldBe(before);
     }
 
     [WindowsOnlyFact]
-    public void CreateOnlyRecordsWithDifferentParentsPromoteToGlobalPending()
+    public void SingleLinkChangesAreFilteredByTrackedParentPath()
     {
         var state = CreateState();
-        DirectoryJournal.DirectoryId tracked = new(10);
-        state.Track(tracked);
-        ulong epoch = state.Epoch;
-        state.ApplyBuffer(Buffer(64, Entry(0, new(20), tracked, PInvoke.USN_REASON_FILE_CREATE))).ShouldBeTrue();
-        state.ApplyBuffer(Buffer(128, Entry(64, new(20), new(30), PInvoke.USN_REASON_FILE_CREATE))).ShouldBeTrue();
-        state.Epoch.ShouldNotBe(epoch);
-        state.TryGetVersion(tracked, out _).ShouldBeFalse();
-        state.ApplyBuffer(Buffer(192, Entry(128, new(20), new(30), PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
-        state.TryGetVersion(tracked, out _).ShouldBeTrue();
+        state.Track(@"C:\a", new(10), enumerated: false);
+        state.Track(@"C:\b", new(20), enumerated: false);
+        state.Track(@"C:\a\child", new(30));
+        state.Track(@"C:\b\child", new(30));
+        state.TryGetVersion(@"C:\a\child", out long aBefore).ShouldBeTrue();
+        state.TryGetVersion(@"C:\b\child", out long bBefore).ShouldBeTrue();
+
+        state.ApplyBuffer(Buffer(64, Entry(0, new(30), new(40), PInvoke.USN_REASON_HARD_LINK_CHANGE))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\a\child", out long aAfter).ShouldBeTrue();
+        aAfter.ShouldBe(aBefore, "A link under an untracked parent is irrelevant.");
+        state.ApplyBuffer(Buffer(128, Entry(64, new(30), new(10), PInvoke.USN_REASON_RENAME_OLD_NAME))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\a\child", out _).ShouldBeFalse();
+        state.TryGetVersion(@"C:\b\child", out long bAfter).ShouldBeTrue();
+        bAfter.ShouldBe(bBefore);
     }
 
     [WindowsOnlyFact]
-    public void QualificationMemoSkipsStableWalksAndRechecksAfterAnEpochChange()
+    public void MultipleParentIncarnationsConservativelyAffectAllTrackedLinks()
+    {
+        var state = CreateState();
+        state.Track(@"C:\a", new(10), enumerated: false);
+        state.Track(@"C:\b", new(10), enumerated: false);
+        state.Track(@"C:\a\child", new(30));
+        state.Track(@"C:\b\child", new(30));
+        state.ApplyBuffer(Buffer(64, Entry(0, new(30), new(10), PInvoke.USN_REASON_HARD_LINK_CHANGE))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\a\child", out _).ShouldBeFalse();
+        state.TryGetVersion(@"C:\b\child", out _).ShouldBeFalse();
+    }
+
+    [WindowsOnlyFact]
+    public void DirectChangesBeforeOrAtTheTrackedUsnDoNotInvalidateANewerSubscription()
+    {
+        var state = CreateState();
+        state.Track(@"C:\fixture", new(10), usn: 64);
+        state.TryGetVersion(@"C:\fixture", out long before).ShouldBeTrue();
+        state.ApplyBuffer(Buffer(128,
+            Entry(0, new(10), new(1), PInvoke.USN_REASON_REPARSE_POINT_CHANGE),
+            Entry(64, new(10), new(1), PInvoke.USN_REASON_REPARSE_POINT_CHANGE))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out long after).ShouldBeTrue();
+        after.ShouldBe(before);
+        state.ApplyBuffer(Buffer(192, Entry(128, new(10), new(1), PInvoke.USN_REASON_REPARSE_POINT_CHANGE))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out _).ShouldBeFalse();
+    }
+
+    [WindowsOnlyFact]
+    public void NativeZeroUsnDoesNotHideTheFirstDirectAncestorChange()
+    {
+        var state = CreateState();
+        state.Track(@"C:\fixture", new(10), usn: 0, enumerated: false);
+        state.Track(@"C:\fixture\child", new(11), usn: 0);
+        state.TryGetVersion(@"C:\fixture\child", out _).ShouldBeTrue();
+        state.ApplyBuffer(Buffer(64, Entry(0, new(10), new(1), PInvoke.USN_REASON_REPARSE_POINT_CHANGE))).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture\child", out _).ShouldBeFalse();
+    }
+
+    [WindowsOnlyTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FailedQualificationCannotLeaveAnIncompleteAnchorForADescendant(bool failDuringAncestorRegistration)
+    {
+        const string parent = @"C:\r\p";
+        const string child = @"C:\r\p\q";
+        var state = CreateState();
+        var journal = new DirectoryJournal();
+        var reader = new FakeReader { QuerySucceeds = _ => failDuringAncestorRegistration };
+        bool failAtRoot = true;
+        List<string> visited = [];
+        bool ReadAncestor(string path, out DirectoryJournal.Record record)
+        {
+            visited.Add(path);
+            record = path switch
+            {
+                @"C:\r\p" => new(64, new(30), new(20), 0, 0, 0x10),
+                @"C:\r" => new(64, new(20), new(1), 0, 0, 0x10),
+                @"C:\" => new(64, new(1), new(1), 0, 0, 0x10),
+                _ => throw new InvalidOperationException(path),
+            };
+            return !failAtRoot || path != @"C:\";
+        }
+        bool WalkParent(string path) => DirectoryJournal.TrackAncestors(path, new(20), state, ReadAncestor);
+        bool WalkChild(string path) => DirectoryJournal.TrackAncestors(path, new(30), state, ReadAncestor);
+
+        journal.Qualify(parent, Guid.Empty, new(30), state, reader, WalkParent, out _, usn: 0)
+            .ShouldBe(DirectoryStampStatus.Unavailable);
+        state.IsAnchored(parent, new(30)).ShouldBeFalse();
+        state.IsAnchored(@"C:\r", new(20)).ShouldBeFalse();
+
+        visited.Clear();
+        reader.QuerySucceeds = _ => true;
+        failAtRoot = false;
+        journal.Qualify(child, Guid.Empty, new(40), state, reader, WalkChild, out _, usn: 0)
+            .ShouldBe(DirectoryStampStatus.Available);
+        visited.ShouldBe([parent, @"C:\r", @"C:\"]);
+        state.IsAnchored(parent, new(30)).ShouldBeTrue();
+        state.IsAnchored(child, new(40)).ShouldBeTrue();
+
+        state.ApplyBuffer(Buffer(128, Entry(64, new(20), new(1), PInvoke.USN_REASON_RENAME_OLD_NAME))).ShouldBeTrue();
+        state.IsAnchored(child, new(40)).ShouldBeFalse();
+        state.TryGetVersion(child, out _).ShouldBeFalse();
+    }
+
+    [WindowsOnlyFact]
+    public void RetrackingAReplacedPathInvalidatesItsOldDescendantSubscriptions()
+    {
+        var state = CreateState();
+        state.Track(@"C:\fixture", new(10), enumerated: false);
+        state.Track(@"C:\fixture\child", new(11));
+        state.TryGetVersion(@"C:\fixture\child", out long before).ShouldBeTrue();
+        state.Track(@"C:\fixture", new(20), usn: 128, enumerated: false);
+        state.TryGetVersion(@"C:\fixture\child", out _).ShouldBeFalse();
+        state.Track(@"C:\fixture\child", new(21), usn: 128);
+        state.TryGetVersion(@"C:\fixture\child", out long after).ShouldBeTrue();
+        after.ShouldNotBe(before);
+    }
+
+    [WindowsOnlyFact]
+    public void QualificationMemoIgnoresUnrelatedChangesButRechecksAnInvalidatedListing()
     {
         var journal = new DirectoryJournal();
         var state = CreateState();
@@ -143,11 +266,14 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         walks.ShouldBe(1);
         state.ApplyBuffer(Buffer(64, Entry(0, new(20), new(30), PInvoke.USN_REASON_SECURITY_CHANGE | PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
         Qualify().ShouldBe(DirectoryStampStatus.Available);
+        walks.ShouldBe(1);
+        state.ApplyBuffer(Buffer(128, Entry(64, new(20), new(10), PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
+        Qualify().ShouldBe(DirectoryStampStatus.Available);
         walks.ShouldBe(2);
     }
 
     [WindowsOnlyFact]
-    public void EpochChangeDuringQualificationCannotSeedTheMemo()
+    public void PathInvalidationDuringQualificationCannotSeedTheMemo()
     {
         var journal = new DirectoryJournal();
         var state = CreateState();
@@ -157,7 +283,7 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         {
             if (++walks == 1)
             {
-                state.ApplyBuffer(Buffer(64, Entry(0, new(20), new(30),
+                state.ApplyBuffer(Buffer(64, Entry(0, new(10), new(30),
                     PInvoke.USN_REASON_REPARSE_POINT_CHANGE | PInvoke.USN_REASON_CLOSE))).ShouldBeTrue();
             }
             return true;
@@ -166,7 +292,7 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
 
         Qualify().ShouldBe(DirectoryStampStatus.Unavailable);
         Qualify().ShouldBe(DirectoryStampStatus.Available);
-        walks.ShouldBe(2, "An epoch change during the walk must not memoize the obsolete qualification.");
+        walks.ShouldBe(2, "A path invalidated during the walk must not memoize the obsolete qualification.");
         Qualify().ShouldBe(DirectoryStampStatus.Available);
         walks.ShouldBe(2);
     }
@@ -191,7 +317,9 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         var journal = new DirectoryJournal();
         var state = new DirectoryJournal.JournalState(new()
         {
-            UsnJournalID = 1, FirstUsn = 64, NextUsn = 128,
+            UsnJournalID = 1,
+            FirstUsn = 64,
+            NextUsn = 128,
         });
         var reader = new FakeReader
         {
@@ -211,11 +339,12 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     {
         var state = CreateState();
         DirectoryJournal.DirectoryId directory = new(10);
-        state.Track(directory);
+        state.Track(@"C:\fixture", directory);
+        state.TryGetVersion(@"C:\fixture", out long before).ShouldBeTrue();
         ulong epoch = state.Epoch;
         state.ApplyBuffer(Buffer(64, Entry(0, new(20), directory, PInvoke.USN_REASON_BASIC_INFO_CHANGE))).ShouldBeTrue();
-        state.TryGetVersion(directory, out long version).ShouldBeTrue();
-        version.ShouldBe(0);
+        state.TryGetVersion(@"C:\fixture", out long version).ShouldBeTrue();
+        version.ShouldBe(before);
         state.Epoch.ShouldBe(epoch);
     }
 
@@ -229,15 +358,17 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         if (initiallyEmpty)
         {
             reader.Head = _ => new() { UsnJournalID = 1 };
-            DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Available);
+            DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Available);
         }
         int firstQuery = reader.Queries;
         reader.Head = query => new()
         {
-            UsnJournalID = 1, NextUsn = 128, FirstUsn = query == firstQuery + 1 ? 0 : 32,
+            UsnJournalID = 1,
+            NextUsn = 128,
+            FirstUsn = query == firstQuery + 1 ? 0 : 32,
         };
         reader.ReadBuffer = _ => Buffer(128, Entry(64, new(20), new(10), PInvoke.USN_REASON_CLOSE));
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
         state.Disabled.ShouldBeTrue();
     }
 
@@ -250,10 +381,10 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
             Head = query => new() { UsnJournalID = 1, NextUsn = 64, FirstUsn = query <= 2 ? 0 : 32 },
             QuerySucceeds = query => query != 2,
         };
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
         state.Cursor.ShouldBe(64);
         state.Disabled.ShouldBeFalse();
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
         state.Disabled.ShouldBeTrue();
     }
 
@@ -266,10 +397,10 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
             Head = query => new() { UsnJournalID = 1, NextUsn = query == 1 ? 64 : 128 },
             ReadBuffer = start => start == 0 ? Buffer(64) : Buffer(128, Entry(64, new(20), new(10), PInvoke.USN_REASON_FILE_CREATE)),
         };
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Available);
         state.Cursor.ShouldBe(128);
         state.Disabled.ShouldBeFalse();
-        state.TryGetVersion(new(10), out _).ShouldBeFalse();
+        state.TryGetVersion(@"C:\fixture", out _).ShouldBeTrue();
     }
 
     [WindowsOnlyFact]
@@ -281,20 +412,20 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
             Head = query => new() { UsnJournalID = 1, NextUsn = query * 64 },
             ReadBuffer = start => Buffer(start + 64),
         };
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
         reader.Queries.ShouldBe(4);
         state.Disabled.ShouldBeFalse();
         reader.Head = _ => new() { UsnJournalID = 1, NextUsn = state.Cursor };
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Available);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Available);
 
         state = CreateState();
         reader.Head = _ => new() { UsnJournalID = 1, NextUsn = 128 };
         reader.ReadBuffer = start => Buffer(start + 64,
             Entry(start, new(20), new(10), PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_CLOSE));
-        DirectoryJournal.CatchUp(state, reader, new(10), out _, maximumReadBytes: 72).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _, maximumReadBytes: 72).ShouldBe(DirectoryStampStatus.Unavailable);
         state.Cursor.ShouldBe(64);
         state.Disabled.ShouldBeFalse();
-        DirectoryJournal.CatchUp(state, reader, new(10), out _, maximumReadBytes: 72).ShouldBe(DirectoryStampStatus.Available);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _, maximumReadBytes: 72).ShouldBe(DirectoryStampStatus.Available);
         state.Cursor.ShouldBe(128);
     }
 
@@ -308,13 +439,13 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
             ReadBuffer = start => Buffer(start),
         };
         DirectoryJournal.DirectoryId directory = new(10);
-        DirectoryJournal.CatchUp(state, reader, directory, out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", directory, out _).ShouldBe(DirectoryStampStatus.Unavailable);
         state.Cursor.ShouldBe(0);
         state.Disabled.ShouldBeFalse();
 
         reader.ReadBuffer = _ => Buffer(64, Entry(0, new(20), directory,
             PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_CLOSE));
-        DirectoryJournal.CatchUp(state, reader, directory, out long version).ShouldBe(DirectoryStampStatus.Available);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", directory, out long version).ShouldBe(DirectoryStampStatus.Available);
         version.ShouldBeGreaterThan(0);
     }
 
@@ -366,12 +497,12 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
             ReadBuffer = _ => throw new InvalidOperationException("Historical records must not be replayed at startup."),
         };
         DirectoryJournal.DirectoryId directory = new(10);
-        DirectoryJournal.CatchUp(state, reader, directory, out long before).ShouldBe(DirectoryStampStatus.Available);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", directory, out long before).ShouldBe(DirectoryStampStatus.Available);
 
         info.NextUsn = 192;
         reader.ReadBuffer = _ => Buffer(192, Entry(128, new(20), directory,
             PInvoke.USN_REASON_FILE_CREATE | PInvoke.USN_REASON_CLOSE));
-        DirectoryJournal.CatchUp(state, reader, directory, out long after).ShouldBe(DirectoryStampStatus.Available);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", directory, out long after).ShouldBe(DirectoryStampStatus.Available);
         after.ShouldBeGreaterThan(before);
     }
 
@@ -380,15 +511,17 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     {
         var state = new DirectoryJournal.JournalState(new()
         {
-            UsnJournalID = 1, FirstUsn = 64, NextUsn = 128,
+            UsnJournalID = 1,
+            FirstUsn = 64,
+            NextUsn = 128,
         });
         var reader = new FakeReader
         {
             Head = _ => new() { UsnJournalID = 1, FirstUsn = 96, LowestValidUsn = 64, NextUsn = 128 },
         };
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Available);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Available);
         reader.Head = _ => new() { UsnJournalID = 1, FirstUsn = 129, NextUsn = 192 };
-        DirectoryJournal.CatchUp(state, reader, new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
+        DirectoryJournal.CatchUp(state, reader, @"C:\fixture", new(10), out _).ShouldBe(DirectoryStampStatus.Unavailable);
         state.Disabled.ShouldBeTrue();
     }
 
@@ -401,10 +534,13 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
     {
         var state = new DirectoryJournal.JournalState(new()
         {
-            UsnJournalID = 1, FirstUsn = firstUsn, LowestValidUsn = lowestUsn, NextUsn = nextUsn,
+            UsnJournalID = 1,
+            FirstUsn = firstUsn,
+            LowestValidUsn = lowestUsn,
+            NextUsn = nextUsn,
         });
-        state.Track(new(10));
-        state.TryGetVersion(new(10), out _).ShouldBeFalse();
+        state.Track(@"C:\fixture", new(10));
+        state.TryGetVersion(@"C:\fixture", out _).ShouldBeFalse();
     }
 
     [WindowsOnlyFact]
@@ -465,10 +601,10 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         DirectoryJournal.DirectoryId parent = new(20);
         record.Parent.ShouldBe(parent);
         var state = CreateState();
-        state.Track(parent);
-        state.TryGetVersion(parent, out long before).ShouldBeTrue();
+        state.Track(@"C:\fixture", parent);
+        state.TryGetVersion(@"C:\fixture", out long before).ShouldBeTrue();
         state.ApplyBuffer(Buffer(128, fixture)).ShouldBeTrue();
-        state.TryGetVersion(parent, out long after).ShouldBeTrue();
+        state.TryGetVersion(@"C:\fixture", out long after).ShouldBeTrue();
         after.ShouldBeGreaterThan(before);
     }
 
@@ -487,6 +623,69 @@ public sealed class DirectoryJournal_Tests(ITestOutputHelper output)
         CreateState().ApplyBuffer(Buffer(128,
             Entry(64, new(10), new(20), PInvoke.USN_REASON_FILE_CREATE),
             Entry(32, new(30), new(20), PInvoke.USN_REASON_FILE_CREATE))).ShouldBeFalse();
+    }
+
+    [Fact(Skip = "Requires an accessible NTFS change journal.", SkipType = typeof(DirectoryJournal_Tests), SkipUnless = nameof(WindowsJournalAvailable))]
+    public void NativeUnrelatedRenamePreservesSharedGlobButMembershipAndAncestorChangesInvalidateIt()
+    {
+        using TestEnvironment env = TestEnvironment.Create(_output);
+        env.SetEnvironmentVariable("MSBUILDGLOBRESULTEXPERIMENT", "validated");
+        env.SetEnvironmentVariable("MSBUILDDIRECTORYCACHEEXCLUDEROOTS", null);
+        string root = env.CreateFolder().Path;
+        string input = Directory.CreateDirectory(Path.Combine(root, "input")).FullName;
+        string child = Directory.CreateDirectory(Path.Combine(input, "child")).FullName;
+        string unrelated = Directory.CreateDirectory(Path.Combine(root, "unrelated")).FullName;
+        File.WriteAllText(Path.Combine(child, "Old.cs"), "");
+        string external = Path.Combine(unrelated, "external.txt");
+        File.WriteAllText(external, "");
+        var cache = new DirectoryListingCache();
+        int enumerations = 0;
+        IReadOnlyList<string> Enumerate(FileMatcher.FileSystemEntity kind, string path, out bool succeeded)
+        {
+            enumerations++;
+            succeeded = true;
+            return kind switch
+            {
+                FileMatcher.FileSystemEntity.Files => Directory.GetFiles(path),
+                FileMatcher.FileSystemEntity.Directories => Directory.GetDirectories(path),
+                _ => Directory.GetFileSystemEntries(path),
+            };
+        }
+        string[] Query() => new FileMatcher(FileSystems.Default,
+            (kind, path, _, _, _) => Enumerate(kind, path, out _),
+            new ConcurrentDictionary<string, IReadOnlyList<string>>(),
+            directoryListingCache: cache, getFileSystemEntriesWithStatus: Enumerate).GetFiles(child, "*.cs").FileList;
+
+        try
+        {
+            Query().Length.ShouldBe(1);
+            int warmedEnumerations = enumerations;
+            long hits = GlobResultExperiment.GetStatistics()[1];
+            Query().Length.ShouldBe(1);
+            enumerations.ShouldBe(warmedEnumerations);
+            GlobResultExperiment.GetStatistics()[1].ShouldBeGreaterThan(hits);
+
+            File.Move(external, Path.Combine(unrelated, "renamed.txt"));
+            hits = GlobResultExperiment.GetStatistics()[1];
+            Query().Length.ShouldBe(1);
+            enumerations.ShouldBe(warmedEnumerations, "An owned rename outside the input must not invalidate its listing.");
+            GlobResultExperiment.GetStatistics()[1].ShouldBeGreaterThan(hits);
+
+            File.WriteAllText(Path.Combine(child, "New.cs"), "");
+            Query().Length.ShouldBe(2);
+            enumerations.ShouldBeGreaterThan(warmedEnumerations);
+
+            Directory.Move(input, input + "-old");
+            Directory.CreateDirectory(child);
+            File.WriteAllText(Path.Combine(child, "Replacement.cs"), "");
+            string[] actual = Query();
+            actual.Length.ShouldBe(1);
+            Path.GetFileName(actual[0]).ShouldBe("Replacement.cs");
+        }
+        finally
+        {
+            cache.Clear();
+        }
     }
 
     [Fact(Skip = "Requires an ordinary fixed-drive temporary directory.", SkipType = typeof(DirectoryJournal_Tests), SkipUnless = nameof(WindowsTemporaryDirectoryAvailable))]
