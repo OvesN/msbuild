@@ -15,6 +15,18 @@ The SDK is downloaded to the bootstrap folder.
 Fresh MSBuild bits are then copied to this folder.
 The constructed SDK is used for both local end-to-end tests and CI runs.
 
+Standalone builds create two SDK overlays with the freshly built MSBuild when the SDK versions differ. `bootstrap/core` uses
+`BootstrapSdkVersion` from `eng/Versions.props` for product tests. `bootstrap/build` uses the SDK
+selected by `global.json` for stage-2 self-builds, so Arcade's build tasks can use the newer runtime
+without moving the tests onto it. Each overlay uses its SDK's bundled runtime for MSBuild,
+worker nodes, and task hosts. The generated developer environment scripts also select `bootstrap/build`
+so builds from the repository resolve the SDK pinned by `global.json`. When both SDK versions are equal,
+only `bootstrap/core` is acquired and overlaid, and stage-2 builds and developer environment scripts reuse it.
+
+`MSBuildNetCoreRuntimeVersion` keeps the product's reference and apphost packs on .NET 11 even when the
+compilation SDK aliases `net11.0` to newer packs. Orchestrated .NET builds retain their own pack
+selection and create only the product overlay.
+
 ## Potential Cons
 The reliance on downloading the SDK from a remote source requires an internet connection. For the initial build of the repository, this doesn't change as the SDK is always downloaded to the .dotnet folder first. For subsequent runs, the SDK in bootstrap will be downloaded again only **if the requested version was changed**.
 

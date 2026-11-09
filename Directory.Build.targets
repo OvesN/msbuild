@@ -31,6 +31,59 @@
   <Import Project="Sdk.targets" Sdk="Microsoft.DotNet.Arcade.Sdk" />
   <Import Project="$(RepositoryEngineeringDir)packaging.targets" Condition="'$(IsPackable)' == 'true'" />
 
+  <!-- Early SDKs can map the previous TFM to their new runtime and reference packs. -->
+  <ItemGroup Condition="'$(DotNetBuild)' != 'true' and '$(MSBuildNetCoreRuntimeVersion)' != ''">
+    <KnownFrameworkReference Update="Microsoft.NETCore.App">
+      <DefaultRuntimeFrameworkVersion Condition="'%(TargetFramework)' == '$(LatestDotNetCoreForMSBuild)'">$(MSBuildNetCoreRuntimeVersion)</DefaultRuntimeFrameworkVersion>
+      <LatestRuntimeFrameworkVersion Condition="'%(TargetFramework)' == '$(LatestDotNetCoreForMSBuild)'">$(MSBuildNetCoreRuntimeVersion)</LatestRuntimeFrameworkVersion>
+      <TargetingPackVersion Condition="'%(TargetFramework)' == '$(LatestDotNetCoreForMSBuild)'">$(MSBuildNetCoreRuntimeVersion)</TargetingPackVersion>
+    </KnownFrameworkReference>
+    <KnownAppHostPack Update="Microsoft.NETCore.App">
+      <AppHostPackVersion Condition="'%(TargetFramework)' == '$(LatestDotNetCoreForMSBuild)'">$(MSBuildNetCoreRuntimeVersion)</AppHostPackVersion>
+    </KnownAppHostPack>
+  </ItemGroup>
+
+  <!-- Full MSBuild can be x86 even when the acquired bootstrap host is x64. -->
+  <Target Name="InitializeBootstrapTestArchitecture" BeforeTargets="_InitializeTestArchitectures"
+          Condition="'$(IsUnitTestProject)' == 'true' and '$(TargetFramework)' == '$(LatestDotNetCoreForMSBuild)' and '$(DotNetBuild)' != 'true' and '$(MSBuildNetCoreRuntimeVersion)' != '' and '$(SelfContained)' != 'true' and '$(StartAction)' != 'Program'">
+    <XmlPeek XmlInputPath="$([MSBuild]::NormalizePath('$(ArtifactsBinDir)', 'bootstrap', 'core', 'sdk', '$(BootstrapSdkVersion)', 'Microsoft.NETCoreSdk.BundledVersions.props'))"
+             Query="/Project/PropertyGroup/NETCoreSdkRuntimeIdentifier/text()">
+      <Output TaskParameter="Result" PropertyName="_BootstrapTestRuntimeIdentifier" />
+    </XmlPeek>
+    <PropertyGroup>
+      <DotNetToolArchitecture>$([System.Text.RegularExpressions.Regex]::Match('$(_BootstrapTestRuntimeIdentifier)', '[^-]+$').Value)</DotNetToolArchitecture>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="UseBootstrapTestRuntime" AfterTargets="ComputeRunArguments" DependsOnTargets="_InitializeTestArchitectures"
+          Condition="'$(IsUnitTestProject)' == 'true' and '$(TargetFramework)' == '$(LatestDotNetCoreForMSBuild)' and '$(DotNetBuild)' != 'true' and '$(MSBuildNetCoreRuntimeVersion)' != '' and '$(SelfContained)' != 'true'">
+    <PropertyGroup>
+      <TestDotNetRoot Condition="'$(TestDotNetRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(ArtifactsBinDir)', 'bootstrap', 'core'))</TestDotNetRoot>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(StartAction)' != 'Program' and ('$(RunCommand)' == 'dotnet' or '$(RunCommand)' == '$(TargetDir)$(AssemblyName)$(_NativeExecutableExtension)')">
+      <RunArguments Condition="'$(UseAppHost)' == 'true'">"$(TargetPath)" $(RunArguments)</RunArguments>
+      <RunCommand>$([MSBuild]::NormalizePath('$(ArtifactsBinDir)', 'bootstrap', 'core', 'dotnet'))</RunCommand>
+      <RunCommand Condition="'$(OS)' == 'Windows_NT'">$(RunCommand).exe</RunCommand>
+      <_BootstrapTestHost>$(RunCommand)</_BootstrapTestHost>
+      <RunCommand Condition="'$(_BuiltTestArchitecture)' != '$(_DotNetToolArchitecture)'">$([MSBuild]::NormalizePath('$(ArtifactsBinDir)', 'bootstrap', 'core', '$(_BuiltTestArchitecture)', '$([System.IO.Path]::GetFileName($(_BootstrapTestHost)))'))</RunCommand>
+      <_BootstrapTestRunCommand>$(RunCommand)</_BootstrapTestRunCommand>
+    </PropertyGroup>
+  </Target>
+
+  <!-- Retain Arcade's per-architecture selection after replacing the apphost or muxer. -->
+  <Target Name="UseBootstrapTestArchitectures" BeforeTargets="RunTests"
+          Condition="'$(_BootstrapTestHost)' != ''">
+    <PropertyGroup>
+      <DotNetTool>$(_BootstrapTestHost)</DotNetTool>
+    </PropertyGroup>
+    <ItemGroup>
+      <TestToRun Update="@(TestToRun)" Condition="'%(TestToRun.RunCommand)' == '$(_BootstrapTestRunCommand)'">
+        <UseDefaultDotNetRunCommand>true</UseDefaultDotNetRunCommand>
+        <DotNetHostRoot>$([MSBuild]::NormalizeDirectory('$(ArtifactsBinDir)', 'bootstrap', 'core'))</DotNetHostRoot>
+      </TestToRun>
+    </ItemGroup>
+  </Target>
+
   <!-- Put it after Sdk.targets imports to override values from StrongName.targets. It's needed to avoid NGEN validation issues on VS exp insertions.  -->
   <PropertyGroup Condition="'$(SignType)' == 'test'">
     <!-- Remove open source signing -->

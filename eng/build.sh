@@ -130,9 +130,16 @@ if [ -d "$stage1_dir/log" ]; then
   cp -rf "$stage1_dir/log" "$artifacts_dir/" || true
 fi
 
-build_tool_path="$bootstrap_root/core/dotnet"
+build_sdk_version="$(sed -n 's/.*"dotnet": "\([^"]*\)".*/\1/p' "$repo_root/global.json")"
+bootstrap_sdk_version="$(sed -n 's/.*<BootstrapSdkVersion>\(.*\)<\/BootstrapSdkVersion>.*/\1/p' "$scriptroot/Versions.props")"
+bootstrap_build_root="$bootstrap_root/core"
+if [[ "$build_sdk_version" != "$bootstrap_sdk_version" ]]; then
+  bootstrap_build_root="$bootstrap_root/build"
+fi
+
+build_tool_path="$bootstrap_build_root/dotnet"
 build_tool_command="msbuild"
-export DOTNET_ROOT="$bootstrap_root/core"
+export DOTNET_ROOT="$bootstrap_build_root"
 
 # Communicate the bootstrapped build tool to the (out-of-proc) stage 2 build.sh via environment
 # variables so it does not require sourcing tools.sh here. tools.sh's InitializeBuildTool
@@ -146,12 +153,9 @@ export MSBUILDDONOTLAUNCHDEBUGGER=true
 # Opt into performance logging.
 export DOTNET_PERFLOG_DIR="$perf_log_dir"
 
-# Point child processes (stage 2 build.sh, tests, and the MSBuild grandchildren they spawn) at the
-# freshly-built bootstrap .NET host, so task hosts launch with the bits under test. This matches
-# DOTNET_ROOT and the bootstrap's own expectation that tests invoke the
-# bootstrap dotnet (see eng/BootStrapMsBuild.targets).
-export DOTNET_HOST_PATH="$bootstrap_root/core/dotnet"
-export DOTNET_INSTALL_DIR="$bootstrap_root/core"
+# Build tooling uses the newer SDK overlay; the test runner selects the product/test overlay.
+export DOTNET_HOST_PATH="$bootstrap_build_root/dotnet"
+export DOTNET_INSTALL_DIR="$bootstrap_build_root"
 
 stage2_build_args=( "${common_build_args[@]}" )
 

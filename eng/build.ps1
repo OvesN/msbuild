@@ -160,6 +160,12 @@ if (Test-Path $stage1LogDir) {
 
 # Mirror of tools.ps1 GetDefaultMSBuildEngine: presence of tools.vs => 'vs', else tools.dotnet => 'dotnet'.
 $GlobalJson = Get-Content -Raw -Path (Join-Path $RepoRoot 'global.json') | ConvertFrom-Json
+$bootstrapSdkVersion = (Select-Xml -Path (Join-Path $PSScriptRoot 'Versions.props') -XPath '/Project/PropertyGroup/BootstrapSdkVersion').Node.InnerText
+$BootstrapBuildRoot = Join-Path $BootstrapRoot 'core'
+if ($GlobalJson.tools.dotnet -ne $bootstrapSdkVersion) {
+  $BootstrapBuildRoot = Join-Path $BootstrapRoot 'build'
+}
+
 if (-not $msbuildEngine) {
   if (Get-Member -InputObject $GlobalJson.tools -Name 'vs') {
     $msbuildEngine = 'vs'
@@ -178,9 +184,9 @@ if ($msbuildEngine -eq 'vs')
 }
 else
 {
-  $buildToolPath = "$BootstrapRoot\core\dotnet.exe"
+  $buildToolPath = Join-Path $BootstrapBuildRoot 'dotnet.exe'
   $buildToolCommand = "msbuild"
-  $env:DOTNET_ROOT="$BootstrapRoot\core"
+  $env:DOTNET_ROOT=$BootstrapBuildRoot
 }
 
 # Communicate the bootstrapped build tool to the (out-of-proc) stage 2 build.ps1 via environment
@@ -195,13 +201,9 @@ $env:MSBUILDDONOTLAUNCHDEBUGGER="true"
 # Opt into performance logging. https://github.com/dotnet/msbuild/issues/5900
 $env:DOTNET_PERFLOG_DIR=$PerfLogDir
 
-# Point child processes (stage 2 build.ps1, tests, and the MSBuild grandchildren they spawn, notably
-# net472 x86 testhosts invoking .NET Core MSBuild → /mt → sidecar TaskHost) at the freshly-built
-# bootstrap .NET host, so task hosts launch with the bits under test. This matches DOTNET_ROOT (set
-# above for the core engine) and the bootstrap's own expectation that tests invoke the bootstrap dotnet
-# (see eng/BootStrapMsBuild.targets).
-$env:DOTNET_HOST_PATH = Join-Path $BootstrapRoot 'core\dotnet.exe'
-$env:DOTNET_INSTALL_DIR = Join-Path $BootstrapRoot 'core'
+# Build tooling uses the newer SDK overlay; the test runner selects the product/test overlay.
+$env:DOTNET_HOST_PATH = Join-Path $BootstrapBuildRoot 'dotnet.exe'
+$env:DOTNET_INSTALL_DIR = $BootstrapBuildRoot
 
 # $stage2Argument are appended to the stage 2 build only.
 # Use this for switches like /mt that should not be passed to the stage1 build

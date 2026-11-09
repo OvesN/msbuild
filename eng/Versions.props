@@ -72,6 +72,8 @@
     <MicrosoftCodeAnalysisPooledObjectsVersion>5.0.0-1.25277.114</MicrosoftCodeAnalysisPooledObjectsVersion>
 
     <BootstrapSdkVersion>11.0.100-rc.3.26522.148</BootstrapSdkVersion>
+    <!-- Compile against the product runtime's packs, not the newer SDK's TFM aliases. -->
+    <MSBuildNetCoreRuntimeVersion Condition="'$(DotNetBuild)' != 'true'">11.0.0-rc.2.26504.105</MSBuildNetCoreRuntimeVersion>
   </PropertyGroup>
 
   <Target Name="OverrideArcadeFileVersion" AfterTargets="_InitializeAssemblyVersion">
